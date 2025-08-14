@@ -100,9 +100,53 @@ bool is_xhtml(const std::wstring& file_path)
     return ext == L"xhtml";
 }
 
+void EnableClearType()
+{
+    BOOL ct = FALSE;
+    SystemParametersInfoW(SPI_GETCLEARTYPE, 0, &ct, 0);
+    if (!ct)
+        SystemParametersInfoW(SPI_SETCLEARTYPE, TRUE, 0, SPIF_UPDATEINIFILE);
+}
+static HFONT CreateFontBetter(const wchar_t* faceW, int size, int weight,
+    bool italic, HDC hdcForDpi)
+{
+    LOGFONTW lf = { 0 };
+    lf.lfHeight = -MulDiv(size, GetDeviceCaps(hdcForDpi, LOGPIXELSY), 72);
+    lf.lfWeight = weight;
+    lf.lfItalic = italic ? TRUE : FALSE;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
+    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+    lf.lfQuality = CLEARTYPE_QUALITY;          // ← 关键
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
+    wcscpy_s(lf.lfFaceName, LF_FACESIZE,
+        (faceW && *faceW) ? faceW : L"Microsoft YaHei");
+
+    // 让系统根据 FontLink 自动 fallback（中文、日文、符号都能匹配）
+    return CreateFontIndirectW(&lf);
+}
+// 创建字体时顺带把度量算好
 struct FontWrapper {
-    HFONT hFont;
-    explicit FontWrapper(HFONT f) : hFont(f) {}
+    HFONT hFont = nullptr;
+    int   height = 0;
+    int   ascent = 0;
+    int   descent = 0;
+
+    explicit FontWrapper(const wchar_t* face, int size, int weight, bool italic)
+    {
+        HDC hdc = GetDC(nullptr);                    // 临时 HDC
+        hFont = CreateFontBetter(face, size, weight, italic, hdc);
+        if (hFont) {
+            HGDIOBJ old = SelectObject(hdc, hFont);
+            TEXTMETRICW tm{};
+            GetTextMetricsW(hdc, &tm);
+            height = tm.tmHeight;
+            ascent = tm.tmAscent;
+            descent = tm.tmDescent;
+            SelectObject(hdc, old);
+        }
+        ReleaseDC(nullptr, hdc);
+    }
     ~FontWrapper() { if (hFont) DeleteObject(hFont); }
 };
 
@@ -592,21 +636,8 @@ private:
     std::wstring m_root;
 
     std::unordered_map<std::string, std::shared_ptr<Gdiplus::Image>> m_img_cache;
-    static std::wstring resolve_url(const std::string& url_utf8)
-    {
-        namespace fs = std::filesystem;
 
-        // 1. 先把当前目录和 url 拼起来
-        fs::path base(g_currentHtmlDir);                // wstring 已 UTF-16
-        fs::path rel = fs::path(url_utf8);           // url 转成 UTF-16 的 path
 
-        // 2. 组合后 lexically_normal 会自动折叠 . 和 ..
-        fs::path full = (base / rel).lexically_normal();
-
-        // 3. 保证使用正斜杠，方便后续 zip 内路径比较
-        std::wstring result = full.generic_wstring();   // 形如 "epub/css/local.css"
-        return result;
-    }
 };
 
 
@@ -1006,7 +1037,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
-
+    EnableClearType();
     ShowWindow(g_hWnd, n);
     UpdateWindow(g_hWnd);
     MSG msg{};
@@ -1165,38 +1196,19 @@ void SimpleContainer::draw_background(litehtml::uint_ptr hdc,
         }
     }
 }
-litehtml::uint_ptr SimpleContainer::create_font(const char* faceName, int size, int weight,
-    litehtml::font_style italic, unsigned int decoration,
-    litehtml::font_metrics* fm)  {
+litehtml::uint_ptr SimpleContainer::create_font(const char* faceName, int size,
+    int weight, litehtml::font_style italic, unsigned int,
+    litehtml::font_metrics* fm)
+{
     std::wstring wFace = a2w(faceName ? faceName : "");
-
-    HFONT hFont = CreateFontW(
-        -MulDiv(size, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72),
-        0, 0, 0,
-        weight,
-        italic != litehtml::font_style_normal ? TRUE : FALSE,
-        FALSE, FALSE,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY,
-        DEFAULT_PITCH | FF_SWISS,
-        wFace.empty() ? L"Microsoft YaHei" : wFace.c_str());
-    if (!hFont) return 0;
-
-    // 计算字体度量
-    HDC hdc = GetDC(nullptr);
-    HGDIOBJ old = SelectObject(hdc, hFont);
-    TEXTMETRICW tm{};  
-    GetTextMetricsW(hdc, &tm);
-    SelectObject(hdc, old);
-    ReleaseDC(nullptr, hdc);
-
-    fm->height = tm.tmHeight;
-    fm->ascent = tm.tmAscent;
-    fm->descent = tm.tmDescent;
-
-    auto* fw = new std::shared_ptr<FontWrapper>(new FontWrapper(hFont));
+    auto fw = new std::shared_ptr<FontWrapper>(
+        new FontWrapper(wFace.c_str(), size, weight,
+            italic != litehtml::font_style_normal));
+    if (fm && *fw) {
+        fm->height = (*fw)->height;
+        fm->ascent = (*fw)->ascent;
+        fm->descent = (*fw)->descent;
+    }
     return reinterpret_cast<litehtml::uint_ptr>(fw);
 }
 
