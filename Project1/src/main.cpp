@@ -1,4 +1,4 @@
-// main.cpp  ¡ª¡ª  ÓÅ»¯ºóÍêÕûµ¥ÎÄ¼ş
+ï»¿// main.cpp  â€”â€”  ä¼˜åŒ–åå®Œæ•´å•æ–‡ä»¶
 #define _WINSOCKAPI_
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -37,25 +37,36 @@ using namespace Gdiplus;
 #include <regex>
 #pragma comment(lib, "shlwapi.lib")
 
-HWND  g_hwndTV = nullptr;    // ²à±ßÀ¸ TreeView
-HIMAGELIST g_hImg = nullptr;   // Í¼±ê(¿ÉÑ¡)
+#include <unordered_map>
+#include <filesystem>
+#include <algorithm>
+#include <string>
+
+HWND  g_hwndTV = nullptr;    // ä¾§è¾¹æ  TreeView
+HIMAGELIST g_hImg = nullptr;   // å›¾æ ‡(å¯é€‰)
 HWND      g_hWnd;
-HWND g_hStatus = nullptr;   // ×´Ì¬À¸¾ä±ú
+HWND g_hStatus = nullptr;   // çŠ¶æ€æ å¥æŸ„
 HWND g_hView = nullptr;
+std::wstring g_currentHtmlDir = L"";
 void UpdateCache(void);
 struct GdiplusDeleter { void operator()(Gdiplus::Image* p) const { delete p; } };
 using ImagePtr = std::unique_ptr<Gdiplus::Image, GdiplusDeleter>;
-// ---------- ¹¤¾ß ----------
-static std::string w2a(const std::wstring& s) {
+// ---------- å·¥å…· ----------
+static std::string w2a(const std::wstring& s)
+{
+    if (s.empty()) return {};
     int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string out(len, 0);
-    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, out.data(), len, nullptr, nullptr);
+    std::string out(len - 1, 0);                 // å»æ‰æœ«å°¾ '\0'
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, &out[0], len, nullptr, nullptr);
     return out;
 }
-static std::wstring a2w(const std::string& s) {
+
+static std::wstring a2w(const std::string& s)
+{
+    if (s.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring out(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), len);
+    std::wstring out(len - 1, 0);                // å»æ‰æœ«å°¾ '\0'
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &out[0], len);
     return out;
 }
 
@@ -65,7 +76,7 @@ static std::wstring utf8_to_utf16(const std::string& src)
     int len = MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, nullptr, 0);
     std::wstring dst(len, 0);
     MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, &dst[0], len);
-    // È¥µôÄ©Î²µÄ L'\0'
+    // å»æ‰æœ«å°¾çš„ L'\0'
     while (!dst.empty() && dst.back() == L'\0') dst.pop_back();
     return dst;
 }
@@ -77,15 +88,15 @@ bool is_xhtml(const std::wstring& file_path)
 
     std::wstring ext = file_path.substr(dot + 1);
 
-    // 1. Ğ¡Ğ´
+    // 1. å°å†™
     std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
 
-    // 2. È¥µô¿ØÖÆ×Ö·û
+    // 2. å»æ‰æ§åˆ¶å­—ç¬¦
     ext.erase(std::remove_if(ext.begin(), ext.end(),
         [](wchar_t c) { return c < 32 || c > 126; }),
         ext.end());
 
-    // 3. ±È½Ï
+    // 3. æ¯”è¾ƒ
     return ext == L"xhtml";
 }
 
@@ -99,7 +110,7 @@ inline void SetStatus(const wchar_t* msg) {
     SendMessage(g_hStatus, SB_SETTEXT, 0, (LPARAM)msg);
 }
 
-// -------------- ĞÂÔöÊı¾İ½á¹¹ --------------
+// -------------- æ–°å¢æ•°æ®ç»“æ„ --------------
 struct OCFItem {
     std::wstring id, href, media_type, properties;
 };
@@ -111,8 +122,8 @@ struct OCFNavPoint {
     int order = 0;
 };
 struct OCFPackage {
-    std::wstring rootfile;                // OPF ¾ø¶ÔÂ·¾¶
-    std::wstring opf_dir;                 // Ä¿Â¼£¬´ø '/'
+    std::wstring rootfile;                // OPF ç»å¯¹è·¯å¾„
+    std::wstring opf_dir;                 // ç›®å½•ï¼Œå¸¦ '/'
     std::vector<OCFItem>   manifest;
     std::vector<OCFRef>    spine;
     std::vector<OCFNavPoint> toc;
@@ -128,12 +139,12 @@ struct TreeNode {
 static std::vector<TreeNode> BuildTree(const std::vector<OCFNavPoint>& flat)
 {
     std::vector<TreeNode> roots;
-    std::vector<TreeNode*> stack;          // ³äµ±¡°µ±Ç°¸¸½ÚµãÕ»¡±
-    stack.push_back(nullptr);              // Õ»µ×£º¸ù²ã
+    std::vector<TreeNode*> stack;          // å……å½“â€œå½“å‰çˆ¶èŠ‚ç‚¹æ ˆâ€
+    stack.push_back(nullptr);              // æ ˆåº•ï¼šæ ¹å±‚
 
     for (const auto& np : flat)
     {
-        // ¸ù¾İ order ¾ö¶¨Õ»Éî¶È
+        // æ ¹æ® order å†³å®šæ ˆæ·±åº¦
         while (stack.size() > static_cast<size_t>(np.order + 1))
             stack.pop_back();
 
@@ -143,11 +154,82 @@ static std::vector<TreeNode> BuildTree(const std::vector<OCFNavPoint>& flat)
         else
             roots.push_back(std::move(node));
 
-        stack.push_back(&roots.back());    // ĞÂ½ÚµãÈëÕ»
+        stack.push_back(&roots.back());    // æ–°èŠ‚ç‚¹å…¥æ ˆ
     }
     return roots;
 }
-// ---------- EPUB Áã½âÑ¹ ----------
+
+namespace fs = std::filesystem;
+
+class ZipIndexW {
+public:
+    ZipIndexW() = default;
+    explicit ZipIndexW( mz_zip_archive& zip) { build(zip); }
+
+    // è¾“å…¥/è¾“å‡ºå‡ä¸º std::wstring
+    std::wstring find(std::wstring href) const {
+        std::wstring key = normalize_key(href);
+        auto it = map_.find(key);
+        return it == map_.end() ? std::wstring{} : it->second;
+    }
+
+private:
+    /* ---------- å¤§å°å†™ä¸æ•æ„Ÿå“ˆå¸Œ/æ¯”è¾ƒ ---------- */
+    struct StringHashI {
+        size_t operator()(std::wstring s) const noexcept {
+            size_t h = 0;
+            for (wchar_t c : s)
+                h = h * 131 + towlower(static_cast<wint_t>(c));
+            return h;
+        }
+    };
+    struct StringEqualI {
+        bool operator()(std::wstring a, std::wstring b) const noexcept {
+            return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                [](wchar_t c1, wchar_t c2) {
+                    return towlower(static_cast<wint_t>(c1)) ==
+                        towlower(static_cast<wint_t>(c2));
+                });
+        }
+    };
+
+    using Map = std::unordered_map<std::wstring, std::wstring,
+        StringHashI, StringEqualI>;
+
+    Map map_;
+
+
+
+    /* ---------- æ­£è§„åŒ–è·¯å¾„ ---------- */
+    static std::wstring normalize_key(std::wstring href) {
+        // å»æ‰ ? å’Œ # ä¹‹åçš„æ‰€æœ‰å†…å®¹
+        auto pure = href.substr(0, href.find_first_of(L"?#"));
+
+        // ç›´æ¥å–æ–‡ä»¶åå¹¶è½¬å°å†™
+        auto filename = fs::path(pure).filename().wstring();
+        std::transform(filename.begin(), filename.end(), filename.begin(),
+            [](wchar_t c) { return towlower(static_cast<wint_t>(c)); });
+        return filename;
+    }
+
+    /* ---------- å»ºç«‹ç´¢å¼• ---------- */
+    void build( mz_zip_archive& zip) {
+        mz_uint idx = 0;
+        mz_zip_archive_file_stat st{};
+        while (mz_zip_reader_file_stat(&zip, idx++, &st)) {
+            // miniz è¿”å› UTF-8ï¼Œè½¬æˆ wstring
+            std::wstring wpath = a2w(st.m_filename);
+            std::wstring key = normalize_key(wpath);
+            map_.emplace(std::move(key), std::move(wpath));
+        }
+    }
+
+    
+
+};
+
+ZipIndexW zip_index;
+// ---------- EPUB é›¶è§£å‹ ----------
 struct EPUBBook {
     struct MemFile {
         std::vector<uint8_t> data;
@@ -157,11 +239,11 @@ struct EPUBBook {
     mz_zip_archive zip = {};
     std::map<std::wstring, MemFile> cache;
 
-    // -------------- EPUBBook ÄÚ²¿ĞÂÔö³ÉÔ± --------------
-    OCFPackage ocf_pkg_;                     // ½âÎö½á¹û
-    void parse_ocf_(void);                       // Ö÷½âÎöÈë¿Ú
-    void parse_opf_(void);   // ½âÎö OPF
-    void parse_toc_(void);                        // ½âÎö TOC
+    // -------------- EPUBBook å†…éƒ¨æ–°å¢æˆå‘˜ --------------
+    OCFPackage ocf_pkg_;                     // è§£æç»“æœ
+    void parse_ocf_(void);                       // ä¸»è§£æå…¥å£
+    void parse_opf_(void);   // è§£æ OPF
+    void parse_toc_(void);                        // è§£æ TOC
     void LoadToc(void);
     void OnTreeSelChanged(const wchar_t* href);
     bool load(const wchar_t* epub_path);
@@ -208,12 +290,12 @@ struct EPUBBook {
     {
         if (!a) return L"";
 
-        // 1. ÄÃµ½ <a> µÄÍêÕû XML ×Ö·û´®
+        // 1. æ‹¿åˆ° <a> çš„å®Œæ•´ XML å­—ç¬¦ä¸²
         tinyxml2::XMLPrinter printer;
         a->Accept(&printer);
         std::string xml = printer.CStr();   // "<a ...><span ...>I</span>: The Meadow</a>"
 
-        // 2. È¥µô×îÍâ²ã <a ...> ºÍ </a>
+        // 2. å»æ‰æœ€å¤–å±‚ <a ...> å’Œ </a>
         size_t start = xml.find('>') + 1;
         size_t end = xml.rfind('<');
         if (start == std::string::npos || end == std::string::npos || end <= start)
@@ -221,13 +303,13 @@ struct EPUBBook {
 
         std::string inner = xml.substr(start, end - start);   // "<span ...>I</span>: The Meadow"
 
-        // 3. ¼òµ¥°şµôËùÓĞ±êÇ©£¨ÕıÔò»òÊÖĞ´£©
+        // 3. ç®€å•å‰¥æ‰æ‰€æœ‰æ ‡ç­¾ï¼ˆæ­£åˆ™æˆ–æ‰‹å†™ï¼‰
         std::regex tag_re("<[^>]*>");
         std::string plain = std::regex_replace(inner, tag_re, "");
 
         return a2w(plain);   // "I: The Meadow"
     }
-    // µİ¹é½âÎö EPUB3-Nav <ol>
+    // é€’å½’è§£æ EPUB3-Nav <ol>
     static void parse_nav_list(tinyxml2::XMLElement* ol, int level,
         const std::string& opf_dir,
         std::vector<OCFNavPoint>& out)
@@ -242,17 +324,17 @@ struct EPUBBook {
             np.label = extract_text(a);
             np.href = a2w(a->Attribute("href") ? a->Attribute("href") : "");
             if (!np.href.empty())
-                np.href = a2w(resolve_path(opf_dir, w2a(np.href)));
-            np.order = level;               // ²ã¼¶Éî¶È
+                np.href = zip_index.find(np.href);
+            np.order = level;               // å±‚çº§æ·±åº¦
             out.emplace_back(std::move(np));
 
-            // µİ¹é×Ó <ol>
+            // é€’å½’å­ <ol>
             if (auto* sub = li->FirstChildElement("ol"))
                 parse_nav_list(sub, level + 1, opf_dir, out);
         }
     }
 
-    // µİ¹é½âÎö NCX <navPoint>
+    // é€’å½’è§£æ NCX <navPoint>
     static void parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
         const std::string& opf_dir,
         std::vector<OCFNavPoint>& out)
@@ -269,16 +351,18 @@ struct EPUBBook {
             np.label = txt ? extract_text(txt) : L"";
             np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
             if (!np.href.empty())
-                np.href = a2w(resolve_path(opf_dir, w2a(np.href)));
-            np.order = level;               // ²ã¼¶Éî¶È
+                np.href = zip_index.find(np.href);
+            np.order = level;               // å±‚çº§æ·±åº¦
             out.emplace_back(std::move(np));
 
-            // µİ¹é×Ó <navPoint>
+            // é€’å½’å­ <navPoint>
             parse_ncx_points(pt->FirstChildElement("navPoint"), level + 1, opf_dir, out);
         }
     }
 
+   
 
+    EPUBBook() noexcept {}
     ~EPUBBook() { mz_zip_reader_end(&zip); }
 };
 
@@ -286,7 +370,7 @@ struct EPUBBook {
 EPUBBook::MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
     MemFile mf;
 
-    // 2.1 ÏÈ°´¸ø¶¨¿íÂ·¾¶ÕÒ
+    // 2.1 å…ˆæŒ‰ç»™å®šå®½è·¯å¾„æ‰¾
     std::string narrow_name = w2a(file_name);
     size_t uncomp_size = 0;
     void* p = mz_zip_reader_extract_file_to_heap(
@@ -294,7 +378,7 @@ EPUBBook::MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
         narrow_name.c_str(),
         &uncomp_size, 0);
 
-    // 2.2 Ã»ÕÒµ½ && ÊÇÏà¶ÔÂ·¾¶£¬ÔÙÆ´Ò»´Î opf_dir
+    // 2.2 æ²¡æ‰¾åˆ° && æ˜¯ç›¸å¯¹è·¯å¾„ï¼Œå†æ‹¼ä¸€æ¬¡ opf_dir
     if (!p && file_name[0] != L'/' && !ocf_pkg_.opf_dir.empty()) {
         std::wstring abs = ocf_pkg_.opf_dir + file_name;
         std::string narrow_abs = w2a(abs);
@@ -313,6 +397,8 @@ EPUBBook::MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
 }
 
 std::string EPUBBook::load_html(const std::wstring& path) const {
+    namespace fs = std::filesystem;
+    g_currentHtmlDir = fs::path(path).parent_path().wstring();
     auto it = cache.find(path);
     if (it != cache.end()) return std::string(it->second.begin(), it->second.size());
     EPUBBook::MemFile mf = read_zip(path.c_str());
@@ -323,15 +409,15 @@ std::string EPUBBook::load_html(const std::wstring& path) const {
 bool EPUBBook::load(const wchar_t* epub_path) {
     namespace fs = std::filesystem;
     if (!fs::exists(epub_path))
-        throw std::runtime_error("ÎÄ¼ş²»´æÔÚ");
+        throw std::runtime_error("æ–‡ä»¶ä¸å­˜åœ¨");
 
-    mz_zip_reader_end(&zip);           // 1. ÏÈ¹Ø±Õ¾É zip
+    mz_zip_reader_end(&zip);           // 1. å…ˆå…³é—­æ—§ zip
     memset(&zip, 0, sizeof(zip));
 
     if (!mz_zip_reader_init_file(&zip, w2a(epub_path).c_str(), 0))
-        throw std::runtime_error("zip ´ò¿ªÊ§°Ü£º" +
+        throw std::runtime_error("zip æ‰“å¼€å¤±è´¥ï¼š" +
             std::to_string(mz_zip_get_last_error(&zip)));
-
+    zip_index = ZipIndexW(zip);
     parse_ocf_();
     parse_opf_();
     parse_toc_();
@@ -341,9 +427,9 @@ bool EPUBBook::load(const wchar_t* epub_path) {
 }
 
 
-// -------------- ÊµÏÖ£¨Ö±½ÓÕ³µ½ EPUBBook Ä©Î²¼´¿É£© --------------
+// -------------- å®ç°ï¼ˆç›´æ¥ç²˜åˆ° EPUBBook æœ«å°¾å³å¯ï¼‰ --------------
 void EPUBBook::parse_ocf_() {
-    ocf_pkg_ = {};  // Çå¿Õ
+    ocf_pkg_ = {};  // æ¸…ç©º
     auto container = read_zip(L"META-INF/container.xml");
     if (container.data.empty()) return;
 
@@ -382,9 +468,9 @@ void EPUBBook::parse_opf_() {
         item.properties = a2w(it->Attribute("properties") ? it->Attribute("properties") : "");
 
 
-        // Ö»ÔÚ href ·Ç¿ÕÊ±Æ´¾ø¶ÔÂ·¾¶
+        // åªåœ¨ href éç©ºæ—¶æ‹¼ç»å¯¹è·¯å¾„
         if (!item.href.empty())
-            item.href = resolve_path_w(ocf_pkg_.opf_dir, item.href);
+            item.href = zip_index.find(item.href);
 
         ocf_pkg_.manifest.emplace_back(std::move(item));
     }
@@ -393,18 +479,18 @@ void EPUBBook::parse_opf_() {
     auto* spine = doc.RootElement()
         ? doc.RootElement()->FirstChildElement("spine")
         : nullptr;
-    // ÏÈ°Ñ manifest ×ö³É id -> href µÄÓ³Éä
+    // å…ˆæŠŠ manifest åšæˆ id -> href çš„æ˜ å°„
     std::unordered_map<std::wstring, std::wstring> id2href;
     for (const auto& m : ocf_pkg_.manifest)
         id2href[m.id] = m.href;
 
-    // ÔÙ½âÎö spine
+    // å†è§£æ spine
     for (auto* it = spine ? spine->FirstChildElement("itemref") : nullptr;
         it; it = it->NextSiblingElement("itemref")) {
 
         OCFRef ref;
         ref.idref = a2w(it->Attribute("idref") ? it->Attribute("idref") : "");
-        ref.href = id2href[ref.idref];   // Ö±½ÓÌî½øÈ¥
+        ref.href = id2href[ref.idref];   // ç›´æ¥å¡«è¿›å»
         ref.linear = a2w(it->Attribute("linear") ? it->Attribute("linear") : "yes");
         ocf_pkg_.spine.emplace_back(std::move(ref));
     }
@@ -466,82 +552,26 @@ void EPUBBook::parse_toc_()
     }
 }
 
-// ---------- LiteHtml ÈİÆ÷ ----------
+// ---------- LiteHtml å®¹å™¨ ----------
 class SimpleContainer : public litehtml::document_container {
 public:
     explicit SimpleContainer(const std::wstring& root) : m_root(root) {}
     void clear_images() { m_img_cache.clear(); }
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight,
-        litehtml::font_style italic, unsigned int decoration,
-        litehtml::font_metrics* fm) override {
-        HFONT hFont = CreateFontA(
-            -MulDiv(size, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72),
-            0, 0, 0, weight, italic != litehtml::font_style_normal,
-            FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH, faceName);
-        if (!hFont) return 0;
+    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
+    void delete_font(litehtml::uint_ptr h) override;
+    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+    void load_image(const char* src, const char* /*baseurl*/, bool) override;
 
-        // ¼ÆËã×ÖÌå¶ÈÁ¿
-        HDC hdc = GetDC(nullptr);
-        HGDIOBJ old = SelectObject(hdc, hFont);
-        TEXTMETRICA tm{};
-        GetTextMetricsA(hdc, &tm);
-        SelectObject(hdc, old);
-        ReleaseDC(nullptr, hdc);
+    void get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
+    void get_client_rect(litehtml::position& client) const override;
+    litehtml::element::ptr create_element(const char*, const litehtml::string_map&, const std::shared_ptr<litehtml::document>&) override;
+    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
+    int pt_to_px(int pt) const override;
+    int get_default_font_size() const override { return 16; }
+    const char* get_default_font_name() const override { return "Times New Roman"; }
+    void import_css(litehtml::string&, const litehtml::string&, litehtml::string&) override;
 
-        fm->height = tm.tmHeight;
-        fm->ascent = tm.tmAscent;
-        fm->descent = tm.tmDescent;
-
-        auto* fw = new std::shared_ptr<FontWrapper>(new FontWrapper(hFont));
-        return reinterpret_cast<litehtml::uint_ptr>(fw);
-    }
-    void delete_font(litehtml::uint_ptr h) override {
-        auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(h);
-        delete fw;
-    }
-    int text_width(const char* text, litehtml::uint_ptr hFont) override {
-        if (!hFont || !text) return 0;
-        auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(hFont);
-        HFONT hF = (*fw)->hFont;
-
-        HDC hdc = GetDC(nullptr);
-        HGDIOBJ old = SelectObject(hdc, hF);
-        SIZE sz{};
-        GetTextExtentPoint32A(hdc, text, static_cast<int>(strlen(text)), &sz);
-        SelectObject(hdc, old);
-        ReleaseDC(nullptr, hdc);
-        return sz.cx;
-    }
-    void draw_text(litehtml::uint_ptr hdc, const char* text,
-        litehtml::uint_ptr hFont, litehtml::web_color color,
-        const litehtml::position& pos) override {
-        if (!hFont || !text) return;
-        auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(hFont);
-        HFONT hF = (*fw)->hFont;
-
-        HDC dc = reinterpret_cast<HDC>(hdc);
-        HGDIOBJ old = SelectObject(dc, hF);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(color.red, color.green, color.blue));
-        TextOutA(dc, pos.left(), pos.top(), text, static_cast<int>(strlen(text)));
-        SelectObject(dc, old);
-    }
-    void load_image(const char* src, const char* baseurl, bool) override {
-        if (m_img_cache.contains(src)) return;
-        std::string path = w2a(m_root) + "\\" + src;
-        ImagePtr img(Gdiplus::Image::FromFile(a2w(path).c_str()));
-        if (img && img->GetLastStatus() == Gdiplus::Ok)
-            m_img_cache[src] = std::move(img);
-    }
-    void get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override {
-        if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
-        auto img = m_img_cache[src];
-        sz.width = img->GetWidth();
-        sz.height = img->GetHeight();
-    }
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override {}
     void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override {}
     void set_caption(const char*) override {}
     void set_base_url(const char*) override {}
@@ -549,45 +579,57 @@ public:
     void on_anchor_click(const char*, const litehtml::element::ptr&) override {}
     void set_cursor(const char*) override {}
     void transform_text(litehtml::string&, litehtml::text_transform) override {}
-    void import_css(litehtml::string&, const litehtml::string&, litehtml::string&) override {}
+
     void set_clip(const litehtml::position&, const litehtml::border_radiuses&) override {}
     void del_clip() override {}
-    void get_client_rect(litehtml::position& client) const override {
-        RECT rc{}; GetClientRect(g_hWnd, &rc);
-        client = { 0, 0, rc.right, rc.bottom - 30 };
-    }
-    litehtml::element::ptr create_element(const char*, const litehtml::string_map&,
-        const std::shared_ptr<litehtml::document>&) override {
-        return nullptr;
-    }
+
     void get_media_features(litehtml::media_features&) const override {}
     void get_language(litehtml::string&, litehtml::string&) const override {}
-    int pt_to_px(int pt) const override {
-        return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
-    }
-    int get_default_font_size() const override { return 16; }
-    const char* get_default_font_name() const override { return "Times New Roman"; }
+
     void draw_list_marker(litehtml::uint_ptr, const litehtml::list_marker&) override {}
+    ~SimpleContainer();
 private:
     std::wstring m_root;
+
     std::unordered_map<std::string, std::shared_ptr<Gdiplus::Image>> m_img_cache;
+    static std::wstring resolve_url(const std::string& url_utf8)
+    {
+        namespace fs = std::filesystem;
+
+        // 1. å…ˆæŠŠå½“å‰ç›®å½•å’Œ url æ‹¼èµ·æ¥
+        fs::path base(g_currentHtmlDir);                // wstring å·² UTF-16
+        fs::path rel = fs::path(url_utf8);           // url è½¬æˆ UTF-16 çš„ path
+
+        // 2. ç»„åˆå lexically_normal ä¼šè‡ªåŠ¨æŠ˜å  . å’Œ ..
+        fs::path full = (base / rel).lexically_normal();
+
+        // 3. ä¿è¯ä½¿ç”¨æ­£æ–œæ ï¼Œæ–¹ä¾¿åç»­ zip å†…è·¯å¾„æ¯”è¾ƒ
+        std::wstring result = full.generic_wstring();   // å½¢å¦‚ "epub/css/local.css"
+        return result;
+    }
 };
 
-// ---------- ·ÖÒ³ ----------
+
+// ---------- åˆ†é¡µ ----------
 class Paginator {
 public:
-    void load(litehtml::document* doc, int w, int h) {
-        m_doc = doc; m_w = w; m_h = h;
+    void load(litehtml::document* doc, int w, int h)
+    {
+        m_doc = doc;
+        m_w = w;
+        m_h = h;
         m_pages.clear();
         if (!doc) return;
 
         doc->render(w);
-        int total = doc->height();
+        const int total = doc->height();
+
+        // å…ˆå‹å…¥æ‰€æœ‰æ•´é¡µèµ·ç‚¹
         for (int y = 0; y < total; y += h)
             m_pages.push_back(y);
 
-        // È·±£×îºóÒ»Ò³ÆğµãÒ²±»¼ÇÂ¼
-        if (total > 0 && (m_pages.empty() || m_pages.back() < total))
+        // å¦‚æœæœ€åä¸€é¡µèµ·ç‚¹ < totalï¼Œè¯´æ˜è¿˜æœ‰å‰©ä½™å†…å®¹
+        if (!m_pages.empty() && m_pages.back() + h < total)
             m_pages.push_back(total);
     }
     
@@ -615,7 +657,7 @@ private:
     std::vector<int> m_pages;
 };
 
-// ---------- È«¾Ö ----------
+// ---------- å…¨å±€ ----------
 HINSTANCE g_hInst;
 std::shared_ptr<SimpleContainer> g_container;
 EPUBBook  g_book;
@@ -627,6 +669,7 @@ constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
 static HBITMAP g_hCachedBmp = nullptr;
 static int     g_cachedPage = -1;
 static SIZE    g_cachedSize = {};
+
 LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -636,19 +679,19 @@ LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         RECT rc;
         GetClientRect(h, &rc);
         int pages = g_pg.count();
-        // ´¹Ö±¹ö¶¯Ìõ
+        // å‚ç›´æ»šåŠ¨æ¡
         SCROLLINFO si{ sizeof(si) };
         si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
         si.nMin = 0;
         si.nMax = std::max(0, pages - 1);
-        si.nPage = 1;               // Ã¿´Î¹öÒ»Ò³
+        si.nPage = 1;               // æ¯æ¬¡æ»šä¸€é¡µ
         si.nPos = g_page;
         SetScrollInfo(h, SB_VERT, &si, TRUE);
-        // Ë®Æ½¹ö¶¯Ìõ£¨Èç¹û²»ĞèÒª¿ÉÉ¾µô£©
+        // æ°´å¹³æ»šåŠ¨æ¡ï¼ˆå¦‚æœä¸éœ€è¦å¯åˆ æ‰ï¼‰
         si.nMax = 0;
         si.nPage = rc.right;
         SetScrollInfo(h, SB_HORZ, &si, TRUE);
-        // ÖØĞÂÅÅ°æ+»º´æ
+        // é‡æ–°æ’ç‰ˆ+ç¼“å­˜
         UpdateCache();
         InvalidateRect(h, nullptr, FALSE);
         return 0;
@@ -720,11 +763,11 @@ void UpdateCache()
     int h = rc.bottom;
     if (w <= 0 || h <= 0) return;
 
-    // 1) ÖØĞÂ·ÖÒ³
+    // 1) é‡æ–°åˆ†é¡µ
     g_doc->render(w);
     g_pg.load(g_doc.get(), w, h);
 
-    // 2) ÖØ½¨µ¥Ò³Î»Í¼
+    // 2) é‡å»ºå•é¡µä½å›¾
     if (g_hCachedBmp) DeleteObject(g_hCachedBmp);
 
     HDC hdc = GetDC(g_hView);
@@ -746,7 +789,7 @@ void UpdateCache()
     g_cachedSize = { w, h };
     g_cachedPage = g_page;
 }
-// ---------- ´°¿Ú ----------
+// ---------- çª—å£ ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CREATE: {
@@ -761,26 +804,26 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DragQueryFileW(reinterpret_cast<HDROP>(w), 0, file, MAX_PATH);
         DragFinish(reinterpret_cast<HDROP>(w));
 
-        // 1. µÈ´ıÉÏÒ»´ÎÈÎÎñ½áÊø£¨¼òµ¥×ö·¨£º×èÈûµÈ´ı£©
+        // 1. ç­‰å¾…ä¸Šä¸€æ¬¡ä»»åŠ¡ç»“æŸï¼ˆç®€å•åšæ³•ï¼šé˜»å¡ç­‰å¾…ï¼‰
         if (g_parse_task.valid()) {
             g_parse_task.wait();
         }
 
-        // 2. Á¢¼´ÊÍ·Å¾É¶ÔÏó£¬·ÀÖ¹Ò°Ö¸Õë
+        // 2. ç«‹å³é‡Šæ”¾æ—§å¯¹è±¡ï¼Œé˜²æ­¢é‡æŒ‡é’ˆ
         g_doc.reset();
         g_container.reset();
-        g_pg.clear();              // Èç¹ûÄã Paginator ÓĞ clear() ¾Íµ÷
+        g_pg.clear();              // å¦‚æœä½  Paginator æœ‰ clear() å°±è°ƒ
 
-        // 3. Æô¶¯ĞÂÈÎÎñ
-        SetStatus(L"ÕıÔÚ¼ÓÔØ...");
+        // 3. å¯åŠ¨æ–°ä»»åŠ¡
+        SetStatus(L"æ­£åœ¨åŠ è½½...");
         g_parse_task = std::async(std::launch::async, [file] {
             try {
-                g_book = EPUBBook{};   // ±£ÏÕ£ºÓÃĞÂÊµÀı
+                g_book = EPUBBook{};   // ä¿é™©ï¼šç”¨æ–°å®ä¾‹
                 g_book.load(file);
                 PostMessage(g_hWnd, WM_EPUB_PARSED, 0, 0);
             }
             catch (const std::exception& e) {
-                // °ÑÒì³£ÎÄ±¾·¢µ½Ö÷Ïß³Ì
+                // æŠŠå¼‚å¸¸æ–‡æœ¬å‘åˆ°ä¸»çº¿ç¨‹
                 std::string what = e.what();
                 auto* buf = (wchar_t*)CoTaskMemAlloc((what.size() + 1) * sizeof(wchar_t));
                 MultiByteToWideChar(CP_UTF8, 0, what.c_str(), -1, buf, (int)what.size() + 1);
@@ -788,7 +831,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             catch (...) {
                 PostMessage(g_hWnd, WM_LOAD_ERROR, 0,
-                    (LPARAM)_wcsdup(L"Î´Öª´íÎó"));
+                    (LPARAM)_wcsdup(L"æœªçŸ¥é”™è¯¯"));
             }
             });
         return 0;
@@ -804,18 +847,18 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         g_page = 0;
 
-        // 2) Á¢¼´°ÑµÚ 0 Ò³»­µ½»º´æÎ»Í¼
-        UpdateCache();          // ¸´ÓÃÇ°Ãæ¸ø³öµÄ UpdateCache()
+        // 2) ç«‹å³æŠŠç¬¬ 0 é¡µç”»åˆ°ç¼“å­˜ä½å›¾
+        UpdateCache();          // å¤ç”¨å‰é¢ç»™å‡ºçš„ UpdateCache()
 
-        // 3) ¸üĞÂ¹ö¶¯Ìõ
+        // 3) æ›´æ–°æ»šåŠ¨æ¡
 
 
-        // 4) ´¥·¢Ò»´ÎÇáÁ¿ WM_PAINT£¨Ö» BitBlt£©
+        // 4) è§¦å‘ä¸€æ¬¡è½»é‡ WM_PAINTï¼ˆåª BitBltï¼‰
         InvalidateRect(g_hView, nullptr, FALSE);
         InvalidateRect(g_hWnd, nullptr, FALSE);
         UpdateWindow(g_hView);
         UpdateWindow(g_hWnd);
-        SetStatus(L"¼ÓÔØÍê³É");
+        SetStatus(L"åŠ è½½å®Œæˆ");
         return 0;
     }
     case WM_SIZE:
@@ -847,7 +890,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LOAD_ERROR: {
         wchar_t* msg = (wchar_t*)l;
         SetStatus(msg);
-        free(msg);                // ¶ÔÓ¦ CoTaskMemAlloc / _wcsdup
+        free(msg);                // å¯¹åº” CoTaskMemAlloc / _wcsdup
         return 0;
     }
     case WM_PAINT: {
@@ -861,7 +904,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_page = std::clamp(g_page, 0, g_pg.count() - 1);
         SendMessage(g_hView, WM_VSCROLL,
             MAKEWPARAM(SB_THUMBPOSITION, g_page), 0);
-        //UpdateCache();              // ¹Ø¼ü£ºÁ¢¼´ÅÅ°æ²¢»º´æ
+        //UpdateCache();              // å…³é”®ï¼šç«‹å³æ’ç‰ˆå¹¶ç¼“å­˜
         //InvalidateRect(g_hView, nullptr, FALSE);
         return 0;
     }
@@ -884,20 +927,17 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         LPNMHDR nm = reinterpret_cast<LPNMHDR>(l);
         if (nm->hwndFrom == g_hwndTV)
         {
-            // 1. ÈÃÏµÍ³Íê³ÉÄ¬ÈÏÑ¡ÖĞ/¸ßÁÁ
+            // 1. è®©ç³»ç»Ÿå®Œæˆé»˜è®¤é€‰ä¸­/é«˜äº®
             LRESULT lr = DefWindowProc(h, m, w, l);
 
-            // 2. Ö»ÔÚ *ÕæÕı¸Ä±äºó* ×ö¼ÓÔØ
+            // 2. åªåœ¨ *çœŸæ­£æ”¹å˜å* åšåŠ è½½
             if (nm->code == TVN_SELCHANGED)
             {
                 HTREEITEM hSel = TreeView_GetSelection(g_hwndTV);
                 if (hSel)
                 {
                     SetFocus(g_hwndTV);
-                    wchar_t buf[128];
-                    wsprintfW(buf, L"Focus=%08X  TV=%08X",
-                        (DWORD)(ULONG_PTR)GetFocus(), (DWORD)(ULONG_PTR)g_hwndTV);
-                        OutputDebugStringW(buf);
+
                     TVITEMW tvi{ TVIF_PARAM, hSel };
                     if (TreeView_GetItem(g_hwndTV, &tvi))
                     {
@@ -907,7 +947,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     }
                 }
             }
-            return lr;   // ±ØĞë·µ»Ø DefWindowProc µÄ½á¹û
+            else if (nm->code == TVN_ITEMEXPANDED)
+            {
+                UpdateWindow(g_hWnd);
+            }
+
+            return lr;   // å¿…é¡»è¿”å› DefWindowProc çš„ç»“æœ
         }
         break;
     }
@@ -920,7 +965,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 
 
-// ---------- Èë¿Ú ----------
+// ---------- å…¥å£ ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     ULONG_PTR gdiplusToken{};
     GdiplusStartupInput gdiplusStartupInput{};
@@ -943,11 +988,11 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, 0, 800, 600,
         nullptr, nullptr, h, nullptr);
-    // ·ÅÔÚÖ÷´°¿Ú CreateWindow Ö®ºó
+    // æ”¾åœ¨ä¸»çª—å£ CreateWindow ä¹‹å
     g_hStatus = CreateWindowEx(
-        0, STATUSCLASSNAME, L"¾ÍĞ÷",
+        0, STATUSCLASSNAME, L"å°±ç»ª",
         WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
-        0, 0, 0, 0,           // Î»ÖÃºÍ´óĞ¡ÓÉ WM_SIZE µ÷Õû
+        0, 0, 0, 0,           // ä½ç½®å’Œå¤§å°ç”± WM_SIZE è°ƒæ•´
         g_hWnd, nullptr, g_hInst, nullptr);
 
     g_hwndTV = CreateWindowExW(
@@ -973,7 +1018,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     return static_cast<int>(msg.wParam);
 }
 
-// ---------- Ä¿Â¼½âÎö ----------
+// ---------- ç›®å½•è§£æ ----------
 void EPUBBook::LoadToc()
 {
     OutputDebugStringA(("toc size = " + std::to_string(ocf_pkg_.toc.size()) + "\n").c_str());
@@ -983,27 +1028,256 @@ void EPUBBook::LoadToc()
     for (const auto& root : tree)
         InsertTreeNode(g_hwndTV, root, TVI_ROOT);
 }
-// ---------- µã»÷Ä¿Â¼Ìø×ª ----------
+// ---------- ç‚¹å‡»ç›®å½•è·³è½¬ ----------
 void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 {
     if (!href || !*href) return;
 
-    std::string html = g_book.load_html(href);
+    /* 1. åˆ†ç¦»æ–‡ä»¶è·¯å¾„ä¸é”šç‚¹ */
+    std::wstring whref(href);
+    size_t pos = whref.find(L'#');
+    std::wstring file = (pos == std::wstring::npos) ? whref : whref.substr(0, pos);
+    std::string  id = (pos == std::wstring::npos) ? "" :
+        litehtml::wchar_to_utf8(whref.substr(pos + 1));
+
+    /* 2. åŠ è½½ HTML */
+    std::string html = g_book.load_html(file.c_str());
     if (html.empty()) return;
- 
+
     g_doc.reset();
     g_container.reset();
     g_container = std::make_shared<SimpleContainer>(L".");
     g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
-
     g_page = 0;
-    
+
+    /* 3. è·³è½¬åˆ°é”šç‚¹ */
+    if (!id.empty())
+    {
+        std::string cssSel = "#" + id;          // "#c10"
+        litehtml::element::ptr el = g_doc->root()->select_one(cssSel.c_str());
+        if (el)
+        {
+            litehtml::position pos = el->get_placement();
+            // åŒæ­¥æ»šåŠ¨ä½ç½®ï¼ˆç¤ºä¾‹ï¼šå‚ç›´æ»šåŠ¨ï¼‰
+            SCROLLINFO si{ sizeof(SCROLLINFO), SIF_POS };
+            si.nPos = pos.y;
+            SetScrollInfo(g_hView, SB_VERT, &si, TRUE);
+        }
+    }
+
     UpdateCache();
-
     SendMessage(g_hView, WM_SIZE, 0, 0);
-
     InvalidateRect(g_hView, nullptr, FALSE);
     UpdateWindow(g_hView);
     UpdateWindow(g_hWnd);
 }
 
+void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
+{
+    if (m_img_cache.contains(src)) return;
+    std::wstring wpath = zip_index.find(a2w(src));
+    // 1. ä» EPUB é‡Œè¯»å†…å­˜
+    EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
+    if (mf.data.empty())
+    {
+        OutputDebugStringW((L"EPUB not found: " + std::wstring(wpath) + L"\n").c_str());
+        return;
+    }
+
+    // 2. æŠŠå†…å­˜åŒ…æˆ IStream
+    IStream* pStream = SHCreateMemStream(mf.data.data(),
+        static_cast<UINT>(mf.data.size()));
+    if (!pStream) return;
+
+    // 3. ç”¨ GDI+ è§£ç 
+    std::shared_ptr<Gdiplus::Image> img(Gdiplus::Image::FromStream(pStream),
+        [](Gdiplus::Image* p) { delete p; });
+    pStream->Release();               // Image å·²å¤åˆ¶æ•°æ®ï¼Œå¯ä»¥é‡Šæ”¾æµ
+
+    if (img && img->GetLastStatus() == Gdiplus::Ok)
+    {
+        m_img_cache.emplace(src, std::move(img));
+        img.reset();
+        //OutputDebugStringA(("EPUB loaded: " + std::string(src) + "\n").c_str());
+    }
+    else
+    {
+        OutputDebugStringA(("EPUB decode failed: " + std::string(src) + "\n").c_str());
+    }
+}
+void SimpleContainer::draw_background(litehtml::uint_ptr hdc,
+    const std::vector<litehtml::background_paint>& bg)
+{
+    HDC dc = reinterpret_cast<HDC>(hdc);
+
+    for (const auto& b : bg)
+    {
+        /* 1. èƒŒæ™¯è‰²ï¼ˆä»…æœ€åä¸€ä¸ª itemï¼‰ */
+        if (&b == &bg.back() && b.color.alpha > 0)
+        {
+            HBRUSH br = CreateSolidBrush(RGB(b.color.red, b.color.green, b.color.blue));
+            RECT rc{ b.border_box.x, b.border_box.y,
+                     b.border_box.x + b.border_box.width,
+                     b.border_box.y + b.border_box.height };
+            FillRect(dc, &rc, br);
+            DeleteObject(br);
+        }
+
+        /* 2. èƒŒæ™¯å›¾ / <img> */
+        if (!b.image.empty())
+        {
+            auto it = m_img_cache.find(b.image);
+            if (it == m_img_cache.end() || !it->second) continue;
+
+            Gdiplus::Image* img = it->second.get();
+            const int imgW = img->GetWidth();
+            const int imgH = img->GetHeight();
+            if (imgW <= 0 || imgH <= 0) continue;
+
+            Gdiplus::Graphics g(dc);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+            const Gdiplus::Rect dstRect(b.border_box.x,
+                b.border_box.y,
+                b.border_box.width,
+                b.border_box.height);
+
+            // åˆ¤æ–­æ˜¯å¦ä¸º <img>ï¼ˆæœ€åä¸€ä¸ª layer ä¸” image éç©ºï¼‰
+            const bool isImgLike = (&b == &bg.back());
+
+            if (isImgLike)
+            {
+                // <img>ï¼šæ•´å¼ å›¾æ‹‰ä¼¸åˆ° border_box
+                const Gdiplus::Rect srcRect(0, 0, imgW, imgH);
+                g.DrawImage(img, dstRect, srcRect.X, srcRect.Y,
+                    srcRect.Width, srcRect.Height, Gdiplus::UnitPixel);
+            }
+            else
+            {
+                // CSS èƒŒæ™¯å›¾ï¼šæŒ‰ç“¦ç‰‡ç»˜åˆ¶
+                const int srcX = static_cast<int>(b.position_x);
+                const int srcY = static_cast<int>(b.position_y);
+                const int srcW = static_cast<int>(b.image_size.width);
+                const int srcH = static_cast<int>(b.image_size.height);
+
+                g.DrawImage(img, dstRect, srcX, srcY, srcW, srcH, Gdiplus::UnitPixel);
+            }
+        }
+    }
+}
+litehtml::uint_ptr SimpleContainer::create_font(const char* faceName, int size, int weight,
+    litehtml::font_style italic, unsigned int decoration,
+    litehtml::font_metrics* fm)  {
+    std::wstring wFace = a2w(faceName ? faceName : "");
+
+    HFONT hFont = CreateFontW(
+        -MulDiv(size, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72),
+        0, 0, 0,
+        weight,
+        italic != litehtml::font_style_normal ? TRUE : FALSE,
+        FALSE, FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        wFace.empty() ? L"Microsoft YaHei" : wFace.c_str());
+    if (!hFont) return 0;
+
+    // è®¡ç®—å­—ä½“åº¦é‡
+    HDC hdc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(hdc, hFont);
+    TEXTMETRICW tm{};  
+    GetTextMetricsW(hdc, &tm);
+    SelectObject(hdc, old);
+    ReleaseDC(nullptr, hdc);
+
+    fm->height = tm.tmHeight;
+    fm->ascent = tm.tmAscent;
+    fm->descent = tm.tmDescent;
+
+    auto* fw = new std::shared_ptr<FontWrapper>(new FontWrapper(hFont));
+    return reinterpret_cast<litehtml::uint_ptr>(fw);
+}
+
+void SimpleContainer::delete_font(litehtml::uint_ptr h)  {
+    auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(h);
+    delete fw;
+}
+int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont)  {
+    if (!hFont || !text) return 0;
+    auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(hFont);
+    HFONT hF = (*fw)->hFont;
+
+    HDC hdc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(hdc, hF);
+    SIZE sz{};
+    std::wstring wtxt = a2w(text);
+    GetTextExtentPoint32W(hdc, wtxt.c_str(), static_cast<int>(wtxt.size()), &sz);
+    SelectObject(hdc, old);
+    ReleaseDC(nullptr, hdc);
+    return sz.cx;
+}
+void SimpleContainer::draw_text(litehtml::uint_ptr hdc, const char* text,
+    litehtml::uint_ptr hFont, litehtml::web_color color,
+    const litehtml::position& pos)  {
+    if (!hFont || !text) return;
+    auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(hFont);
+    HFONT hF = (*fw)->hFont;
+
+    HDC dc = reinterpret_cast<HDC>(hdc);
+    HGDIOBJ old = SelectObject(dc, hF);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(color.red, color.green, color.blue));
+    std::wstring wtxt = a2w(text);
+    TextOutW(dc, pos.left(), pos.top(), wtxt.c_str(), static_cast<int>(wtxt.size()));
+    SelectObject(dc, old);
+}
+
+void SimpleContainer::get_image_size(const char* src, const char* baseurl, litehtml::size& sz) {
+    if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
+    auto img = m_img_cache[src];
+    sz.width = img->GetWidth();
+    sz.height = img->GetHeight();
+}
+
+void SimpleContainer::get_client_rect(litehtml::position& client) const  {
+    RECT rc{}; GetClientRect(g_hWnd, &rc);
+    client = { 0, 0, rc.right, rc.bottom - 30 };
+}
+
+litehtml::element::ptr SimpleContainer::create_element(const char*, const litehtml::string_map&,
+    const std::shared_ptr<litehtml::document>&)  {
+    return nullptr;
+}
+
+int SimpleContainer::pt_to_px(int pt) const  {
+    return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
+}
+
+SimpleContainer::~SimpleContainer()
+{
+    clear_images();   // ä»…è§¦å‘ä¸€æ¬¡ Image ææ„
+}
+
+void SimpleContainer::import_css(litehtml::string& text,
+    const litehtml::string& url,
+    litehtml::string& baseurl)
+{
+    // url å¯èƒ½æ˜¯ç›¸å¯¹è·¯å¾„ï¼Œbaseurl æ˜¯å½“å‰ html æ‰€åœ¨ç›®å½•
+
+    std::wstring w_path = zip_index.find(a2w(url));
+    EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
+    if (!mf.data.empty())
+    {
+        // ç›´æ¥å¡«åˆ° textï¼ˆlitehtml æœŸæœ› UTF-8ï¼‰
+        text.assign(reinterpret_cast<const char*>(mf.data.data()),
+            mf.data.size());
+    }
+    else
+    {
+        OutputDebugStringW((L"CSS not found: " + w_path + L"\n").c_str());
+    }
+
+    // baseurl ä¿æŒåŸæ ·å³å¯
+}
