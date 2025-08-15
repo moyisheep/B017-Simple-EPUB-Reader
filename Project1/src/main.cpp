@@ -41,16 +41,70 @@ using namespace Gdiplus;
 #include <filesystem>
 #include <algorithm>
 #include <string>
-
+namespace fs = std::filesystem;
 HWND  g_hwndTV = nullptr;    // 侧边栏 TreeView
 HIMAGELIST g_hImg = nullptr;   // 图标(可选)
 HWND      g_hWnd;
 HWND g_hStatus = nullptr;   // 状态栏句柄
 HWND g_hView = nullptr;
+static int g_scrollY = 0;   // 当前像素偏移
+static int g_maxScroll = 0;   // 总高度 - 客户区高度
 std::wstring g_currentHtmlDir = L"";
+constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
+constexpr UINT WM_EPUB_UPDATE_SCROLLBAR = WM_APP + 2;
+constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
 void UpdateCache(void);
 struct GdiplusDeleter { void operator()(Gdiplus::Image* p) const { delete p; } };
 using ImagePtr = std::unique_ptr<Gdiplus::Image, GdiplusDeleter>;
+static  std::string g_globalCSS = "";
+static fs::file_time_type g_lastTime;
+
+
+// 真正读文件
+static void do_reload()
+{
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    fs::path cssPath = fs::path(exe).parent_path() / L"config" / L"global.css";
+
+    try
+    {
+        auto t = fs::last_write_time(cssPath);
+        if (t != g_lastTime)
+        {
+            std::ifstream f(cssPath, std::ios::binary);
+            if (f)
+            {
+                std::ostringstream oss;
+                oss << f.rdbuf();
+                g_globalCSS = oss.str();
+                g_lastTime = t;
+                PostMessage(g_hView, WM_EPUB_CSS_RELOAD, 0, 0);
+            }
+        }
+    }
+    catch (...) { /* 文件不存在就忽略 */ }
+}
+
+// 后台线程：每秒检查一次
+static void css_watcher_thread()
+{
+    do_reload();   // 启动时先读一次
+    while (true)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        do_reload();
+    }
+}
+
+// 在 main() 里调用一次即可
+inline void start_css_watcher()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::thread(css_watcher_thread).detach();
+        });
+}
 // ---------- 工具 ----------
 static std::string w2a(const std::wstring& s)
 {
@@ -100,6 +154,25 @@ bool is_xhtml(const std::wstring& file_path)
     return ext == L"xhtml";
 }
 
+
+// 读取 ./config/global.css
+
+
+static std::string insert_global_css(std::string html) {
+    if (!g_globalCSS.empty())
+    {
+        // 简单暴力：直接插到 </head> 之前
+        const std::string styleBlock =
+            "<style>\n" + g_globalCSS + "\n</style>\n";
+        size_t pos = html.find("</head>");
+        if (pos != std::string::npos)
+            html.insert(pos, styleBlock);
+        else
+            html.insert(0, "<head>" + styleBlock + "</head>");
+    }
+    return html;
+}
+
 void EnableClearType()
 {
     BOOL ct = FALSE;
@@ -119,8 +192,8 @@ static HFONT CreateFontBetter(const wchar_t* faceW, int size, int weight,
     lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
     lf.lfQuality = CLEARTYPE_QUALITY;          // ← 关键
     lf.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
-    wcscpy_s(lf.lfFaceName, LF_FACESIZE,
-        (faceW && *faceW) ? faceW : L"Microsoft YaHei");
+    const wchar_t* src = (faceW && *faceW) ? faceW : L"Microsoft YaHei";
+    wcsncpy_s(lf.lfFaceName, src, _TRUNCATE);   // 超长自动截断
 
     // 让系统根据 FontLink 自动 fallback（中文、日文、符号都能匹配）
     return CreateFontIndirectW(&lf);
@@ -153,6 +226,7 @@ struct FontWrapper {
 inline void SetStatus(const wchar_t* msg) {
     SendMessage(g_hStatus, SB_SETTEXT, 0, (LPARAM)msg);
 }
+
 
 // -------------- 新增数据结构 --------------
 struct OCFItem {
@@ -203,18 +277,27 @@ static std::vector<TreeNode> BuildTree(const std::vector<OCFNavPoint>& flat)
     return roots;
 }
 
-namespace fs = std::filesystem;
+
 
 class ZipIndexW {
 public:
     ZipIndexW() = default;
-    explicit ZipIndexW( mz_zip_archive& zip) { build(zip); }
+    explicit ZipIndexW(mz_zip_archive& zip) { build(zip); }
 
     // 输入/输出均为 std::wstring
     std::wstring find(std::wstring href) const {
-        std::wstring key = normalize_key(href);
+        // 1. 分离锚点
+        size_t pos = href.find(L'#');
+        std::wstring pure = pos == std::wstring::npos ? href : href.substr(0, pos);
+        std::wstring anchor = pos == std::wstring::npos ? L"" : href.substr(pos);
+
+        // 2. 查索引
+        std::wstring key = normalize_key(pure);
         auto it = map_.find(key);
-        return it == map_.end() ? std::wstring{} : it->second;
+        std::wstring result = it == map_.end() ? std::wstring{} : it->second;
+
+        // 3. 把锚点拼回去
+        return result.empty() ? result : result + anchor;
     }
 
 private:
@@ -257,7 +340,7 @@ private:
     }
 
     /* ---------- 建立索引 ---------- */
-    void build( mz_zip_archive& zip) {
+    void build(mz_zip_archive& zip) {
         mz_uint idx = 0;
         mz_zip_archive_file_stat st{};
         while (mz_zip_reader_file_stat(&zip, idx++, &st)) {
@@ -268,7 +351,7 @@ private:
         }
     }
 
-    
+
 
 };
 
@@ -294,26 +377,7 @@ struct EPUBBook {
     MemFile read_zip(const wchar_t* file_name) const;
     std::string load_html(const std::wstring& path) const;
 
-    static std::string resolve_path(const std::string& opf, const std::string& href) {
-        size_t pos = opf.find_last_of('/');
-        if (pos == std::string::npos) pos = opf.find_last_of('\\');
-        std::string base = (pos == std::string::npos) ? "" : opf.substr(0, pos + 1);
-        return base + href;
-    }
 
-
-    static std::wstring resolve_path_w(const std::wstring& base,
-        const std::wstring& rel)
-    {
-        if (base.empty())
-            return rel;
-
-        std::wstring out = base;
-        if (!out.empty() && out.back() != L'/' && out.back() != L'\\')
-            out += L'/';
-        out += rel;
-        return out;
-    }
     static HTREEITEM InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent)
     {
         TVINSERTSTRUCTW tvi{};
@@ -391,7 +455,7 @@ struct EPUBBook {
             auto* con = pt->FirstChildElement("content");
 
             OCFNavPoint np;
-       
+
             np.label = txt ? extract_text(txt) : L"";
             np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
             if (!np.href.empty())
@@ -404,7 +468,7 @@ struct EPUBBook {
         }
     }
 
-   
+
 
     EPUBBook() noexcept {}
     ~EPUBBook() { mz_zip_reader_end(&zip); }
@@ -577,13 +641,21 @@ void EPUBBook::parse_toc_()
 
     if (is_nav)
     {
-        auto* nav = doc.FirstChildElement("html")
+        auto* body = doc.FirstChildElement("html")
             ? doc.FirstChildElement("html")->FirstChildElement("body")
             : nullptr;
-        nav = nav ? nav->FirstChildElement("nav") : nullptr;
-        if (nav && std::string(nav->Attribute("epub:type") ? nav->Attribute("epub:type") : "") == "toc")
+        if (!body) return;
+
+        for (auto* nav = body->FirstChildElement("nav");
+            nav;
+            nav = nav->NextSiblingElement("nav"))
         {
-            parse_nav_list(nav->FirstChildElement("ol"), 0, opf_dir, ocf_pkg_.toc);
+            const char* type = nav->Attribute("epub:type");
+            if (type && std::string(type) == "toc")
+            {
+                parse_nav_list(nav->FirstChildElement("ol"), 0, opf_dir, ocf_pkg_.toc);
+                break;   // 找到就停
+            }
         }
     }
     else // NCX
@@ -649,43 +721,34 @@ public:
         m_doc = doc;
         m_w = w;
         m_h = h;
-        m_pages.clear();
-        if (!doc) return;
+        g_maxScroll = 0;
+        if (!m_doc) return;
 
-        doc->render(w);
-        const int total = doc->height();
+        g_maxScroll = m_doc->height();
 
-        // 先压入所有整页起点
-        for (int y = 0; y < total; y += h)
-            m_pages.push_back(y);
 
-        // 如果最后一页起点 < total，说明还有剩余内容
-        if (!m_pages.empty() && m_pages.back() + h < total)
-            m_pages.push_back(total);
     }
-    
-    int count() const { return static_cast<int>(m_pages.size()); }
-    void render(HDC hdc, int page)
+
+    void render(HDC hdc, int scrollY)
     {
-        if (page < 0 || page >= count()) return;
+        if (scrollY < 0 || scrollY >= g_maxScroll) return;
 
         int old = SaveDC(hdc);
-    
+
         litehtml::position clip{ 0, 0, m_w, m_h };
         m_doc->draw(reinterpret_cast<litehtml::uint_ptr>(hdc),
-            0, -m_pages[page], &clip);
+            0, -scrollY, &clip);
 
         RestoreDC(hdc, old);
     }
     void clear() {
         m_doc = nullptr;
         m_w = m_h = 0;
-        m_pages.clear();
+        g_maxScroll = 0;
     }
 private:
     litehtml::document* m_doc = nullptr;
     int m_w = 0, m_h = 0;
-    std::vector<int> m_pages;
 };
 
 // ---------- 全局 ----------
@@ -694,9 +757,10 @@ std::shared_ptr<SimpleContainer> g_container;
 EPUBBook  g_book;
 std::shared_ptr<litehtml::document> g_doc;
 Paginator g_pg;
-int       g_page = 0;
+
+
 std::future<void> g_parse_task;
-constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
+
 static HBITMAP g_hCachedBmp = nullptr;
 static int     g_cachedPage = -1;
 static SIZE    g_cachedSize = {};
@@ -707,16 +771,19 @@ LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_SIZE:
     {
+
+        return 0;
+    }
+    case WM_EPUB_UPDATE_SCROLLBAR: {
         RECT rc;
         GetClientRect(h, &rc);
-        int pages = g_pg.count();
         // 垂直滚动条
         SCROLLINFO si{ sizeof(si) };
         si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
         si.nMin = 0;
-        si.nMax = std::max(0, pages - 1);
-        si.nPage = 1;               // 每次滚一页
-        si.nPos = g_page;
+        si.nMax = std::max(0, g_maxScroll);
+        si.nPage = rc.bottom;               // 每次滚一页
+        si.nPos = g_scrollY;
         SetScrollInfo(h, SB_VERT, &si, TRUE);
         // 水平滚动条（如果不需要可删掉）
         si.nMax = 0;
@@ -730,23 +797,40 @@ LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_VSCROLL:
     {
+        RECT rc;
+        GetClientRect(h, &rc);
         int code = LOWORD(wp);
         int pos = HIWORD(wp);
-        int newPage = g_page;
+        int delta = 0;
+
         switch (code)
         {
-        case SB_LINEUP:   newPage--; break;
-        case SB_LINEDOWN: newPage++; break;
-        case SB_PAGEUP:   newPage -= 5; break;
-        case SB_PAGEDOWN: newPage += 5; break;
+        case SB_LINEUP:   delta = -30; break;      // 3 行
+        case SB_LINEDOWN: delta = 30; break;
+        case SB_PAGEUP:   delta = -rc.bottom; break;
+        case SB_PAGEDOWN: delta = rc.bottom; break;
         case SB_THUMBPOSITION:
         case SB_THUMBTRACK:
-            newPage = pos;
-            break;
+            g_scrollY = std::clamp(pos, 0, g_maxScroll);          // 直接定位
+            goto _scroll_end;
         default: return 0;
         }
-        g_page = std::clamp(newPage, 0, g_pg.count() - 1);
-        SetScrollPos(h, SB_VERT, g_page, TRUE);
+
+        g_scrollY = std::clamp(g_scrollY + delta, 0, g_maxScroll);
+
+    _scroll_end:
+        SetScrollPos(h, SB_VERT, g_scrollY, TRUE);
+        UpdateCache();
+        InvalidateRect(h, nullptr, FALSE);   // 触发 WM_PAINT
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+    {
+        RECT rc;
+        GetClientRect(h, &rc);
+        int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
+        g_scrollY = std::clamp<int>(g_scrollY - zDelta, 0, std::max<int>(g_maxScroll - rc.bottom, 0));
+        SetScrollPos(h, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
         InvalidateRect(h, nullptr, FALSE);
         return 0;
@@ -756,7 +840,7 @@ LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(h, &ps);
-        if (g_hCachedBmp && g_cachedPage == g_page)
+        if (g_hCachedBmp && g_cachedPage == g_scrollY)
         {
             HDC mem = CreateCompatibleDC(hdc);
             HGDIOBJ old = SelectObject(mem, g_hCachedBmp);
@@ -811,14 +895,14 @@ void UpdateCache()
     RECT fillRc{ 0, 0, w, h };
     FillRect(mem, &fillRc, GetSysColorBrush(COLOR_WINDOW));
 
-    g_pg.render(mem, g_page);
+    g_pg.render(mem, g_scrollY);
 
     SelectObject(mem, old);
     DeleteDC(mem);
     ReleaseDC(g_hView, hdc);
 
     g_cachedSize = { w, h };
-    g_cachedPage = g_page;
+    g_cachedPage = g_scrollY;
 }
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -871,12 +955,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_EPUB_PARSED: {
         std::string html = g_book.load_html(g_book.ocf_pkg_.spine[0].href);
         if (html.empty()) break;
+        html = insert_global_css(html);
         g_doc.reset();
         g_container.reset();
         g_container = std::make_shared<SimpleContainer>(L".");
         g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
 
-        g_page = 0;
+        g_scrollY = 0;
 
         // 2) 立即把第 0 页画到缓存位图
         UpdateCache();          // 复用前面给出的 UpdateCache()
@@ -890,6 +975,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         UpdateWindow(g_hView);
         UpdateWindow(g_hWnd);
         SetStatus(L"加载完成");
+        return 0;
+    }
+    case WM_EPUB_CSS_RELOAD: {
+         // 重新解析当前章节即可
         return 0;
     }
     case WM_SIZE:
@@ -912,8 +1001,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         MoveWindow(g_hwndTV, 0, 0, TV_W, cy, TRUE);
 
         MoveWindow(g_hView, TV_W, 0, cx - TV_W, cy, TRUE);
-        SendMessage(g_hView, WM_SIZE, 0, 0);
         UpdateCache();
+        SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
+
         UpdateWindow(g_hWnd);
         UpdateWindow(g_hView);
         return 0;
@@ -925,16 +1015,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_PAINT: {
-        
+
         return 0;
     }
 
     case WM_MOUSEWHEEL: {
-        int delta = GET_WHEEL_DELTA_WPARAM(w);
-        g_page += (delta < 0 ? 1 : -1);
-        g_page = std::clamp(g_page, 0, g_pg.count() - 1);
-        SendMessage(g_hView, WM_VSCROLL,
-            MAKEWPARAM(SB_THUMBPOSITION, g_page), 0);
+
         //UpdateCache();              // 关键：立即排版并缓存
         //InvalidateRect(g_hView, nullptr, FALSE);
         return 0;
@@ -991,13 +1077,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     return DefWindowProc(h, m, w, l);
-    
+
 }
 
 
 
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
+  
     ULONG_PTR gdiplusToken{};
     GdiplusStartupInput gdiplusStartupInput{};
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
@@ -1011,8 +1098,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     w.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassEx(&w);
     RegisterViewClass(g_hInst);
-  
-        
+    start_css_watcher();
+
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_TREEVIEW_CLASSES };
     InitCommonControlsEx(&icc);
     g_hWnd = CreateWindowW(L"EPUBLite", L"EPUB Lite Reader",
@@ -1063,6 +1150,8 @@ void EPUBBook::LoadToc()
 void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 {
     if (!href || !*href) return;
+ 
+
 
     /* 1. 分离文件路径与锚点 */
     std::wstring whref(href);
@@ -1073,14 +1162,22 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 
     /* 2. 加载 HTML */
     std::string html = g_book.load_html(file.c_str());
-    if (html.empty()) return;
 
+    if (html.empty()) return;
+    html = insert_global_css(html);
     g_doc.reset();
     g_container.reset();
     g_container = std::make_shared<SimpleContainer>(L".");
     g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
-    g_page = 0;
+    g_scrollY = 0;
 
+    RECT rc;
+    GetClientRect(g_hView, &rc);
+    int w = rc.right;
+    int h = rc.bottom;
+    if (w <= 0 || h <= 0) return;
+    g_doc->render(w);
+    
     /* 3. 跳转到锚点 */
     if (!id.empty())
     {
@@ -1090,14 +1187,13 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
         {
             litehtml::position pos = el->get_placement();
             // 同步滚动位置（示例：垂直滚动）
-            SCROLLINFO si{ sizeof(SCROLLINFO), SIF_POS };
-            si.nPos = pos.y;
-            SetScrollInfo(g_hView, SB_VERT, &si, TRUE);
+            g_scrollY = pos.y;
+
         }
     }
 
     UpdateCache();
-    SendMessage(g_hView, WM_SIZE, 0, 0);
+    SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
     InvalidateRect(g_hView, nullptr, FALSE);
     UpdateWindow(g_hView);
     UpdateWindow(g_hWnd);
@@ -1122,7 +1218,7 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 
     // 3. 用 GDI+ 解码
     std::shared_ptr<Gdiplus::Image> img(Gdiplus::Image::FromStream(pStream),
-        [](Gdiplus::Image* p) { delete p; });
+        [](Gdiplus::Image* p) {});
     pStream->Release();               // Image 已复制数据，可以释放流
 
     if (img && img->GetLastStatus() == Gdiplus::Ok)
@@ -1212,11 +1308,11 @@ litehtml::uint_ptr SimpleContainer::create_font(const char* faceName, int size,
     return reinterpret_cast<litehtml::uint_ptr>(fw);
 }
 
-void SimpleContainer::delete_font(litehtml::uint_ptr h)  {
+void SimpleContainer::delete_font(litehtml::uint_ptr h) {
     auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(h);
     delete fw;
 }
-int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont)  {
+int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont) {
     if (!hFont || !text) return 0;
     auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(hFont);
     HFONT hF = (*fw)->hFont;
@@ -1232,7 +1328,7 @@ int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont)  {
 }
 void SimpleContainer::draw_text(litehtml::uint_ptr hdc, const char* text,
     litehtml::uint_ptr hFont, litehtml::web_color color,
-    const litehtml::position& pos)  {
+    const litehtml::position& pos) {
     if (!hFont || !text) return;
     auto* fw = reinterpret_cast<std::shared_ptr<FontWrapper>*>(hFont);
     HFONT hF = (*fw)->hFont;
@@ -1253,17 +1349,17 @@ void SimpleContainer::get_image_size(const char* src, const char* baseurl, liteh
     sz.height = img->GetHeight();
 }
 
-void SimpleContainer::get_client_rect(litehtml::position& client) const  {
+void SimpleContainer::get_client_rect(litehtml::position& client) const {
     RECT rc{}; GetClientRect(g_hWnd, &rc);
     client = { 0, 0, rc.right, rc.bottom - 30 };
 }
 
 litehtml::element::ptr SimpleContainer::create_element(const char*, const litehtml::string_map&,
-    const std::shared_ptr<litehtml::document>&)  {
+    const std::shared_ptr<litehtml::document>&) {
     return nullptr;
 }
 
-int SimpleContainer::pt_to_px(int pt) const  {
+int SimpleContainer::pt_to_px(int pt) const {
     return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
 }
 
