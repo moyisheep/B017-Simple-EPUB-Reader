@@ -1,0 +1,10 @@
+#include "resource.h"
+
+IDR_MENU_MAIN MENU
+BEGIN
+POPUP "&œ‘ æ"
+BEGIN
+MENUITEM "&Ω˚”√CSS", IDM_TOGGLE_CSS, CHECKED
+MENUITEM "Ω˚”√ JavaScript(&J)", IDM_TOGGLE_JS, CHECKED
+END
+END
