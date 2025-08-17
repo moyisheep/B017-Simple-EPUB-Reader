@@ -54,7 +54,7 @@ HIMAGELIST g_hImg = nullptr;   // 图标(可选)
 HWND      g_hWnd;
 HWND g_hStatus = nullptr;   // 状态栏句柄
 HWND g_hView = nullptr;
-
+enum class FontBackend { GDI = 0, DirectWrite = 1, FreeType = 2 };
 
 static int g_scrollY = 0;   // 当前像素偏移
 static int g_maxScroll = 0;   // 总高度 - 客户区高度
@@ -67,10 +67,11 @@ struct AppSettings {
     bool disableCSS = false;   // 默认启用
     bool disableJS = false;   // 默认不禁用 JS
     bool disablePreprocessHTML = false;
+    FontBackend selectedFontBackend = FontBackend::GDI;
 };
 AppSettings g_cfg;
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
-
+static std::unordered_map<std::wstring, HANDLE> g_customFonts;
 
 std::string PreprocessHTML(std::string html);
 void UpdateCache(void);
@@ -103,6 +104,46 @@ static ImgFmt detect_fmt(const uint8_t* d, size_t n, const wchar_t* ext)
 
     return ImgFmt::UNKNOWN;
 }
+struct IFontEngine {
+    virtual ~IFontEngine() = default;
+    virtual litehtml::uint_ptr create_font(const wchar_t* face,
+        int size,
+        int weight,
+        bool italic,
+        litehtml::font_metrics* fm) = 0;
+    virtual void draw_text(litehtml::uint_ptr hdc,
+        const char* text,
+        litehtml::uint_ptr hFont,
+        litehtml::web_color color,
+        const litehtml::position& pos) = 0;
+    virtual void delete_font(litehtml::uint_ptr hFont) = 0;
+};
+struct FontWrapper {
+    HFONT hFont = nullptr;
+    int height = 0, ascent = 0, descent = 0;
+    FontWrapper(const wchar_t* face, int size, int weight, bool italic);
+    FontWrapper(HFONT f) : hFont(f) {}
+    ~FontWrapper();
+};
+
+class GdiEngine : public IFontEngine {
+public:
+    litehtml::uint_ptr create_font(const wchar_t* face,
+        int size,
+        int weight,
+        bool italic,
+        litehtml::font_metrics* fm) override;
+    void draw_text(litehtml::uint_ptr hdc,
+        const char* text,
+        litehtml::uint_ptr hFont,
+        litehtml::web_color color,
+        const litehtml::position& pos) override;
+    void delete_font(litehtml::uint_ptr hFont) override;
+
+private:
+    std::unordered_map<litehtml::uint_ptr, std::unique_ptr<FontWrapper>> m_fonts;
+};
+
 
 
 // 真正读文件
@@ -243,31 +284,31 @@ static HFONT CreateFontBetter(const wchar_t* faceW, int size, int weight,
     // 让系统根据 FontLink 自动 fallback（中文、日文、符号都能匹配）
     return CreateFontIndirectW(&lf);
 }
-// 创建字体时顺带把度量算好
-struct FontWrapper {
-    HFONT hFont = nullptr;
-    int   height = 0;
-    int   ascent = 0;
-    int   descent = 0;
-
-    explicit FontWrapper(const wchar_t* face, int size, int weight, bool italic)
-    {
-        HDC hdc = GetDC(nullptr);                    // 临时 HDC
-        hFont = CreateFontBetter(face, size, weight, italic, hdc);
-
-        if (hFont) {
-            HGDIOBJ old = SelectObject(hdc, hFont);
-            TEXTMETRICW tm{};
-            GetTextMetricsW(hdc, &tm);
-            height = tm.tmHeight;
-            ascent = tm.tmAscent;
-            descent = tm.tmDescent;
-            SelectObject(hdc, old);
-        }
-        ReleaseDC(nullptr, hdc);
-    }
-    ~FontWrapper() { if (hFont) DeleteObject(hFont); }
-};
+//// 创建字体时顺带把度量算好
+//struct FontWrapper {
+//    HFONT hFont = nullptr;
+//    int   height = 0;
+//    int   ascent = 0;
+//    int   descent = 0;
+//
+//    explicit FontWrapper(const wchar_t* face, int size, int weight, bool italic)
+//    {
+//        HDC hdc = GetDC(nullptr);                    // 临时 HDC
+//        hFont = CreateFontBetter(face, size, weight, italic, hdc);
+//
+//        if (hFont) {
+//            HGDIOBJ old = SelectObject(hdc, hFont);
+//            TEXTMETRICW tm{};
+//            GetTextMetricsW(hdc, &tm);
+//            height = tm.tmHeight;
+//            ascent = tm.tmAscent;
+//            descent = tm.tmDescent;
+//            SelectObject(hdc, old);
+//        }
+//        ReleaseDC(nullptr, hdc);
+//    }
+//    ~FontWrapper() { if (hFont) DeleteObject(hFont); }
+//};
 
 inline void SetStatus(const wchar_t* msg) {
     SendMessage(g_hStatus, SB_SETTEXT, 0, (LPARAM)msg);
@@ -412,7 +453,7 @@ private:
 
 };
 
-ZipIndexW zip_index;
+ZipIndexW g_zipIndex;
 // ---------- EPUB 零解压 ----------
 struct EPUBBook {
     struct MemFile {
@@ -434,7 +475,7 @@ struct EPUBBook {
     MemFile read_zip(const wchar_t* file_name) const;
     std::string load_html(const std::wstring& path) const;
 
-
+    void load_all_fonts(void);
     static HTREEITEM InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent)
     {
         TVINSERTSTRUCTW tvi{};
@@ -489,7 +530,7 @@ struct EPUBBook {
             np.label = extract_text(a);
             np.href = a2w(a->Attribute("href") ? a->Attribute("href") : "");
             if (!np.href.empty())
-                np.href = zip_index.find(np.href);
+                np.href = g_zipIndex.find(np.href);
             np.order = level;               // 层级深度
             out.emplace_back(std::move(np));
 
@@ -516,7 +557,7 @@ struct EPUBBook {
             np.label = txt ? extract_text(txt) : L"";
             np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
             if (!np.href.empty())
-                np.href = zip_index.find(np.href);
+                np.href = g_zipIndex.find(np.href);
             np.order = level;               // 层级深度
             out.emplace_back(std::move(np));
 
@@ -527,7 +568,9 @@ struct EPUBBook {
 
 
 
-    EPUBBook() noexcept {}
+    EPUBBook() noexcept {
+        load_all_fonts();
+    }
     ~EPUBBook() { mz_zip_reader_end(&zip); }
 };
 
@@ -582,7 +625,7 @@ bool EPUBBook::load(const wchar_t* epub_path) {
     if (!mz_zip_reader_init_file(&zip, w2a(epub_path).c_str(), 0))
         throw std::runtime_error("zip 打开失败：" +
             std::to_string(mz_zip_get_last_error(&zip)));
-    zip_index = ZipIndexW(zip);
+    g_zipIndex = ZipIndexW(zip);
     parse_ocf_();
     parse_opf_();
     parse_toc_();
@@ -635,7 +678,7 @@ void EPUBBook::parse_opf_() {
 
         // 只在 href 非空时拼绝对路径
         if (!item.href.empty())
-            item.href = zip_index.find(item.href);
+            item.href = g_zipIndex.find(item.href);
 
         ocf_pkg_.manifest.emplace_back(std::move(item));
     }
@@ -736,12 +779,10 @@ public:
         m_hDefaultFont = fw->hFont;
         m_fonts[m_hDefaultFont] = std::move(fw);
 
-        if (!g_cfg.disableJS) {
-            enableJS();
-        }
-        else {
-            m_js = nullptr;
-        }
+        if (!g_cfg.disableJS) { enableJS(); }
+        else {m_js = nullptr;}
+        set_font_backend(g_cfg.selectedFontBackend);
+       
     }
     void clear_images() { m_img_cache.clear(); }
     litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
@@ -756,7 +797,7 @@ public:
     void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
     int pt_to_px(int pt) const override;
     int get_default_font_size() const override { return 16; }
-    const char* get_default_font_name() const override { return "Times New Roman"; }
+    const char* get_default_font_name() const override { return "Microsoft YaHei"; }
     void import_css(litehtml::string&, const litehtml::string&, litehtml::string&) override;
 
     void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
@@ -779,10 +820,17 @@ public:
     void disableJS() { if (m_js) { duk_destroy_heap(m_js); m_js = nullptr; } }
     void run_pending_scripts();
     void bind_host_objects();   // 新增
+
+    void set_font_backend(FontBackend b);   // 运行时切换
+    void switch_backend_and_reload(FontBackend b, const std::string& html);
+
     ~SimpleContainer()
     {
         clear_images();   // 仅触发一次 Image 析构
         if (m_js) duk_destroy_heap(m_js);
+        for (auto& kv : g_customFonts)
+            RemoveFontMemResourceEx(kv.second);
+        g_customFonts.clear();
     }
 
 
@@ -805,6 +853,7 @@ private:
         litehtml::string inline_code;
     };
     std::vector<script_info> m_pending_scripts;
+    std::unique_ptr<IFontEngine> m_fe;
     static std::shared_ptr<Gdiplus::Image> decode_img(const EPUBBook::MemFile& mf,
         const wchar_t* ext)
     {
@@ -1414,7 +1463,7 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
     if (m_img_cache.contains(src)) return;
 
-    std::wstring wpath = zip_index.find(a2w(src));
+    std::wstring wpath = g_zipIndex.find(a2w(src));
 
     EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
     if (mf.data.empty())
@@ -1495,40 +1544,12 @@ void SimpleContainer::draw_background(litehtml::uint_ptr hdc,
         }
     }
 }
-litehtml::uint_ptr SimpleContainer::create_font(const char* faceName,
-    int size,
-    int weight,
-    litehtml::font_style italic,
-    unsigned int decoration,
-    litehtml::font_metrics* fm)
+
+void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 {
-    std::wstring wFace = a2w(faceName ? faceName : "");
-    bool isItalic = (italic != litehtml::font_style_normal);
-
-    // 用 unique_ptr 管理生命周期
-    auto fw = std::make_unique<FontWrapper>(wFace.c_str(), size, weight, isItalic);
-    if (!fw->hFont) {
-        OutputDebugStringA("CreateFont failed!\n");
-        return 0;   // 创建失败
-    }
-    if (fm) {
-        fm->height = fw->height;
-        fm->ascent = fw->ascent;
-        fm->descent = fw->descent;
-    }
-
-    HFONT hFont = fw->hFont;
-    m_fonts[hFont] = std::move(fw);   // 保存起来
-
-    auto ret = reinterpret_cast<litehtml::uint_ptr>(hFont);
-
-    return ret;
-}
-
-void SimpleContainer::delete_font(litehtml::uint_ptr h) 
-{
-    HFONT hFont = reinterpret_cast<HFONT>(h);
-    m_fonts.erase(hFont);   // unique_ptr 自动 DeleteObject
+    //HFONT hFont = reinterpret_cast<HFONT>(h);
+    //m_fonts.erase(hFont);   // unique_ptr 自动 DeleteObject
+    m_fe->delete_font(hFont);
 }
 int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont) 
 {
@@ -1545,25 +1566,7 @@ int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont)
     ReleaseDC(nullptr, hdc);
     return sz.cx;
 }
-void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
-    const char* text,
-    litehtml::uint_ptr hFont,
-    litehtml::web_color color,
-    const litehtml::position& pos)
-{
-    if (!hFont || !text) return;
-    HDC dc = reinterpret_cast<HDC>(hdc);
-    HFONT hF = reinterpret_cast<HFONT>(hFont);
 
-    HGDIOBJ old = SelectObject(dc, hF);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(color.red, color.green, color.blue));
-
-    std::wstring wtxt = a2w(text);
-    TextOutW(dc, pos.left(), pos.top(), wtxt.c_str(), static_cast<int>(wtxt.size()));
-
-    SelectObject(dc, old);
-}
 
 void SimpleContainer::get_image_size(const char* src, const char* baseurl, litehtml::size& sz) {
     if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
@@ -1608,7 +1611,7 @@ void SimpleContainer::run_pending_scripts()
      
         if (!script.src.empty())
         {
-            std::wstring w_path = zip_index.find(a2w(script.src));
+            std::wstring w_path = g_zipIndex.find(a2w(script.src));
             EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
             code = std::string(reinterpret_cast<const char*>(mf.data.data()),
                 mf.data.size());
@@ -1640,7 +1643,7 @@ void SimpleContainer::import_css(litehtml::string& text,
         return;
     }
     // url 可能是相对路径，baseurl 是当前 html 所在目录
-    std::wstring w_path = zip_index.find(a2w(url));
+    std::wstring w_path = g_zipIndex.find(a2w(url));
     EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
     if (!mf.data.empty())
     {
@@ -1656,34 +1659,99 @@ void SimpleContainer::import_css(litehtml::string& text,
     // baseurl 保持原样即可
 }
 
+
+static void AddRoundRect(Gdiplus::GraphicsPath& path,
+    const Gdiplus::RectF& rc,
+    const float rx[4], const float ry[4])
+{
+    // 左上
+    path.AddArc(rc.X, rc.Y, rx[0] * 2, ry[0] * 2, 180, 90);
+    // 右上
+    path.AddArc(rc.X + rc.Width - rx[1] * 2, rc.Y, rx[1] * 2, ry[1] * 2, 270, 90);
+    // 右下
+    path.AddArc(rc.X + rc.Width - rx[2] * 2, rc.Y + rc.Height - ry[2] * 2,
+        rx[2] * 2, ry[2] * 2, 0, 90);
+    // 左下
+    path.AddArc(rc.X, rc.Y + rc.Height - ry[3] * 2, rx[3] * 2, ry[3] * 2, 90, 90);
+    path.CloseFigure();
+}
 void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
     const litehtml::borders& borders,
     const litehtml::position& pos,
     bool root)
 {
     HDC dc = reinterpret_cast<HDC>(hdc);
-    RECT rc{ pos.x, pos.y, pos.x + pos.width, pos.y + pos.height };
 
-    auto draw_edge = [&](int flag, litehtml::border b) {
-        if (b.width <= 0) return;
-        HPEN pen = CreatePen(PS_SOLID, b.width,
-            RGB(b.color.red, b.color.green, b.color.blue));
-        HPEN old = (HPEN)SelectObject(dc, pen);
-        MoveToEx(dc, rc.left, rc.top, nullptr);
-        switch (flag) {
-        case 0: LineTo(dc, rc.right, rc.top); break;                 // top
-        case 1: LineTo(dc, rc.right, rc.bottom); break;             // right
-        case 2: LineTo(dc, rc.left, rc.bottom); break;              // bottom
-        case 3: LineTo(dc, rc.left, rc.top);    break;              // left
-        }
-        SelectObject(dc, old);
-        DeleteObject(pen);
+    // 把 CSS 像素转成实际像素（DPI 缩放）
+    int dpi = 96;                     // 如果你前面有 dpi，直接替换
+    auto px = [=](float css) -> float {
+        return css * dpi / 96.0f;
         };
 
-    draw_edge(0, borders.top);
-    draw_edge(1, borders.right);
-    draw_edge(2, borders.bottom);
-    draw_edge(3, borders.left);
+    // 目标矩形
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    Gdiplus::RectF rc(
+        (Gdiplus::REAL)pos.x,
+        (Gdiplus::REAL)pos.y,
+        (Gdiplus::REAL)pos.width,
+        (Gdiplus::REAL)pos.height);
+
+    // 构造圆角矩形路径
+    Gdiplus::GraphicsPath path;
+    float rx[4] = {
+        px(borders.radius.top_left_x),
+        px(borders.radius.top_right_x),
+        px(borders.radius.bottom_right_x),
+        px(borders.radius.bottom_left_x)
+    };
+    float ry[4] = {
+        px(borders.radius.top_left_y),
+        px(borders.radius.top_right_y),
+        px(borders.radius.bottom_right_y),
+        px(borders.radius.bottom_left_y)
+    };
+    AddRoundRect(path, rc, rx, ry);
+
+    // 画四条边（颜色/宽度可能不同，这里简化成四条线）
+    // 如果四条边完全一致，可以直接 FillPath + DrawPath 一次完成
+    auto draw_side = [&](Gdiplus::Color c, float w,
+        const Gdiplus::PointF& p1,
+        const Gdiplus::PointF& p2)
+        {
+            if (w <= 0) return;
+            Gdiplus::Pen pen(c, w);
+            g.DrawLine(&pen, p1, p2);
+        };
+
+    Gdiplus::Color cTop = Gdiplus::Color(borders.top.color.alpha,
+        borders.top.color.red,
+        borders.top.color.green,
+        borders.top.color.blue);
+    Gdiplus::Color cRight = Gdiplus::Color(borders.right.color.alpha,
+        borders.right.color.red,
+        borders.right.color.green,
+        borders.right.color.blue);
+    Gdiplus::Color cBottom = Gdiplus::Color(borders.bottom.color.alpha,
+        borders.bottom.color.red,
+        borders.bottom.color.green,
+        borders.bottom.color.blue);
+    Gdiplus::Color cLeft = Gdiplus::Color(borders.left.color.alpha,
+        borders.left.color.red,
+        borders.left.color.green,
+        borders.left.color.blue);
+
+    float wTop = px(borders.top.width);
+    float wRight = px(borders.right.width);
+    float wBottom = px(borders.bottom.width);
+    float wLeft = px(borders.left.width);
+
+    // 四条直线（圆角矩形四条边）
+    draw_side(cTop, wTop, { rc.X, rc.Y }, { rc.X + rc.Width, rc.Y });
+    draw_side(cRight, wRight, { rc.X + rc.Width, rc.Y }, { rc.X + rc.Width, rc.Y + rc.Height });
+    draw_side(cBottom, wBottom, { rc.X + rc.Width, rc.Y + rc.Height }, { rc.X, rc.Y + rc.Height });
+    draw_side(cLeft, wLeft, { rc.X, rc.Y + rc.Height }, { rc.X, rc.Y });
 }
 
 // ---------- 2. 标题 ----------------------------------------------------
@@ -1902,7 +1970,7 @@ static duk_ret_t js_fetch(duk_context* ctx)
     duk_push_this(ctx);                      // 拿到 EPUBHost 对象
     duk_get_prop_string(ctx, -1, "\xff""self");
     SimpleContainer* self = static_cast<SimpleContainer*>(duk_get_pointer(ctx, -1));
-    std::wstring wpath = zip_index.find(a2w(url));
+    std::wstring wpath = g_zipIndex.find(a2w(url));
     EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
     if (mf.data.empty())
     {
@@ -2037,3 +2105,178 @@ std::string PreprocessHTML(std::string html)
     return html;
 }
 
+
+
+void SimpleContainer::set_font_backend(FontBackend b) {
+    if (g_doc) g_doc.reset();   // 释放所有字体
+    m_fe.reset();
+    // 先尝试切换
+    switch (b) {
+    case FontBackend::GDI: {
+        m_fe = std::make_unique<GdiEngine>();
+        return;
+    }
+        // 以后扩展：
+        // case FontBackend::DirectWrite:
+        //     m_fe = std::make_unique<DWriteEngine>();
+        //     return;
+        // case FontBackend::FreeType:
+        //     m_fe = std::make_unique<FtEngine>();
+        //     return;
+    default:
+        break;
+    }
+
+    // 找不到实现 → 强制 GDI
+    m_fe = std::make_unique<GdiEngine>();
+}
+
+litehtml::uint_ptr SimpleContainer::create_font(const char* faceName,
+    int size,
+    int weight,
+    litehtml::font_style italic,
+    unsigned int,
+    litehtml::font_metrics* fm) {
+    return m_fe->create_font(a2w(faceName).c_str(), size, weight,
+        italic != litehtml::font_style_normal, fm);
+}
+
+void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
+    const char* text,
+    litehtml::uint_ptr hFont,
+    litehtml::web_color color,
+    const litehtml::position& pos) {
+    m_fe->draw_text(hdc, text, hFont, color, pos);
+}
+
+FontWrapper::FontWrapper(const wchar_t* face, int size, int weight, bool italic) {
+    hFont = CreateFontW(-size, 0, 0, 0, weight,
+        italic ? TRUE : FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH, face);
+
+    if (hFont) {
+        HDC dc = GetDC(nullptr);
+        HFONT old = (HFONT)SelectObject(dc, hFont);
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        height = tm.tmHeight;
+        ascent = tm.tmAscent;
+        descent = tm.tmDescent;
+        SelectObject(dc, old);
+        ReleaseDC(nullptr, dc);
+    }
+}
+FontWrapper::~FontWrapper() { if (hFont) DeleteObject(hFont); }
+
+
+litehtml::uint_ptr GdiEngine::create_font(const wchar_t* face,
+    int size,
+    int weight,
+    bool italic,
+    litehtml::font_metrics* fm)
+{
+    // 1. 先尝试用 EPUB 自带字体名（已注册到系统）
+    HFONT hFont = CreateFontW(-size, 0, 0, 0, weight,
+        italic ? TRUE : FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH, face);
+
+    // 2. 如果系统没有该字体，再回退到系统字体
+    if (!hFont)
+    {
+        hFont = CreateFontW(-size, 0, 0, 0, weight,
+            italic ? TRUE : FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH, L"Segoe UI"); // 回退字体
+    }
+
+    if (!hFont) return 0;
+
+    auto fw = std::make_unique<FontWrapper>(hFont); // 下面改构造
+    if (fm)
+    {
+        HDC dc = GetDC(nullptr);
+        HFONT old = (HFONT)SelectObject(dc, hFont);
+        //SetBkMode(dc, TRANSPARENT);          // 避免背景色影响
+        //SetTextCharacterExtra(dc, 0);        // 关闭字符间距微调
+        TEXTMETRICW tm;
+        GetTextMetricsW(dc, &tm);
+        fm->height = tm.tmHeight;
+        fm->ascent = tm.tmAscent;
+        fm->descent = tm.tmDescent;
+        SelectObject(dc, old);
+        ReleaseDC(nullptr, dc);
+    }
+
+    litehtml::uint_ptr h = reinterpret_cast<litehtml::uint_ptr>(hFont);
+    m_fonts[h] = std::move(fw);
+    return h;
+}
+
+void GdiEngine::draw_text(litehtml::uint_ptr hdc,
+    const char* text,
+    litehtml::uint_ptr hFont,
+    litehtml::web_color color,
+    const litehtml::position& pos) {
+    if (!hFont || !text) return;
+    HDC dc = reinterpret_cast<HDC>(hdc);
+    HFONT hF = reinterpret_cast<HFONT>(hFont);
+    HGDIOBJ old = SelectObject(dc, hF);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(color.red, color.green, color.blue));
+    std::wstring wtxt = a2w(text);
+    TextOutW(dc, pos.left(), pos.top(), wtxt.c_str(), (int)wtxt.size());
+    SelectObject(dc, old);
+}
+
+void GdiEngine::delete_font(litehtml::uint_ptr hFont) {
+    m_fonts.erase(hFont);
+}
+
+void EPUBBook::load_all_fonts()
+{
+
+    for (const auto& item : g_book.ocf_pkg_.manifest)
+    {
+        const std::wstring& mime = item.media_type;
+        if (mime != L"application/x-font-ttf" &&
+            mime != L"application/font-sfnt" &&
+            mime != L"font/otf" &&
+            mime != L"font/ttf" &&
+            mime != L"font/woff" &&
+            mime != L"font/woff2")
+        {
+            continue;
+        }
+
+        // 用 zip 索引把 href 转成 zip 内路径
+        std::wstring wpath = g_zipIndex.find(item.href);   
+        EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
+
+        if (mf.data.empty())
+        {
+            OutputDebugStringW((L"[Font] 字体文件为空: " + wpath + L"\n").c_str());
+            continue;
+        }
+
+        DWORD nFonts = 0;
+        HANDLE hFont = AddFontMemResourceEx(
+            (void*)mf.data.data(),
+            (DWORD)mf.data.size(),
+            nullptr,
+            &nFonts);
+        if (!hFont)
+        {
+            OutputDebugStringW((L"[Font] 添加失败: " + wpath + L"\n").c_str());
+            continue;
+        }
+
+        OutputDebugStringW((L"[Font] 添加成功: " + wpath + L"\n").c_str());
+
+        g_customFonts[wpath] = hFont;
+    }
+}
