@@ -47,6 +47,16 @@ using namespace Gdiplus;
 
 #include <chrono>
 #include <thread>
+#include <set>
+#include <dwrite_3.h>
+#include <d2d1.h>
+#include <wrl/client.h>
+#include <unordered_map>
+#include <string>
+#include <codecvt>
+#include <locale>
+#pragma comment(lib, "dwrite.lib")
+using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
 HWND  g_hwndTV = nullptr;    // 侧边栏 TreeView
@@ -68,18 +78,19 @@ struct AppSettings {
     bool disableJS = false;   // 默认不禁用 JS
     bool disablePreprocessHTML = false;
     FontBackend selectedFontBackend = FontBackend::GDI;
+    
 };
 AppSettings g_cfg;
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
-static std::unordered_map<std::wstring, HANDLE> g_customFonts;
-
+static std::vector<std::wstring> g_tempFontFiles;
+static std::unordered_map<std::wstring, std::wstring> g_realFontNames;
 std::string PreprocessHTML(std::string html);
 void UpdateCache(void);
 struct GdiplusDeleter { void operator()(Gdiplus::Image* p) const { delete p; } };
 using ImagePtr = std::unique_ptr<Gdiplus::Image, GdiplusDeleter>;
 static  std::string g_globalCSS = "";
 static fs::file_time_type g_lastTime;
-
+std::set<std::wstring> g_activeFonts;
 class Paginator {
 public:
     void load(litehtml::document* doc, int w, int h);
@@ -126,6 +137,16 @@ struct FontWrapper {
     ~FontWrapper();
 };
 
+struct DWriteFontWrapper {
+    ComPtr<IDWriteTextFormat3> fmt;   // 用于排版
+    ComPtr<IDWriteFontFace5>   face;  // 用于度量
+    int height = 0, ascent = 0, descent = 0;
+
+    DWriteFontWrapper(IDWriteTextFormat3* f, IDWriteFontFace5* fa,
+        int h, int asc, int dsc)
+        : fmt(f), face(fa), height(h), ascent(asc), descent(dsc) {
+    }
+};
 class GdiEngine : public IFontEngine {
 public:
     litehtml::uint_ptr create_font(const wchar_t* face,
@@ -144,7 +165,70 @@ private:
     std::unordered_map<litehtml::uint_ptr, std::unique_ptr<FontWrapper>> m_fonts;
 };
 
+class DWriteEngine : public IFontEngine {
+public:
+    DWriteEngine();   // 无参构造
 
+    // IFontEngine 接口
+    litehtml::uint_ptr create_font(const wchar_t* face,
+        int size,
+        int weight,
+        bool italic,
+        litehtml::font_metrics* fm) override;
+    void draw_text(litehtml::uint_ptr hdc,
+        const char* text,
+        litehtml::uint_ptr hFont,
+        litehtml::web_color color,
+        const litehtml::position& pos) override;
+    void delete_font(litehtml::uint_ptr hFont) override;
+
+private:
+    struct DWriteFontWrapper {
+        ComPtr<IDWriteTextFormat3> fmt;
+        ComPtr<IDWriteFontFace5>   face;
+        int height = 0, ascent = 0, descent = 0;
+        DWriteFontWrapper(IDWriteTextFormat3* f, IDWriteFontFace5* fa,
+            int h, int asc, int dsc)
+            : fmt(f), face(fa), height(h), ascent(asc), descent(dsc) {
+        }
+    };
+
+    static ComPtr<IDWriteFactory7> s_factory;
+    static IDWriteFactory7* factory();   // 内部单例
+
+    std::unordered_map<litehtml::uint_ptr,
+        std::unique_ptr<DWriteFontWrapper>> m_fonts;
+    litehtml::uint_ptr m_nextHandle = 1;
+};
+
+// ----------------------------------------------------------
+//  静态成员定义
+// ----------------------------------------------------------
+ComPtr<IDWriteFactory7> DWriteEngine::s_factory;
+
+IDWriteFactory7* DWriteEngine::factory()
+{
+    if (!s_factory)
+    {
+        DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory7),
+            reinterpret_cast<IUnknown**>(s_factory.GetAddressOf()));
+    }
+    return s_factory.Get();
+}
+void DumpAllFontNames()
+{
+    HDC hdc = GetDC(nullptr);
+    LOGFONTW lf{ 0 };
+    lf.lfCharSet = DEFAULT_CHARSET;
+    EnumFontFamiliesExW(hdc, &lf,
+        [](const LOGFONTW* lpelfe, const TEXTMETRICW*, DWORD, LPARAM) -> int {
+            OutputDebugStringW((L"[Enum] " + std::wstring(lpelfe->lfFaceName) + L"\n").c_str());
+            return 1;
+        }, 0, 0);
+    ReleaseDC(nullptr, hdc);
+}
 
 // 真正读文件
 static void do_reload()
@@ -219,6 +303,25 @@ static std::wstring utf8_to_utf16(const std::string& src)
     // 去掉末尾的 L'\0'
     while (!dst.empty() && dst.back() == L'\0') dst.pop_back();
     return dst;
+}
+
+void ShowActiveFontsDialog(HWND hParent)
+{
+    std::wstring text;
+    if (g_activeFonts.empty())
+    {
+        text = L"当前没有加载任何字体。";
+    }
+    else
+    {
+        for (const auto& name : g_activeFonts)
+            text += name + L"\r\n";
+    }
+
+    MessageBoxW(hParent,
+        text.c_str(),
+        L"当前正在使用的字体",
+        MB_ICONINFORMATION | MB_OK);
 }
 
 bool is_xhtml(const std::wstring& file_path)
@@ -568,10 +671,16 @@ struct EPUBBook {
 
 
 
-    EPUBBook() noexcept {
-        load_all_fonts();
+    EPUBBook() noexcept {}
+    ~EPUBBook() { 
+        mz_zip_reader_end(&zip);
+        for (const auto& path : g_tempFontFiles)
+        {
+            RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
+            DeleteFileW(path.c_str());
+        }
+        g_tempFontFiles.clear();
     }
-    ~EPUBBook() { mz_zip_reader_end(&zip); }
 };
 
 
@@ -629,7 +738,8 @@ bool EPUBBook::load(const wchar_t* epub_path) {
     parse_ocf_();
     parse_opf_();
     parse_toc_();
-
+    load_all_fonts();
+    //DumpAllFontNames();
     LoadToc();
     return true;
 }
@@ -828,9 +938,6 @@ public:
     {
         clear_images();   // 仅触发一次 Image 析构
         if (m_js) duk_destroy_heap(m_js);
-        for (auto& kv : g_customFonts)
-            RemoveFontMemResourceEx(kv.second);
-        g_customFonts.clear();
     }
 
 
@@ -1308,6 +1415,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
             break;
         }
+        case IDM_INFO_FONTS:{
+            ShowActiveFontsDialog(g_hWnd);
+            break;
+        }
                           break;
 
         }
@@ -1342,6 +1453,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     InitCommonControlsEx(&icc);
     // 在 CreateWindow 之前
     HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MENU_MAIN));
+    
     if (!hMenu) {
         MessageBox(nullptr, L"LoadMenu 失败", L"Error", MB_ICONERROR);
         return 0;
@@ -2116,13 +2228,14 @@ void SimpleContainer::set_font_backend(FontBackend b) {
         m_fe = std::make_unique<GdiEngine>();
         return;
     }
-        // 以后扩展：
-        // case FontBackend::DirectWrite:
-        //     m_fe = std::make_unique<DWriteEngine>();
-        //     return;
-        // case FontBackend::FreeType:
-        //     m_fe = std::make_unique<FtEngine>();
-        //     return;
+         
+    case FontBackend::DirectWrite: {
+        m_fe = std::make_unique<DWriteEngine>();
+        return;
+    }
+         //case FontBackend::FreeType:
+         //    m_fe = std::make_unique<FtEngine>();
+         //    return;
     default:
         break;
     }
@@ -2177,6 +2290,7 @@ litehtml::uint_ptr GdiEngine::create_font(const wchar_t* face,
     bool italic,
     litehtml::font_metrics* fm)
 {
+
     // 1. 先尝试用 EPUB 自带字体名（已注册到系统）
     HFONT hFont = CreateFontW(-size, 0, 0, 0, weight,
         italic ? TRUE : FALSE, FALSE, FALSE,
@@ -2196,6 +2310,18 @@ litehtml::uint_ptr GdiEngine::create_font(const wchar_t* face,
 
     if (!hFont) return 0;
 
+    // 3. 取“真实”字体名
+    wchar_t realName[LF_FACESIZE] = { 0 };
+    {
+        HDC dc = GetDC(nullptr);
+        HFONT old = (HFONT)SelectObject(dc, hFont);
+        GetTextFaceW(dc, LF_FACESIZE, realName);
+        SelectObject(dc, old);
+        ReleaseDC(nullptr, dc);
+    }
+    g_activeFonts.insert(realName);   // 真正用到的才记录
+    OutputDebugStringW((std::wstring(L"requested=") + face +
+        L", actual=" + realName + L"\n").c_str());
     auto fw = std::make_unique<FontWrapper>(hFont); // 下面改构造
     if (fm)
     {
@@ -2208,8 +2334,11 @@ litehtml::uint_ptr GdiEngine::create_font(const wchar_t* face,
         fm->height = tm.tmHeight;
         fm->ascent = tm.tmAscent;
         fm->descent = tm.tmDescent;
+        fm->x_height = tm.tmAscent / 2;   // 近似
+        fm->draw_spaces = true;
         SelectObject(dc, old);
         ReleaseDC(nullptr, dc);
+ 
     }
 
     litehtml::uint_ptr h = reinterpret_cast<litehtml::uint_ptr>(hFont);
@@ -2239,7 +2368,6 @@ void GdiEngine::delete_font(litehtml::uint_ptr hFont) {
 
 void EPUBBook::load_all_fonts()
 {
-
     for (const auto& item : g_book.ocf_pkg_.manifest)
     {
         const std::wstring& mime = item.media_type;
@@ -2248,35 +2376,212 @@ void EPUBBook::load_all_fonts()
             mime != L"font/otf" &&
             mime != L"font/ttf" &&
             mime != L"font/woff" &&
-            mime != L"font/woff2")
+            mime != L"font/woff2" &&
+            mime != L"application/truetype" &&
+            mime != L"application/opentype")
         {
             continue;
         }
 
-        // 用 zip 索引把 href 转成 zip 内路径
-        std::wstring wpath = g_zipIndex.find(item.href);   
+        std::wstring wpath = g_zipIndex.find(item.href);
         EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
-
         if (mf.data.empty())
         {
             OutputDebugStringW((L"[Font] 字体文件为空: " + wpath + L"\n").c_str());
             continue;
         }
 
-        DWORD nFonts = 0;
-        HANDLE hFont = AddFontMemResourceEx(
-            (void*)mf.data.data(),
-            (DWORD)mf.data.size(),
+        // 1. 取文件名（不含路径）
+        wchar_t fileName[MAX_PATH]{};
+        wcscpy_s(fileName, wpath.c_str());
+        PathStripPathW(fileName);   // ✅ 安全：C 风格数组
+
+        // 2. 拼临时完整路径
+        wchar_t tmpDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmpDir);
+
+        wchar_t tmpFile[MAX_PATH]{};
+        PathCombineW(tmpFile, tmpDir, fileName);
+
+        // 3. 写临时文件
+        HANDLE hFile = CreateFileW(tmpFile,
+            GENERIC_WRITE,
+            0,
             nullptr,
-            &nFonts);
-        if (!hFont)
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
         {
-            OutputDebugStringW((L"[Font] 添加失败: " + wpath + L"\n").c_str());
+            OutputDebugStringW((L"[Font] 写临时文件失败: " + std::wstring(fileName) + L"\n").c_str());
             continue;
         }
 
-        OutputDebugStringW((L"[Font] 添加成功: " + wpath + L"\n").c_str());
+        DWORD written = 0;
+        WriteFile(hFile, mf.data.data(), (DWORD)mf.data.size(), &written, nullptr);
+        CloseHandle(hFile);
 
-        g_customFonts[wpath] = hFont;
+        // 4. 注册到进程私有字体表
+        int ret = AddFontResourceExW(tmpFile, FR_PRIVATE, 0);
+        if (ret == 0)
+        {
+            OutputDebugStringW((L"[Font] 添加失败: " + std::wstring(tmpFile) + L"\n").c_str());
+            DeleteFileW(tmpFile);
+            continue;
+        }
+
+        OutputDebugStringW((L"[Font] 添加成功: " + std::wstring(tmpFile) + L"\n").c_str());
+
+        g_tempFontFiles.emplace_back(tmpFile);   // 记录路径，退出时删除
     }
+}
+
+// ----------------------------------------------------------
+//  构造 / 析构
+// ----------------------------------------------------------
+DWriteEngine::DWriteEngine() = default;
+
+// ----------------------------------------------------------
+//  create_font
+// ----------------------------------------------------------
+litehtml::uint_ptr DWriteEngine::create_font(const wchar_t* face,
+    int size,
+    int weight,
+    bool italic,
+    litehtml::font_metrics* fm)
+{
+    ComPtr<IDWriteTextFormat> fmtBase;
+    const wchar_t* familyName = (face && *face) ? face : L"Segoe UI";
+    HRESULT hr = factory()->CreateTextFormat(
+        familyName,
+        nullptr,
+        static_cast<DWRITE_FONT_WEIGHT>(weight),
+        italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        static_cast<float>(size),
+        L"en-us",
+        &fmtBase);
+    if (FAILED(hr)) return 0;
+
+    ComPtr<IDWriteTextFormat3> fmt;
+    fmtBase.As(&fmt);
+
+
+    // 1. 拿到系统字体集合
+    ComPtr<IDWriteFontCollection> sysCollection;
+    factory()->GetSystemFontCollection(&sysCollection, FALSE);
+
+    // 2. 找到字体族
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    sysCollection->FindFamilyName(face ? face : L"Segoe UI", &index, &exists);
+    if (!exists) index = 0;   // 兜底
+
+    ComPtr<IDWriteFontFamily> family;
+    sysCollection->GetFontFamily(index, &family);
+
+    // 3. 根据 weight / italic 拿到字体
+    ComPtr<IDWriteFont> dwFont;
+    family->GetFirstMatchingFont(
+        static_cast<DWRITE_FONT_WEIGHT>(weight),
+        DWRITE_FONT_STRETCH_NORMAL,
+        italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+        &dwFont);
+
+    // 4. 拿到字体 face
+    ComPtr<IDWriteFontFace> baseFace;
+    dwFont->CreateFontFace(&baseFace);
+
+    ComPtr<IDWriteFontFace5> fontFace;
+    baseFace.As(&fontFace);
+
+    DWRITE_FONT_METRICS dwFm{};
+    fontFace->GetMetrics(&dwFm);
+
+    int ascent = static_cast<int>(dwFm.ascent * size / dwFm.designUnitsPerEm);
+    int descent = static_cast<int>(dwFm.descent * size / dwFm.designUnitsPerEm);
+    int height = ascent + descent;
+
+    if (fm)
+    {
+        fm->ascent = ascent;
+        fm->descent = descent;
+        fm->height = height;
+    }
+
+    litehtml::uint_ptr handle = m_nextHandle++;
+    m_fonts[handle] = std::make_unique<DWriteFontWrapper>(
+        fmt.Get(), fontFace.Get(), height, ascent, descent);
+    return handle;
+}
+
+// ----------------------------------------------------------
+//  draw_text
+// ----------------------------------------------------------
+void DWriteEngine::draw_text(litehtml::uint_ptr hdc,
+    const char* text,
+    litehtml::uint_ptr hFont,
+    litehtml::web_color color,
+    const litehtml::position& pos)
+{
+    /* 0. 最早期防御 */
+    if (!hdc || !text || !*text) return;
+    auto it = m_fonts.find(hFont);
+    if (it == m_fonts.end()) return;
+
+    /* 1. 安全包装裸指针 */
+    ComPtr<ID2D1RenderTarget> rt;
+    rt.Attach(reinterpret_cast<ID2D1RenderTarget*>(hdc));
+    if (!rt) return;
+
+    /* 2. 设备丢失 & 零尺寸  ------------------ 修正 1 */
+    D2D1_SIZE_F sz = rt->GetSize();          // ← 无参版本
+    if (sz.width <= 0.0f || sz.height <= 0.0f) return;
+
+    /* 3. 字符串转换 ------------------------- 修正 2 */
+    int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+    if (len <= 0) return;
+    std::wstring wstr(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, wstr.data(), len);
+    wstr.pop_back();                       // 去掉末尾 L'\0'
+
+    /* 4. TextLayout ------------------------- 修正 3 */
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(factory()->CreateTextLayout(
+        wstr.c_str(),
+        static_cast<UINT32>(wstr.size()),
+        it->second->fmt.Get(),
+        sz.width,                    // 用 RT 实际宽度
+        sz.height,
+        &layout)))
+        return;
+
+    /* 5. 画刷 */
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(rt->CreateSolidColorBrush(
+        D2D1::ColorF(color.red / 255.0f,
+            color.green / 255.0f,
+            color.blue / 255.0f,
+            color.alpha / 255.0f),
+        &brush)))
+        return;
+
+    /* 6. 保存/恢复变换 */
+    D2D1_MATRIX_3X2_F oldTrans{};
+    rt->GetTransform(&oldTrans);
+    rt->SetTransform(D2D1::Matrix3x2F::Translation(
+        static_cast<float>(pos.x),
+        static_cast<float>(pos.y)));
+    rt->DrawTextLayout(D2D1::Point2F(0.0f, 0.0f), layout.Get(), brush.Get());
+    rt->SetTransform(oldTrans);
+
+    /* 7. 释放临时引用 */
+    rt.Detach();
+}
+// ----------------------------------------------------------
+//  delete_font
+// ----------------------------------------------------------
+void DWriteEngine::delete_font(litehtml::uint_ptr hFont)
+{
+    m_fonts.erase(hFont);
 }
