@@ -56,6 +56,30 @@ using namespace Gdiplus;
 #include <codecvt>
 #include <locale>
 #pragma comment(lib, "dwrite.lib")
+#include <d2d1_3.h>        // ID2D1DeviceContext / ID2D1Bitmap1
+#include <wrl/client.h>    // Microsoft::WRL::ComPtr
+#pragma comment(lib, "d2d1.lib")
+#include <dwrite_1.h>   // 需要 IDWriteTextFormat1
+#include <d2d1_1.h>       // D2D 1.1
+#include <d3d11.h>        // D3D11
+#include <dxgi1_2.h>  // DXGI 1.2
+
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+// 简单的错误检查宏
+#include <wincodec.h>
+#include <dwrite_1.h>   // IDWriteInMemoryFontFileLoader
+#include <robuffer.h>   // IBufferByteAccess
+#include <new>
+#include <wrl.h>
+#include <wrl/implements.h>   // 关键
+#pragma comment(lib, "windowscodecs.lib")
+#ifndef HR
+#define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
+#endif
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -64,6 +88,12 @@ HIMAGELIST g_hImg = nullptr;   // 图标(可选)
 HWND      g_hWnd;
 HWND g_hStatus = nullptr;   // 状态栏句柄
 HWND g_hView = nullptr;
+
+HDC        g_hMemDC = nullptr;
+FT_Library g_ftLib = nullptr;
+ComPtr<ID2D1Factory1> g_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
+ComPtr<ID2D1HwndRenderTarget> g_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
+
 enum class FontBackend { GDI = 0, DirectWrite = 1, FreeType = 2 };
 
 static int g_scrollY = 0;   // 当前像素偏移
@@ -72,13 +102,15 @@ std::wstring g_currentHtmlDir = L"";
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
 constexpr UINT WM_EPUB_UPDATE_SCROLLBAR = WM_APP + 2;
 constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
+// -------------- 运行时策略 -----------------
+enum class Renderer { GDI, D2D, FreeType };
+  // 可随时改
 
 struct AppSettings {
     bool disableCSS = false;   // 默认启用
     bool disableJS = false;   // 默认不禁用 JS
     bool disablePreprocessHTML = false;
-    FontBackend selectedFontBackend = FontBackend::GDI;
-    
+    Renderer fontRenderer = Renderer::D2D;
 };
 AppSettings g_cfg;
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
@@ -91,15 +123,406 @@ using ImagePtr = std::unique_ptr<Gdiplus::Image, GdiplusDeleter>;
 static  std::string g_globalCSS = "";
 static fs::file_time_type g_lastTime;
 std::set<std::wstring> g_activeFonts;
+
+struct ImageFrame
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t stride = 0;          // 每行字节数
+    std::vector<uint8_t> rgba;     // 连续像素，8-bit * 4
+};
+
+static bool isWin10OrLater()
+{
+    static bool once = [] {
+        OSVERSIONINFOEXW os{ sizeof(os), 10, 0, 0, 0, {0}, 0, 0, 0, 0, 0 };
+        DWORDLONG mask = 0;
+        VER_SET_CONDITION(mask, VER_MAJORVERSION, VER_GREATER_EQUAL);
+        return ::VerifyVersionInfoW(&os, VER_MAJORVERSION, mask) != FALSE;
+        }();
+    return once;
+}
+
+class InMemoryFontFileLoader
+    : public Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+    IDWriteInMemoryFontFileLoader>
+{
+public:
+    // IDWriteFontFileLoader
+    IFACEMETHODIMP CreateStreamFromKey(
+        const void* /*key*/, UINT32 /*size*/, IDWriteFontFileStream** /*stream*/) override
+    {
+        return E_NOTIMPL;   // 用不到
+    }
+
+    // IDWriteInMemoryFontFileLoader
+    IFACEMETHODIMP CreateInMemoryFontFileReference(
+        IDWriteFactory* factory,
+        const void* data,
+        UINT32 size,
+        IUnknown* owner,
+        IDWriteFontFile** fontFile) override
+    {
+        return factory->CreateCustomFontFileReference(data, size, this, fontFile);
+    }
+
+    STDMETHODIMP_(UINT32) GetFileCount() override
+    {
+        // 简单计数即可；可按需要维护实际数量
+        return 1;
+    }
+};
+class MemoryFontLoader : public IDWriteFontCollectionLoader,
+    public IDWriteFontFileEnumerator
+{
+public:
+    // 静态工厂：一次性把若干内存字体打包成私有集合
+    static HRESULT CreateCollection(
+        IDWriteFactory* dwrite,
+        const std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts,
+        IDWriteFontCollection** out);
+
+    // IUnknown
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
+    IFACEMETHODIMP_(ULONG) AddRef() override { return 1; }
+    IFACEMETHODIMP_(ULONG) Release() override { return 1; }
+
+    // IDWriteFontCollectionLoader
+    IFACEMETHODIMP CreateEnumeratorFromKey(
+        IDWriteFactory* factory,
+        const void* collectionKey, UINT32 collectionKeySize,
+        IDWriteFontFileEnumerator** enumerator) override;
+
+    // IDWriteFontFileEnumerator
+    IFACEMETHODIMP MoveNext(BOOL* hasCurrentFile) override;
+    IFACEMETHODIMP GetCurrentFontFile(IDWriteFontFile** fontFile) override;
+
+private:
+    // 私有构造，只能由 CreateCollection 调用
+    MemoryFontLoader(IDWriteFactory* f,
+        const std::vector<std::vector<uint8_t>>& blobs)
+        : factory_(f), blobs_(blobs), idx_(0) {
+    }
+
+    // 内部辅助：把一段内存封装成 IDWriteFontFile
+    static HRESULT CreateInMemoryFontFile(IDWriteFactory* factory,
+        const void* data,
+        UINT32 size,
+        IDWriteFontFile** out);
+
+    Microsoft::WRL::ComPtr<IDWriteFactory> factory_;
+    std::vector<std::vector<uint8_t>> blobs_;
+    size_t idx_;
+    Microsoft::WRL::ComPtr<IDWriteFontFile> current_;
+};
+
+class TempFileFontLoader : public IDWriteFontCollectionLoader,
+    public IDWriteFontFileEnumerator
+{
+public:
+    // 静态工厂
+    static HRESULT CreateCollection(
+        IDWriteFactory* dwrite,
+        const std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts,
+        IDWriteFontCollection** out,
+        std::vector<std::wstring>& tempPaths);
+
+    // IUnknown
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
+    IFACEMETHODIMP_(ULONG) AddRef() override { return 1; }
+    IFACEMETHODIMP_(ULONG) Release() override { return 1; }
+
+    // IDWriteFontCollectionLoader
+    IFACEMETHODIMP CreateEnumeratorFromKey(
+        IDWriteFactory* factory,
+        const void* collectionKey, UINT32 collectionKeySize,
+        IDWriteFontFileEnumerator** enumerator) override;
+
+    // IDWriteFontFileEnumerator
+    IFACEMETHODIMP MoveNext(BOOL* hasCurrentFile) override;
+    IFACEMETHODIMP GetCurrentFontFile(IDWriteFontFile** fontFile) override;
+
+private:
+    TempFileFontLoader(IDWriteFactory* f,
+        const std::vector<std::wstring>& paths)
+        : factory_(f), paths_(paths), idx_(0) {
+    }
+
+    Microsoft::WRL::ComPtr<IDWriteFactory> factory_;
+    std::vector<std::wstring> paths_;
+    size_t idx_;
+    Microsoft::WRL::ComPtr<IDWriteFontFile> current_;
+};
+HRESULT CreateCompatibleFontCollection(
+    IDWriteFactory* dwrite,
+    const std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts,
+    IDWriteFontCollection** out,
+    std::vector<std::wstring>& tempFilesToDelete)
+{
+    if (isWin10OrLater())
+    {
+        // Win10+ 走内存
+        return MemoryFontLoader::CreateCollection(dwrite, fonts, out);
+    }
+    else
+    {
+        // Win7/8 回落到临时文件
+        return TempFileFontLoader::CreateCollection(dwrite, fonts, out, tempFilesToDelete);
+    }
+}
+
+// -------------- 抽象接口 -----------------
+class IRenderBackend {
+public:
+    virtual ~IRenderBackend() = default;
+
+    /* 必须实现的 7 个纯虚函数 */
+    virtual void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) = 0;
+    virtual void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) = 0;
+    virtual litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) = 0;
+    virtual void delete_font(litehtml::uint_ptr h) = 0;
+    virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) = 0;
+    virtual int pt_to_px(int pt) const = 0;
+    virtual int text_width(const char* text, litehtml::uint_ptr hFont) = 0;
+    virtual void load_all_fonts(void) = 0;
+
+};
+std::shared_ptr<IRenderBackend> g_backend = nullptr;
+std::unordered_map<std::string, ImageFrame> g_img_cache;
+class AppBootstrap {
+public:
+    struct script_info
+    {
+        litehtml::string src;
+        litehtml::string inline_code;
+    };
+    bool init();
+    void shutdown();
+    void makeBackend(Renderer which, void* ctx);
+    void initBackend(Renderer which);
+    void enableJS();
+    void disableJS() { if (m_js) { duk_destroy_heap(m_js); m_js = nullptr; } }
+    void bind_host_objects();   // 新增
+    void run_pending_scripts();
+
+    void switchBackend(std::unique_ptr<IRenderBackend> newBackend) {
+        g_backend = std::move(newBackend);
+    }
+    std::vector<script_info> m_pending_scripts;
+private:
+    duk_context* m_js = nullptr;   // ① Duktape 虚拟机
+
+
+};
+
+
+std::unique_ptr<AppBootstrap> g_bootstrap;
+// -------------- GDI 后端 -----------------
+class GdiBackend : public IRenderBackend {
+public:
+    explicit GdiBackend(HDC hdc) : m_hdc(hdc) {}
+    /* 下面 7 个函数在 .cpp 里用 ExtTextOut / Rectangle 等实现 */
+    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
+    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
+    void delete_font(litehtml::uint_ptr h) override;
+    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
+    int pt_to_px(int pt) const override;
+    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void load_all_fonts(void);
+    ~GdiBackend() {
+        if (!g_tempFontFiles.empty()) {
+            for (const auto& p : g_tempFontFiles)
+            {
+                RemoveFontResourceExW(p.c_str(), FR_PRIVATE, 0);
+                DeleteFileW(p.c_str());
+            }
+            g_tempFontFiles.clear();
+        }
+    }
+private:
+    HDC m_hdc;
+};
+
+// -------------- DirectWrite-D2D 后端 -----------------
+class D2DBackend : public IRenderBackend {
+public:
+    explicit D2DBackend(ComPtr<ID2D1BitmapRenderTarget> rt) : m_rt(rt) { 
+        if (rt) rt->AddRef(); 
+        // 2. 创建 DWrite 工厂
+        HRESULT hr = DWriteCreateFactory(
+            DWRITE_FACTORY_TYPE_SHARED,
+            __uuidof(IDWriteFactory),
+            reinterpret_cast<IUnknown**>(m_dwrite.GetAddressOf()));
+        if (FAILED(hr))
+        {
+            OutputDebugStringA("DWriteCreateFactory failed\n");
+            __debugbreak();
+        }
+
+    }
+    //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
+    /* 下面 6 个函数在 .cpp 里用 IDWriteTextLayout / ID2D1SolidColorBrush 实现 */
+    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
+    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
+    void delete_font(litehtml::uint_ptr h) override;
+    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
+    int pt_to_px(int pt) const override;
+    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void load_all_fonts(void);
+    void unload_fonts(void);
+    ComPtr<ID2D1BitmapRenderTarget> m_rt;
+ 
+
+private:
+       // 自动 AddRef/Release
+    ComPtr<IDWriteFactory>    m_dwrite;
+    Microsoft::WRL::ComPtr<IDWriteFontCollection> m_privateFonts;  // 新增
+    std::vector<std::wstring> m_tempFontFiles;
+    std::wstring m_actualFamily;   // 保存命中的字体家族名m_actualFamily
+    std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
+};
+
+// -------------- FreeType 后端 -----------------
+class FreetypeBackend : public IRenderBackend {
+public:
+    using RasterCB = std::function<void(int, int, const uint8_t*, int, int)>;
+    FreetypeBackend(int w, int h, int dpi,
+        uint8_t* surface, int stride,
+        FT_Library lib);
+    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
+    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
+    void delete_font(litehtml::uint_ptr h) override;
+    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
+    int pt_to_px(int pt) const override;
+    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void load_all_fonts(void);
+private:
+    int m_w, m_h, m_dpi;
+    RasterCB m_raster;
+    uint8_t* m_surface;
+    int m_stride;
+    FT_Library m_lib;
+    void blit_glyph(int x, int y,
+        const FT_Bitmap& bmp,
+        litehtml::web_color c);
+    void fill_rect(const litehtml::position& rc,
+        litehtml::web_color c);
+    std::vector<FT_Face>  m_faces;          // 已加载的 FreeType 字体
+    std::vector<std::vector<uint8_t>> m_fontBlobs; // 保持内存常驻
+};
+
+class ICanvas {
+public:
+    virtual ~ICanvas() = default;
+
+    /* 返回一个 IRenderBackend，用于 litehtml 绘制 */
+    virtual IRenderBackend* backend() = 0;
+
+    /* 把画布内容贴到窗口（WM_PAINT 用）*/
+    virtual void present(HDC hdc, int x, int y) = 0;
+
+    /* 尺寸 */
+    virtual int  width()  const = 0;
+    virtual int  height() const = 0;
+
+    virtual litehtml::uint_ptr getContext() = 0;
+    virtual void BeginDraw() = 0;
+    virtual void EndDraw() = 0;
+    virtual void resize(int width, int height) = 0;
+    /* 工厂：根据当前策略创建画布 */
+    static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
+};
+
+class GdiCanvas : public ICanvas {
+public:
+    GdiCanvas(int w, int h);
+    ~GdiCanvas();
+    IRenderBackend* backend() override { return m_backend.get(); }
+    void present(HDC hdc, int x, int y) override;
+    int width()  const override { return m_w; }
+    int height() const override { return m_h; }
+    litehtml::uint_ptr getContext() override;
+    void BeginDraw() override;
+    void EndDraw() override;
+    void resize(int width, int height) override;
+private:
+    int  m_w, m_h;
+    HDC  m_memDC;
+    HBITMAP m_bmp, m_old;
+    std::unique_ptr<GdiBackend> m_backend;
+};
+
+class D2DCanvas : public ICanvas {
+public:
+    D2DCanvas(int w, int h, ComPtr<ID2D1RenderTarget> devCtx);
+    IRenderBackend* backend() override { return m_backend.get(); }
+    void present(HDC hdc, int x, int y) override;
+    int width()  const override { return m_w; }
+    int height() const override { return m_h; }
+    litehtml::uint_ptr getContext() override;
+    void BeginDraw() override;
+    void EndDraw() override;
+    void resize(int width, int height) override;
+private:
+    int  m_w, m_h;
+    ComPtr<ID2D1Bitmap> m_bmp;
+    std::unique_ptr<D2DBackend> m_backend;
+    ComPtr<ID2D1RenderTarget> m_devCtx;
+    ComPtr<ID2D1BitmapRenderTarget> m_rt;
+
+
+
+};
+
+class FreetypeCanvas : public ICanvas {
+public:
+    FreetypeCanvas(int w, int h, int dpi);
+    ~FreetypeCanvas();
+    IRenderBackend* backend() override { return m_backend.get(); }
+    void present(HDC hdc, int x, int y) override;
+    int width()  const override { return m_w; }
+    int height() const override { return m_h; }
+    litehtml::uint_ptr getContext() override;
+    void BeginDraw() override;
+    void EndDraw() override;
+    void resize(int width, int height) override;
+private:
+    int  m_w, m_h, m_dpi;
+    std::vector<uint8_t>        m_pixels;   // 4*w*h
+    std::unique_ptr<FreetypeBackend> m_backend;
+};
+
+
+std::unique_ptr<ICanvas>
+ICanvas::create(int w, int h, Renderer which)
+{
+    switch (which)
+    {
+    case Renderer::GDI:
+        return std::make_unique<GdiCanvas>(w, h);
+
+    case Renderer::D2D:
+        return std::make_unique<D2DCanvas>(w, h, g_d2dRT);
+    case Renderer::FreeType:
+        return std::make_unique<FreetypeCanvas>(w, h, 96);   // 96 dpi 示例
+    }
+    return nullptr;
+}
 class Paginator {
 public:
     void load(litehtml::document* doc, int w, int h);
-    void render(HDC hdc, int scrollY);
+    void render(ICanvas* canvas, int scrollY);   // 关键：不再区分 HDC / RT
     void clear();
 private:
     litehtml::document* m_doc = nullptr;
     int m_w = 0, m_h = 0;
 };
+// -------------- 工厂 -----------------
+
 
 static ImgFmt detect_fmt(const uint8_t* d, size_t n, const wchar_t* ext)
 {
@@ -115,108 +538,172 @@ static ImgFmt detect_fmt(const uint8_t* d, size_t n, const wchar_t* ext)
 
     return ImgFmt::UNKNOWN;
 }
-struct IFontEngine {
-    virtual ~IFontEngine() = default;
-    virtual litehtml::uint_ptr create_font(const wchar_t* face,
-        int size,
-        int weight,
-        bool italic,
-        litehtml::font_metrics* fm) = 0;
-    virtual void draw_text(litehtml::uint_ptr hdc,
-        const char* text,
-        litehtml::uint_ptr hFont,
-        litehtml::web_color color,
-        const litehtml::position& pos) = 0;
-    virtual void delete_font(litehtml::uint_ptr hFont) = 0;
-};
-struct FontWrapper {
-    HFONT hFont = nullptr;
-    int height = 0, ascent = 0, descent = 0;
-    FontWrapper(const wchar_t* face, int size, int weight, bool italic);
-    FontWrapper(HFONT f) : hFont(f) {}
-    ~FontWrapper();
-};
 
-struct DWriteFontWrapper {
-    ComPtr<IDWriteTextFormat3> fmt;   // 用于排版
-    ComPtr<IDWriteFontFace5>   face;  // 用于度量
-    int height = 0, ascent = 0, descent = 0;
+std::unique_ptr<ICanvas> g_canvas;
 
-    DWriteFontWrapper(IDWriteTextFormat3* f, IDWriteFontFace5* fa,
-        int h, int asc, int dsc)
-        : fmt(f), face(fa), height(h), ascent(asc), descent(dsc) {
-    }
-};
-class GdiEngine : public IFontEngine {
-public:
-    litehtml::uint_ptr create_font(const wchar_t* face,
-        int size,
-        int weight,
-        bool italic,
-        litehtml::font_metrics* fm) override;
-    void draw_text(litehtml::uint_ptr hdc,
-        const char* text,
-        litehtml::uint_ptr hFont,
-        litehtml::web_color color,
-        const litehtml::position& pos) override;
-    void delete_font(litehtml::uint_ptr hFont) override;
 
-private:
-    std::unordered_map<litehtml::uint_ptr, std::unique_ptr<FontWrapper>> m_fonts;
-};
-
-class DWriteEngine : public IFontEngine {
-public:
-    DWriteEngine();   // 无参构造
-
-    // IFontEngine 接口
-    litehtml::uint_ptr create_font(const wchar_t* face,
-        int size,
-        int weight,
-        bool italic,
-        litehtml::font_metrics* fm) override;
-    void draw_text(litehtml::uint_ptr hdc,
-        const char* text,
-        litehtml::uint_ptr hFont,
-        litehtml::web_color color,
-        const litehtml::position& pos) override;
-    void delete_font(litehtml::uint_ptr hFont) override;
-
-private:
-    struct DWriteFontWrapper {
-        ComPtr<IDWriteTextFormat3> fmt;
-        ComPtr<IDWriteFontFace5>   face;
-        int height = 0, ascent = 0, descent = 0;
-        DWriteFontWrapper(IDWriteTextFormat3* f, IDWriteFontFace5* fa,
-            int h, int asc, int dsc)
-            : fmt(f), face(fa), height(h), ascent(asc), descent(dsc) {
-        }
-    };
-
-    static ComPtr<IDWriteFactory7> s_factory;
-    static IDWriteFactory7* factory();   // 内部单例
-
-    std::unordered_map<litehtml::uint_ptr,
-        std::unique_ptr<DWriteFontWrapper>> m_fonts;
-    litehtml::uint_ptr m_nextHandle = 1;
-};
-
-// ----------------------------------------------------------
-//  静态成员定义
-// ----------------------------------------------------------
-ComPtr<IDWriteFactory7> DWriteEngine::s_factory;
-
-IDWriteFactory7* DWriteEngine::factory()
+void SavePixelsToPNG(const BYTE* pixels, UINT w, UINT h, UINT stride, const wchar_t* file)
 {
-    if (!s_factory)
-    {
-        DWriteCreateFactory(
-            DWRITE_FACTORY_TYPE_SHARED,
-            __uuidof(IDWriteFactory7),
-            reinterpret_cast<IUnknown**>(s_factory.GetAddressOf()));
-    }
-    return s_factory.Get();
+    ComPtr<IWICImagingFactory> wic;
+    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+
+    ComPtr<IWICBitmap> wicBmp;
+    wic->CreateBitmapFromMemory(
+        w, h,
+        GUID_WICPixelFormat32bppPBGRA,
+        stride,
+        stride * h,
+        const_cast<BYTE*>(pixels),
+        &wicBmp);
+
+    ComPtr<IWICBitmapEncoder> enc;
+    wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc);
+
+    ComPtr<IWICStream> stream;
+    wic->CreateStream(&stream);
+    stream->InitializeFromFilename(file, GENERIC_WRITE);
+    enc->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> props;
+    enc->CreateNewFrame(&frame, &props);
+    frame->Initialize(props.Get());
+    frame->SetSize(w, h);
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppPBGRA;
+    frame->SetPixelFormat(&format);
+    frame->WriteSource(wicBmp.Get(), nullptr);
+    frame->Commit();
+    enc->Commit();
 }
+
+
+void PrintSystemFontFamilies()
+{
+    ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // 1. 拿 IDWriteFactory
+    Microsoft::WRL::ComPtr<IDWriteFactory> factory;
+    DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(factory.GetAddressOf()));
+
+    // 2. 拿系统字体集合
+    Microsoft::WRL::ComPtr<IDWriteFontCollection> sysFonts;
+    factory->GetSystemFontCollection(&sysFonts);
+
+    UINT32 familyCount = sysFonts->GetFontFamilyCount();
+    char buf[512];
+
+    for (UINT32 i = 0; i < familyCount; ++i)
+    {
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+        sysFonts->GetFontFamily(i, &family);
+
+        Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+        family->GetFamilyNames(&names);
+
+        UINT32 idx = 0;
+        UINT32 len = 0;
+        BOOL exists = FALSE;
+        names->FindLocaleName(L"en-us", &idx, &exists);
+        if (!exists) idx = 0;
+
+        names->GetStringLength(idx, &len);
+        std::wstring wname(len + 1, 0);
+        names->GetString(idx, wname.data(), len + 1);
+
+        // 转成 UTF-8
+        std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> conv;
+        std::string name = conv.to_bytes(wname.c_str());
+
+        snprintf(buf, sizeof(buf), "[SystemFont] %s\n", name.c_str());
+        OutputDebugStringA(buf);
+    }
+
+    ::CoUninitialize();
+}
+// 把 ID2D1Bitmap 保存为 PNG，返回 true 表示成功
+bool DumpBitmap(ID2D1Bitmap* bmp, const wchar_t* file)
+{
+    if (!bmp || !file) return false;
+
+    // 1. 尺寸
+    D2D1_SIZE_U sz = bmp->GetPixelSize();
+    if (sz.width == 0 || sz.height == 0) return false;
+
+    // 2. 创建 WIC 工厂
+    ComPtr<IWICImagingFactory> wic;
+    HRESULT hr = CoCreateInstance(
+        CLSID_WICImagingFactory, nullptr,
+        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    if (FAILED(hr)) return false;
+
+    // 3. 创建 WIC 位图（32bpp PBGRA）
+    ComPtr<IWICBitmap> wicBmp;
+    hr = wic->CreateBitmap(
+        sz.width, sz.height,
+        GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapCacheOnLoad,
+        &wicBmp);
+    if (FAILED(hr)) return false;
+
+    // 4. 创建临时 D2D WIC RenderTarget，把 bmp 画进去
+    ComPtr<ID2D1Factory> d2dFactory;
+    bmp->GetFactory(&d2dFactory);
+
+    ComPtr<ID2D1RenderTarget> rt;
+    hr = d2dFactory->CreateWicBitmapRenderTarget(
+        wicBmp.Get(),
+        D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                D2D1_ALPHA_MODE_PREMULTIPLIED)),
+        &rt);
+    if (FAILED(hr)) return false;
+
+
+
+    // 5. 编码 PNG
+    ComPtr<IWICStream> stream;
+    hr = wic->CreateStream(&stream);
+    if (FAILED(hr)) return false;
+
+    hr = stream->InitializeFromFilename(file, GENERIC_WRITE);
+    if (FAILED(hr)) return false;
+
+    ComPtr<IWICBitmapEncoder> encoder;
+    hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (FAILED(hr)) return false;
+
+    hr = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+    if (FAILED(hr)) return false;
+
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> props;
+    hr = encoder->CreateNewFrame(&frame, &props);
+    if (FAILED(hr)) return false;
+
+    hr = frame->Initialize(props.Get());
+    if (FAILED(hr)) return false;
+
+    hr = frame->SetSize(sz.width, sz.height);
+    if (FAILED(hr)) return false;
+
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppPBGRA;
+    hr = frame->SetPixelFormat(&format);
+    if (FAILED(hr)) return false;
+
+    hr = frame->WriteSource(wicBmp.Get(), nullptr);
+    if (FAILED(hr)) return false;
+
+    hr = frame->Commit();
+    if (FAILED(hr)) return false;
+
+    hr = encoder->Commit();
+    return SUCCEEDED(hr);
+}
+
 void DumpAllFontNames()
 {
     HDC hdc = GetDC(nullptr);
@@ -294,16 +781,17 @@ static std::wstring a2w(const std::string& s)
     return out;
 }
 
-static std::wstring utf8_to_utf16(const std::string& src)
+static inline std::string trim_any(const std::string& s,
+    const char* ws = " \t\"'")
 {
-    if (src.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, nullptr, 0);
-    std::wstring dst(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, &dst[0], len);
-    // 去掉末尾的 L'\0'
-    while (!dst.empty() && dst.back() == L'\0') dst.pop_back();
-    return dst;
+    if (s.empty()) return s;
+    size_t first = s.find_first_not_of(ws);
+    if (first == std::string::npos) return "";
+    size_t last = s.find_last_not_of(ws);
+    return s.substr(first, last - first + 1);
 }
+
+
 
 void ShowActiveFontsDialog(HWND hParent)
 {
@@ -882,35 +1370,19 @@ void EPUBBook::parse_toc_()
 class SimpleContainer : public litehtml::document_container {
 public:
     explicit SimpleContainer(const std::wstring& root = L"")
-        : m_root(root)
-    {
-        // 原来写在 SimpleContainer() 里的所有初始化代码搬到这里
-        auto fw = std::make_unique<FontWrapper>(L"Segoe UI", 16, FW_NORMAL, false);
-        m_hDefaultFont = fw->hFont;
-        m_fonts[m_hDefaultFont] = std::move(fw);
-
-        if (!g_cfg.disableJS) { enableJS(); }
-        else {m_js = nullptr;}
-        set_font_backend(g_cfg.selectedFontBackend);
-       
-    }
-    void clear_images() { m_img_cache.clear(); }
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
+        : m_root(root){   }
+    void clear_images() { g_img_cache.clear(); }
     int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
     void load_image(const char* src, const char* /*baseurl*/, bool) override;
 
     void get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
     void get_client_rect(litehtml::position& client) const override;
     litehtml::element::ptr create_element(const char*, const litehtml::string_map&, const std::shared_ptr<litehtml::document>&) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
-    int pt_to_px(int pt) const override;
+
     int get_default_font_size() const override { return 16; }
-    const char* get_default_font_name() const override { return "Microsoft YaHei"; }
+    const char* get_default_font_name() const override { return "Segoe UI"; }
     void import_css(litehtml::string&, const litehtml::string&, litehtml::string&) override;
 
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
     void set_caption(const char*) override;
     void set_base_url(const char*) override;
     void link(const std::shared_ptr<litehtml::document>&, const litehtml::element::ptr&) override;
@@ -926,100 +1398,91 @@ public:
 
     void draw_list_marker(litehtml::uint_ptr, const litehtml::list_marker&) override;
   
-    void enableJS();
-    void disableJS() { if (m_js) { duk_destroy_heap(m_js); m_js = nullptr; } }
-    void run_pending_scripts();
-    void bind_host_objects();   // 新增
 
-    void set_font_backend(FontBackend b);   // 运行时切换
-    void switch_backend_and_reload(FontBackend b, const std::string& html);
+
+
+    // 渲染后端需要实现的
+    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
+    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
+    void delete_font(litehtml::uint_ptr h) override;
+    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
+    int pt_to_px(int pt) const override;
 
     ~SimpleContainer()
     {
         clear_images();   // 仅触发一次 Image 析构
-        if (m_js) duk_destroy_heap(m_js);
-    }
 
+    }
+    std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
 
 private:
     std::wstring m_root;
     // 1. 锚点表（id -> element）
-    std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
 
     // 2. 最后一次传入的 HDC，用于 set_clip / del_clip
     HDC m_last_hdc = nullptr;
 
     // 3. 默认字体句柄（FontWrapper 是你自己的字体包装类）
     HFONT m_hDefaultFont = nullptr;
-    std::unordered_map<std::string, std::shared_ptr<Gdiplus::Image>> m_img_cache;
-    std::unordered_map<HFONT, std::unique_ptr<FontWrapper>> m_fonts;
-    duk_context* m_js = nullptr;   // ① Duktape 虚拟机
-    struct script_info
-    {
-        litehtml::string src;
-        litehtml::string inline_code;
-    };
-    std::vector<script_info> m_pending_scripts;
-    std::unique_ptr<IFontEngine> m_fe;
-    static std::shared_ptr<Gdiplus::Image> decode_img(const EPUBBook::MemFile& mf,
-        const wchar_t* ext)
-    {
-        auto fmt = detect_fmt(mf.data.data(), mf.data.size(), ext);
 
-        switch (fmt)
-        {
-        case ImgFmt::SVG:
-        {
-            auto doc = lunasvg::Document::loadFromData(
-                reinterpret_cast<const char*>(mf.data.data()), mf.data.size());
-            if (!doc) return nullptr;
 
-            lunasvg::Bitmap svgBmp = doc->renderToBitmap();
-            if (svgBmp.isNull()) return nullptr;
-
-            const int w = svgBmp.width();
-            const int h = svgBmp.height();
-            auto* bmp = new Gdiplus::Bitmap(
-                w, h, w * 4, PixelFormat32bppPARGB,
-                reinterpret_cast<BYTE*>(svgBmp.data()));
-
-            if (bmp->GetLastStatus() != Gdiplus::Ok)
-            {
-                delete bmp;
-                return nullptr;
-            }
-
-            // Bitmap* -> Image* 隐式转换，返回 shared_ptr<Image>
-            return std::shared_ptr<Gdiplus::Image>(
-                bmp,
-                [svgBmp = std::move(svgBmp)](Gdiplus::Image* p) { delete p; });
-        }
-        default:   // PNG/JPEG/BMP/GIF/TIFF/…
-        {
-            IStream* pStream = SHCreateMemStream(mf.data.data(),
-                static_cast<UINT>(mf.data.size()));
-            if (!pStream)
-            {
-                OutputDebugStringA("SHCreateMemStream failed\n");
-                return nullptr;
-            }
-
-            std::shared_ptr<Gdiplus::Image> img(Gdiplus::Image::FromStream(pStream),
-                [](Gdiplus::Image* p) {});
-            pStream->Release();
-
-            if (!img || img->GetLastStatus() != Gdiplus::Ok)
-            {
-                OutputDebugStringA("GDI+ decode failed\n");
-                return nullptr;
-            }
-            return img;
-        }
-        }
-    }
 };
 
+static ImageFrame decode_img(const EPUBBook::MemFile& mf, const wchar_t* ext)
+{
+    ImageFrame frame;
+    auto fmt = detect_fmt(mf.data.data(), mf.data.size(), ext);
 
+    switch (fmt)
+    {
+    case ImgFmt::SVG:
+    {
+        auto doc = lunasvg::Document::loadFromData(
+            reinterpret_cast<const char*>(mf.data.data()), mf.data.size());
+        if (!doc) return {};
+        lunasvg::Bitmap svgBmp = doc->renderToBitmap();
+        if (svgBmp.isNull()) return {};
+
+        frame.width = svgBmp.width();
+        frame.height = svgBmp.height();
+        frame.stride = frame.width * 4;
+        frame.rgba.assign(
+            reinterpret_cast<uint8_t*>(svgBmp.data()),
+            reinterpret_cast<uint8_t*>(svgBmp.data()) + frame.stride * frame.height);
+        break;
+    }
+
+    default:   // PNG/JPEG/BMP/GIF/TIFF/…
+    {
+        IStream* pStream = SHCreateMemStream(mf.data.data(),
+            static_cast<UINT>(mf.data.size()));
+        if (!pStream) return {};
+        Gdiplus::Bitmap bmp(pStream, FALSE);
+        pStream->Release();
+        if (bmp.GetLastStatus() != Gdiplus::Ok) return {};
+
+        frame.width = bmp.GetWidth();
+        frame.height = bmp.GetHeight();
+        frame.stride = frame.width * 4;
+        frame.rgba.resize(frame.stride * frame.height);
+
+        Gdiplus::BitmapData data{};
+        Gdiplus::Rect rc(0, 0, frame.width, frame.height);
+        if (bmp.LockBits(&rc, Gdiplus::ImageLockModeRead,
+            PixelFormat32bppPARGB, &data) == Gdiplus::Ok)
+        {
+            for (uint32_t y = 0; y < frame.height; ++y)
+                memcpy(frame.rgba.data() + y * frame.stride,
+                    reinterpret_cast<uint8_t*>(data.Scan0) + y * data.Stride,
+                    frame.stride);
+            bmp.UnlockBits(&data);
+        }
+        break;
+    }
+    }
+    return frame;
+}
 // ---------- 分页 ----------
 
 
@@ -1033,17 +1496,16 @@ void Paginator::load(litehtml::document* doc, int w, int h)
 
     g_maxScroll = m_doc->height();
 }
-void Paginator::render(HDC hdc, int scrollY)
+void Paginator::render(ICanvas* canvas, int scrollY)
 {
-    if (scrollY < 0 || scrollY >= g_maxScroll) return;
+    if (!canvas || !m_doc) return;
 
-    int old = SaveDC(hdc);
-
-    litehtml::position clip{ 0, 0, m_w, m_h };
-    m_doc->draw(reinterpret_cast<litehtml::uint_ptr>(hdc),
-        0, -scrollY, &clip);
-
-    RestoreDC(hdc, old);
+    canvas->BeginDraw();
+    // 让 litehtml 画在左上角，clip 足够大
+    litehtml::position clip(0, 0, m_w, m_h);
+    m_doc->draw(canvas->getContext(),
+        0, -scrollY, &clip);   // scrollY 先给 0
+    canvas->EndDraw();
 }
 void Paginator::clear() {
     m_doc = nullptr;
@@ -1058,12 +1520,9 @@ EPUBBook  g_book;
 std::shared_ptr<litehtml::document> g_doc;
 Paginator g_pg;
 
-
 std::future<void> g_parse_task;
 
-static HBITMAP g_hCachedBmp = nullptr;
-static int     g_cachedPage = -1;
-static SIZE    g_cachedSize = {};
+
 litehtml::element::ptr element_from_point(litehtml::element::ptr root,
     int x, int y)
 {
@@ -1087,18 +1546,26 @@ litehtml::element::ptr element_from_point(litehtml::element::ptr root,
     return nullptr;
 }
 
-LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
     case WM_SIZE:
     {
-
+        if (g_canvas) {
+            g_canvas->resize(LOWORD(lp), HIWORD(lp));
+        }
+        if (g_d2dRT) {
+            RECT rc;
+            GetClientRect(g_hView, &rc);
+            D2D1_SIZE_U size{ rc.right - rc.left, rc.bottom - rc.top };
+            g_d2dRT->Resize(size);   // HwndRenderTarget 专用
+        }
         return 0;
     }
     case WM_EPUB_UPDATE_SCROLLBAR: {
         RECT rc;
-        GetClientRect(h, &rc);
+        GetClientRect(hWnd, &rc);
         // 垂直滚动条
         SCROLLINFO si{ sizeof(si) };
         si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
@@ -1106,21 +1573,21 @@ LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         si.nMax = std::max(0, g_maxScroll);
         si.nPage = rc.bottom;               // 每次滚一页
         si.nPos = g_scrollY;
-        SetScrollInfo(h, SB_VERT, &si, TRUE);
+        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
         // 水平滚动条（如果不需要可删掉）
         si.nMax = 0;
         si.nPage = rc.right;
-        SetScrollInfo(h, SB_HORZ, &si, TRUE);
+        SetScrollInfo(hWnd, SB_HORZ, &si, TRUE);
         // 重新排版+缓存
         UpdateCache();
-        InvalidateRect(h, nullptr, FALSE);
+        InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
     }
 
     case WM_VSCROLL:
     {
         RECT rc;
-        GetClientRect(h, &rc);
+        GetClientRect(hWnd, &rc);
         int code = LOWORD(wp);
         int pos = HIWORD(wp);
         int delta = 0;
@@ -1141,43 +1608,37 @@ LRESULT CALLBACK ViewWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         g_scrollY = std::clamp(g_scrollY + delta, 0, g_maxScroll);
 
     _scroll_end:
-        SetScrollPos(h, SB_VERT, g_scrollY, TRUE);
+        SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
-        InvalidateRect(h, nullptr, FALSE);   // 触发 WM_PAINT
+        InvalidateRect(hWnd, nullptr, FALSE);   // 触发 WM_PAINT
         return 0;
     }
     case WM_MOUSEWHEEL:
     {
         RECT rc;
-        GetClientRect(h, &rc);
+        GetClientRect(hWnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         g_scrollY = std::clamp<int>(g_scrollY - zDelta, 0, std::max<int>(g_maxScroll - rc.bottom, 0));
-        SetScrollPos(h, SB_VERT, g_scrollY, TRUE);
+        SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
-        InvalidateRect(h, nullptr, FALSE);
+        InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
     }
 
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(h, &ps);
-        if (g_hCachedBmp && g_cachedPage == g_scrollY)
-        {
-            HDC mem = CreateCompatibleDC(hdc);
-            HGDIOBJ old = SelectObject(mem, g_hCachedBmp);
-            BitBlt(hdc, 0, 0, g_cachedSize.cx, g_cachedSize.cy, mem, 0, 0, SRCCOPY);
-            SelectObject(mem, old);
-            DeleteDC(mem);
-        }
-        EndPaint(h, &ps);
+        HDC hdc = BeginPaint(hWnd, &ps);
+        if (g_canvas )
+            g_canvas->present(hdc, 0, 0);
+        EndPaint(hWnd, &ps);
         return 0;
     }
 
     case WM_ERASEBKGND:
         return 1;
     }
-    return DefWindowProc(h, msg, wp, lp);
+    return DefWindowProc(hWnd, msg, wp, lp);
 }
 
 ATOM RegisterViewClass(HINSTANCE hInst)
@@ -1196,39 +1657,25 @@ void UpdateCache()
 {
     if (!g_doc) return;
 
-    RECT rc;
-    GetClientRect(g_hView, &rc);
-    int w = rc.right;
-    int h = rc.bottom;
+    RECT rc; GetClientRect(g_hView, &rc);
+    int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
 
-    // 1) 重新分页
+    /* 1) 重新分页 */
     g_doc->render(w, litehtml::render_all);
-    if (!g_cfg.disableJS) { g_container->run_pending_scripts(); }   // 现在才跑脚本
+    if (!g_cfg.disableJS) g_bootstrap->run_pending_scripts();
     g_pg.load(g_doc.get(), w, h);
 
+    /* 2) 按需重建画布 */
+    if (!g_canvas) {
+        g_canvas = ICanvas::create(w, h, g_cfg.fontRenderer);
+    }
+    if (g_canvas->width() != w || g_canvas->height() != h) {
+        g_canvas->resize(w, h);
+    }
 
-    // 2) 重建单页位图
-    if (g_hCachedBmp) DeleteObject(g_hCachedBmp);
-
-    HDC hdc = GetDC(g_hView);
-    g_hCachedBmp = CreateCompatibleBitmap(hdc, w, h);
-    if (!g_hCachedBmp) { ReleaseDC(g_hView, hdc); return; }
-
-    HDC mem = CreateCompatibleDC(hdc);
-    HGDIOBJ old = SelectObject(mem, g_hCachedBmp);
-
-    RECT fillRc{ 0, 0, w, h };
-    FillRect(mem, &fillRc, GetSysColorBrush(COLOR_WINDOW));
-
-    g_pg.render(mem, g_scrollY);
-
-    SelectObject(mem, old);
-    DeleteDC(mem);
-    ReleaseDC(g_hView, hdc);
-
-    g_cachedSize = { w, h };
-    g_cachedPage = g_scrollY;
+    /* 3) 渲染整页 */
+    g_pg.render(g_canvas.get(), g_scrollY);
 }
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -1236,12 +1683,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CREATE: {
         DragAcceptFiles(h, TRUE);
         SendMessage(g_hWnd, WM_SIZE, 0, 0);
+
         return 0;
     }
     case WM_DROPFILES: {
         wchar_t file[MAX_PATH]{};
         DragQueryFileW(reinterpret_cast<HDROP>(w), 0, file, MAX_PATH);
         DragFinish(reinterpret_cast<HDROP>(w));
+
 
         // 1. 等待上一次任务结束（简单做法：阻塞等待）
         if (g_parse_task.valid()) {
@@ -1360,8 +1809,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             free((void*)tvi.lParam);
             h = TreeView_GetNextSibling(g_hwndTV, h);
         }
-
-        if (g_hCachedBmp) DeleteObject(g_hCachedBmp);
+        //if (g_d2dRT) { g_d2dRT->Release();   g_d2dRT = nullptr; }
+        //if (g_d2dFactory) { g_d2dFactory->Release(); g_d2dFactory = nullptr; }
+        if (g_hMemDC) { DeleteDC(g_hMemDC);  g_hMemDC = nullptr; }
+        if (g_ftLib) { FT_Done_FreeType(g_ftLib); g_ftLib = nullptr; }
+ 
         PostQuitMessage(0);
         return 0;
     }
@@ -1417,6 +1869,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         case IDM_INFO_FONTS:{
             ShowActiveFontsDialog(g_hWnd);
+            PrintSystemFontFamilies();
             break;
         }
                           break;
@@ -1483,7 +1936,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
-
+    g_bootstrap = std::make_unique<AppBootstrap>();
+    g_bootstrap->init();
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
 
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
@@ -1549,7 +2003,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     if (w <= 0 || h <= 0) return;
 
     g_doc->render(w, litehtml::render_all);    // -1 表示“不限高度”
-    if (!g_cfg.disableJS) { g_container->run_pending_scripts(); }   // 现在才跑脚本
+    if (!g_cfg.disableJS) { g_bootstrap->run_pending_scripts(); }   // 现在才跑脚本
     /* 3. 跳转到锚点 */
     if (!id.empty())
     {
@@ -1571,12 +2025,12 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     UpdateWindow(g_hWnd);
 }
 
+// SimpleContainer.cpp
 void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
-    if (m_img_cache.contains(src)) return;
+    if (g_img_cache.contains(src)) return;
 
     std::wstring wpath = g_zipIndex.find(a2w(src));
-
     EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
     if (mf.data.empty())
     {
@@ -1586,105 +2040,34 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 
     auto dot = wpath.find_last_of(L'.');
     std::wstring ext;
-    if (dot != std::wstring::npos && dot + 1 < wpath.size()) {
-        ext = wpath.substr(dot + 1);                 // 去掉“.”
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower); // 转小写
-    }
-    auto img = decode_img(mf, ext.empty() ? nullptr : ext.c_str());
-
-    if (img)
+    if (dot != std::wstring::npos && dot + 1 < wpath.size())
     {
-        m_img_cache.emplace(src, std::move(img));
+        ext = wpath.substr(dot + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+    }
+
+    ImageFrame frame = decode_img(mf, ext.empty() ? nullptr : ext.c_str());
+    if (!frame.rgba.empty())
+    {
+        g_img_cache.emplace(src, std::move(frame));
     }
     else
     {
         OutputDebugStringA(("EPUB decode failed: " + std::string(src) + "\n").c_str());
     }
 }
-void SimpleContainer::draw_background(litehtml::uint_ptr hdc,
-    const std::vector<litehtml::background_paint>& bg)
-{
-    HDC dc = reinterpret_cast<HDC>(hdc);
-    for (const auto& b : bg)
-    {
-        /* 背景色 */
-        if (&b == &bg.back() && b.color.alpha > 0)
-        {
-            HBRUSH br = CreateSolidBrush(RGB(b.color.red, b.color.green, b.color.blue));
-            RECT rc{ b.border_box.x, b.border_box.y,
-                     b.border_box.x + b.border_box.width,
-                     b.border_box.y + b.border_box.height };
-            FillRect(dc, &rc, br);
-            DeleteObject(br);
-        }
 
-        if (b.image.empty()) continue;
-
-        auto it = m_img_cache.find(b.image);
-        if (it == m_img_cache.end())
-        {
-            OutputDebugStringA(("MISS: " + b.image + "\n").c_str());
-            continue;
-        }
-
-        std::shared_ptr<Gdiplus::Image> img = it->second;   // 去掉内层作用域
-        if (!img) continue;
-
-        const int imgW = img->GetWidth();
-        const int imgH = img->GetHeight();
-        if (imgW <= 0 || imgH <= 0) continue;
-
-        Gdiplus::Graphics g(dc);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-
-        Gdiplus::Rect dstRect(b.border_box.x, b.border_box.y,
-            b.border_box.width, b.border_box.height);
-
-        const bool isImgLike = (&b == &bg.back());
-        if (isImgLike)
-        {
-            g.DrawImage(img.get(), dstRect, 0, 0, imgW, imgH, Gdiplus::UnitPixel);
-        }
-        else
-        {
-            int srcX = static_cast<int>(b.position_x);
-            int srcY = static_cast<int>(b.position_y);
-            int srcW = static_cast<int>(b.image_size.width);
-            int srcH = static_cast<int>(b.image_size.height);
-            if (srcW <= 0 || srcH <= 0) { srcW = imgW; srcH = imgH; }
-            g.DrawImage(img.get(), dstRect, srcX, srcY, srcW, srcH, Gdiplus::UnitPixel);
-        }
-    }
-}
-
-void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
-{
-    //HFONT hFont = reinterpret_cast<HFONT>(h);
-    //m_fonts.erase(hFont);   // unique_ptr 自动 DeleteObject
-    m_fe->delete_font(hFont);
-}
 int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont) 
 {
-    if (!hFont || !text) return 0;
-    HFONT hF = reinterpret_cast<HFONT>(hFont);
-    HDC hdc = GetDC(nullptr);
-    HGDIOBJ old = SelectObject(hdc, hF);
-
-    SIZE sz{};
-    std::wstring wtxt = a2w(text);
-    GetTextExtentPoint32W(hdc, wtxt.c_str(), static_cast<int>(wtxt.size()), &sz);
-
-    SelectObject(hdc, old);
-    ReleaseDC(nullptr, hdc);
-    return sz.cx;
+    return g_canvas->backend()->text_width(text, hFont);
 }
 
 
 void SimpleContainer::get_image_size(const char* src, const char* baseurl, litehtml::size& sz) {
-    if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
-    auto img = m_img_cache[src];
-    sz.width = img->GetWidth();
-    sz.height = img->GetHeight();
+    if (!g_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
+    auto img = g_img_cache[src];
+    sz.width = img.width;
+    sz.height = img.height;
 }
 
 void SimpleContainer::get_client_rect(litehtml::position& client) const {
@@ -1699,22 +2082,20 @@ SimpleContainer::create_element(const char* tag,
 {
     if (litehtml::t_strcasecmp(tag, "script") == 0)
     {
-        script_info si;
+        AppBootstrap::script_info si;
         auto it = attrs.find("src");
         if (it != attrs.end()) si.src = it->second;
 
         // 内联代码暂时留空，等节点文本解析完再回填
         si.inline_code.clear();
-        m_pending_scripts.emplace_back(std::move(si));
+        g_bootstrap->m_pending_scripts.emplace_back(std::move(si));
     }
     return nullptr;   // 其余元素交给 litehtml 默认流程
 }
 
-int SimpleContainer::pt_to_px(int pt) const {
-    return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
-}
 
-void SimpleContainer::run_pending_scripts()
+
+void AppBootstrap::run_pending_scripts()
 {
     for (auto& script : m_pending_scripts)
     {
@@ -1772,106 +2153,15 @@ void SimpleContainer::import_css(litehtml::string& text,
 }
 
 
-static void AddRoundRect(Gdiplus::GraphicsPath& path,
-    const Gdiplus::RectF& rc,
-    const float rx[4], const float ry[4])
-{
-    // 左上
-    path.AddArc(rc.X, rc.Y, rx[0] * 2, ry[0] * 2, 180, 90);
-    // 右上
-    path.AddArc(rc.X + rc.Width - rx[1] * 2, rc.Y, rx[1] * 2, ry[1] * 2, 270, 90);
-    // 右下
-    path.AddArc(rc.X + rc.Width - rx[2] * 2, rc.Y + rc.Height - ry[2] * 2,
-        rx[2] * 2, ry[2] * 2, 0, 90);
-    // 左下
-    path.AddArc(rc.X, rc.Y + rc.Height - ry[3] * 2, rx[3] * 2, ry[3] * 2, 90, 90);
-    path.CloseFigure();
-}
-void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
-    const litehtml::borders& borders,
-    const litehtml::position& pos,
-    bool root)
-{
-    HDC dc = reinterpret_cast<HDC>(hdc);
 
-    // 把 CSS 像素转成实际像素（DPI 缩放）
-    int dpi = 96;                     // 如果你前面有 dpi，直接替换
-    auto px = [=](float css) -> float {
-        return css * dpi / 96.0f;
-        };
 
-    // 目标矩形
-    Gdiplus::Graphics g(dc);
-    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-
-    Gdiplus::RectF rc(
-        (Gdiplus::REAL)pos.x,
-        (Gdiplus::REAL)pos.y,
-        (Gdiplus::REAL)pos.width,
-        (Gdiplus::REAL)pos.height);
-
-    // 构造圆角矩形路径
-    Gdiplus::GraphicsPath path;
-    float rx[4] = {
-        px(borders.radius.top_left_x),
-        px(borders.radius.top_right_x),
-        px(borders.radius.bottom_right_x),
-        px(borders.radius.bottom_left_x)
-    };
-    float ry[4] = {
-        px(borders.radius.top_left_y),
-        px(borders.radius.top_right_y),
-        px(borders.radius.bottom_right_y),
-        px(borders.radius.bottom_left_y)
-    };
-    AddRoundRect(path, rc, rx, ry);
-
-    // 画四条边（颜色/宽度可能不同，这里简化成四条线）
-    // 如果四条边完全一致，可以直接 FillPath + DrawPath 一次完成
-    auto draw_side = [&](Gdiplus::Color c, float w,
-        const Gdiplus::PointF& p1,
-        const Gdiplus::PointF& p2)
-        {
-            if (w <= 0) return;
-            Gdiplus::Pen pen(c, w);
-            g.DrawLine(&pen, p1, p2);
-        };
-
-    Gdiplus::Color cTop = Gdiplus::Color(borders.top.color.alpha,
-        borders.top.color.red,
-        borders.top.color.green,
-        borders.top.color.blue);
-    Gdiplus::Color cRight = Gdiplus::Color(borders.right.color.alpha,
-        borders.right.color.red,
-        borders.right.color.green,
-        borders.right.color.blue);
-    Gdiplus::Color cBottom = Gdiplus::Color(borders.bottom.color.alpha,
-        borders.bottom.color.red,
-        borders.bottom.color.green,
-        borders.bottom.color.blue);
-    Gdiplus::Color cLeft = Gdiplus::Color(borders.left.color.alpha,
-        borders.left.color.red,
-        borders.left.color.green,
-        borders.left.color.blue);
-
-    float wTop = px(borders.top.width);
-    float wRight = px(borders.right.width);
-    float wBottom = px(borders.bottom.width);
-    float wLeft = px(borders.left.width);
-
-    // 四条直线（圆角矩形四条边）
-    draw_side(cTop, wTop, { rc.X, rc.Y }, { rc.X + rc.Width, rc.Y });
-    draw_side(cRight, wRight, { rc.X + rc.Width, rc.Y }, { rc.X + rc.Width, rc.Y + rc.Height });
-    draw_side(cBottom, wBottom, { rc.X + rc.Width, rc.Y + rc.Height }, { rc.X, rc.Y + rc.Height });
-    draw_side(cLeft, wLeft, { rc.X, rc.Y + rc.Height }, { rc.X, rc.Y });
-}
 
 // ---------- 2. 标题 ----------------------------------------------------
 void SimpleContainer::set_caption(const char* cap)
 {
     if (cap && g_hWnd) {
         SetWindowTextW(g_hWnd, a2w(cap).c_str());
-        OutputDebugStringW((a2w(cap)+L"\n").c_str());
+        //OutputDebugStringW((a2w(cap)+L"\n").c_str());
     }
 }
 
@@ -2116,7 +2406,7 @@ static duk_ret_t js_window_scroll(duk_context* ctx)
 }
 
 // ---------- 绑定入口 ----------
-void SimpleContainer::bind_host_objects()
+void AppBootstrap::bind_host_objects()
 {
     // 在 bind_host_objects() 里
     duk_push_object(m_js);                       // prototype
@@ -2153,9 +2443,9 @@ void SimpleContainer::bind_host_objects()
     duk_put_global_string(m_js, "window");
 }
 
-void SimpleContainer::enableJS() {
+void AppBootstrap::enableJS() {
     m_js = duk_create_heap_default();
-    if (!m_js) throw std::runtime_error("Duktape init failed");
+    if (!m_js) {throw std::runtime_error("Duktape init failed"); }
     bind_host_objects();   // 关键：注册宿主对象
     duk_push_c_function(m_js, [](duk_context* ctx)->duk_ret_t {
         const char* id = duk_require_string(ctx, 0);
@@ -2219,369 +2509,1520 @@ std::string PreprocessHTML(std::string html)
 
 
 
-void SimpleContainer::set_font_backend(FontBackend b) {
-    if (g_doc) g_doc.reset();   // 释放所有字体
-    m_fe.reset();
-    // 先尝试切换
-    switch (b) {
-    case FontBackend::GDI: {
-        m_fe = std::make_unique<GdiEngine>();
-        return;
-    }
-         
-    case FontBackend::DirectWrite: {
-        m_fe = std::make_unique<DWriteEngine>();
-        return;
-    }
-         //case FontBackend::FreeType:
-         //    m_fe = std::make_unique<FtEngine>();
-         //    return;
-    default:
-        break;
-    }
 
-    // 找不到实现 → 强制 GDI
-    m_fe = std::make_unique<GdiEngine>();
-}
 
-litehtml::uint_ptr SimpleContainer::create_font(const char* faceName,
-    int size,
-    int weight,
-    litehtml::font_style italic,
-    unsigned int,
-    litehtml::font_metrics* fm) {
-    return m_fe->create_font(a2w(faceName).c_str(), size, weight,
-        italic != litehtml::font_style_normal, fm);
-}
+// 转发给后端
 
 void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     const char* text,
     litehtml::uint_ptr hFont,
     litehtml::web_color color,
     const litehtml::position& pos) {
-    m_fe->draw_text(hdc, text, hFont, color, pos);
+    g_canvas->backend()->draw_text(hdc, text, hFont, color, pos);
 }
 
-FontWrapper::FontWrapper(const wchar_t* face, int size, int weight, bool italic) {
-    hFont = CreateFontW(-size, 0, 0, 0, weight,
-        italic ? TRUE : FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH, face);
-
-    if (hFont) {
-        HDC dc = GetDC(nullptr);
-        HFONT old = (HFONT)SelectObject(dc, hFont);
-        TEXTMETRICW tm;
-        GetTextMetricsW(dc, &tm);
-        height = tm.tmHeight;
-        ascent = tm.tmAscent;
-        descent = tm.tmDescent;
-        SelectObject(dc, old);
-        ReleaseDC(nullptr, dc);
-    }
+void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
+    const litehtml::borders& borders,
+    const litehtml::position& pos,
+    bool root)
+{
+    g_canvas->backend()->draw_borders(hdc, borders, pos, root);
 }
-FontWrapper::~FontWrapper() { if (hFont) DeleteObject(hFont); }
 
-
-litehtml::uint_ptr GdiEngine::create_font(const wchar_t* face,
+litehtml::uint_ptr SimpleContainer::create_font(const char* faceName,
     int size,
     int weight,
-    bool italic,
-    litehtml::font_metrics* fm)
+    litehtml::font_style italic,
+    unsigned int decoration,
+    litehtml::font_metrics* fm) {
+    return g_canvas->backend()->create_font(faceName, size, weight, italic, decoration, fm);
+}
+
+void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 {
-
-    // 1. 先尝试用 EPUB 自带字体名（已注册到系统）
-    HFONT hFont = CreateFontW(-size, 0, 0, 0, weight,
-        italic ? TRUE : FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH, face);
-
-    // 2. 如果系统没有该字体，再回退到系统字体
-    if (!hFont)
-    {
-        hFont = CreateFontW(-size, 0, 0, 0, weight,
-            italic ? TRUE : FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH, L"Segoe UI"); // 回退字体
-    }
-
-    if (!hFont) return 0;
-
-    // 3. 取“真实”字体名
-    wchar_t realName[LF_FACESIZE] = { 0 };
-    {
-        HDC dc = GetDC(nullptr);
-        HFONT old = (HFONT)SelectObject(dc, hFont);
-        GetTextFaceW(dc, LF_FACESIZE, realName);
-        SelectObject(dc, old);
-        ReleaseDC(nullptr, dc);
-    }
-    g_activeFonts.insert(realName);   // 真正用到的才记录
-    OutputDebugStringW((std::wstring(L"requested=") + face +
-        L", actual=" + realName + L"\n").c_str());
-    auto fw = std::make_unique<FontWrapper>(hFont); // 下面改构造
-    if (fm)
-    {
-        HDC dc = GetDC(nullptr);
-        HFONT old = (HFONT)SelectObject(dc, hFont);
-        //SetBkMode(dc, TRANSPARENT);          // 避免背景色影响
-        //SetTextCharacterExtra(dc, 0);        // 关闭字符间距微调
-        TEXTMETRICW tm;
-        GetTextMetricsW(dc, &tm);
-        fm->height = tm.tmHeight;
-        fm->ascent = tm.tmAscent;
-        fm->descent = tm.tmDescent;
-        fm->x_height = tm.tmAscent / 2;   // 近似
-        fm->draw_spaces = true;
-        SelectObject(dc, old);
-        ReleaseDC(nullptr, dc);
- 
-    }
-
-    litehtml::uint_ptr h = reinterpret_cast<litehtml::uint_ptr>(hFont);
-    m_fonts[h] = std::move(fw);
-    return h;
+    g_canvas->backend()->delete_font(hFont);
 }
-
-void GdiEngine::draw_text(litehtml::uint_ptr hdc,
-    const char* text,
-    litehtml::uint_ptr hFont,
-    litehtml::web_color color,
-    const litehtml::position& pos) {
-    if (!hFont || !text) return;
-    HDC dc = reinterpret_cast<HDC>(hdc);
-    HFONT hF = reinterpret_cast<HFONT>(hFont);
-    HGDIOBJ old = SelectObject(dc, hF);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(color.red, color.green, color.blue));
-    std::wstring wtxt = a2w(text);
-    TextOutW(dc, pos.left(), pos.top(), wtxt.c_str(), (int)wtxt.size());
-    SelectObject(dc, old);
-}
-
-void GdiEngine::delete_font(litehtml::uint_ptr hFont) {
-    m_fonts.erase(hFont);
-}
-
-void EPUBBook::load_all_fonts()
+void SimpleContainer::draw_background(litehtml::uint_ptr hdc,
+    const std::vector<litehtml::background_paint>& bg)
 {
-    for (const auto& item : g_book.ocf_pkg_.manifest)
-    {
-        const std::wstring& mime = item.media_type;
-        if (mime != L"application/x-font-ttf" &&
-            mime != L"application/font-sfnt" &&
-            mime != L"font/otf" &&
-            mime != L"font/ttf" &&
-            mime != L"font/woff" &&
-            mime != L"font/woff2" &&
-            mime != L"application/truetype" &&
-            mime != L"application/opentype")
-        {
-            continue;
-        }
-
-        std::wstring wpath = g_zipIndex.find(item.href);
-        EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
-        if (mf.data.empty())
-        {
-            OutputDebugStringW((L"[Font] 字体文件为空: " + wpath + L"\n").c_str());
-            continue;
-        }
-
-        // 1. 取文件名（不含路径）
-        wchar_t fileName[MAX_PATH]{};
-        wcscpy_s(fileName, wpath.c_str());
-        PathStripPathW(fileName);   // ✅ 安全：C 风格数组
-
-        // 2. 拼临时完整路径
-        wchar_t tmpDir[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, tmpDir);
-
-        wchar_t tmpFile[MAX_PATH]{};
-        PathCombineW(tmpFile, tmpDir, fileName);
-
-        // 3. 写临时文件
-        HANDLE hFile = CreateFileW(tmpFile,
-            GENERIC_WRITE,
-            0,
-            nullptr,
-            CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
-        if (hFile == INVALID_HANDLE_VALUE)
-        {
-            OutputDebugStringW((L"[Font] 写临时文件失败: " + std::wstring(fileName) + L"\n").c_str());
-            continue;
-        }
-
-        DWORD written = 0;
-        WriteFile(hFile, mf.data.data(), (DWORD)mf.data.size(), &written, nullptr);
-        CloseHandle(hFile);
-
-        // 4. 注册到进程私有字体表
-        int ret = AddFontResourceExW(tmpFile, FR_PRIVATE, 0);
-        if (ret == 0)
-        {
-            OutputDebugStringW((L"[Font] 添加失败: " + std::wstring(tmpFile) + L"\n").c_str());
-            DeleteFileW(tmpFile);
-            continue;
-        }
-
-        OutputDebugStringW((L"[Font] 添加成功: " + std::wstring(tmpFile) + L"\n").c_str());
-
-        g_tempFontFiles.emplace_back(tmpFile);   // 记录路径，退出时删除
-    }
+    g_canvas->backend()->draw_background(hdc, bg);
 }
 
-// ----------------------------------------------------------
-//  构造 / 析构
-// ----------------------------------------------------------
-DWriteEngine::DWriteEngine() = default;
+int SimpleContainer::pt_to_px(int pt) const {
+    return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
+}
 
-// ----------------------------------------------------------
-//  create_font
-// ----------------------------------------------------------
-litehtml::uint_ptr DWriteEngine::create_font(const wchar_t* face,
-    int size,
-    int weight,
-    bool italic,
-    litehtml::font_metrics* fm)
+
+
+
+// DirectWrite backend
+/* ---------- 构造 ---------- */
+D2DCanvas::D2DCanvas(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
+    : m_w(w), m_h(h), m_devCtx(devCtx){
+    ComPtr<ID2D1BitmapRenderTarget> bmpRT;
+    HRESULT hr = m_devCtx->CreateCompatibleRenderTarget(
+        D2D1::SizeF(static_cast<float>(w), static_cast<float>(h)), // 逻辑尺寸
+        &bmpRT);
+     if (FAILED(hr))
+        throw std::runtime_error("CreateCompatibleRenderTarget failed");
+
+    m_rt = std::move(bmpRT);            // 保存到成员变量（可选）
+
+    m_backend = std::make_unique<D2DBackend>(m_rt);
+
+}
+/* ---------- 把缓存位图贴到窗口 ---------- */
+void D2DCanvas::present(HDC hdc, int x, int y)
 {
-    ComPtr<IDWriteTextFormat> fmtBase;
-    const wchar_t* familyName = (face && *face) ? face : L"Segoe UI";
-    HRESULT hr = factory()->CreateTextFormat(
-        familyName,
-        nullptr,
-        static_cast<DWRITE_FONT_WEIGHT>(weight),
-        italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL,
-        static_cast<float>(size),
-        L"en-us",
-        &fmtBase);
-    if (FAILED(hr)) return 0;
+    if (!m_devCtx) return;
 
-    ComPtr<IDWriteTextFormat3> fmt;
-    fmtBase.As(&fmt);
+    m_rt->GetBitmap(&m_bmp);
+
+    // 2. 开始绘制
+    m_devCtx->BeginDraw();
+    m_devCtx->Clear(D2D1::ColorF(D2D1::ColorF::White));
+    m_devCtx->DrawBitmap(m_bmp.Get());
+    m_devCtx->EndDraw();
 
 
-    // 1. 拿到系统字体集合
-    ComPtr<IDWriteFontCollection> sysCollection;
-    factory()->GetSystemFontCollection(&sysCollection, FALSE);
 
-    // 2. 找到字体族
-    UINT32 index = 0;
-    BOOL exists = FALSE;
-    sysCollection->FindFamilyName(face ? face : L"Segoe UI", &index, &exists);
-    if (!exists) index = 0;   // 兜底
-
-    ComPtr<IDWriteFontFamily> family;
-    sysCollection->GetFontFamily(index, &family);
-
-    // 3. 根据 weight / italic 拿到字体
-    ComPtr<IDWriteFont> dwFont;
-    family->GetFirstMatchingFont(
-        static_cast<DWRITE_FONT_WEIGHT>(weight),
-        DWRITE_FONT_STRETCH_NORMAL,
-        italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-        &dwFont);
-
-    // 4. 拿到字体 face
-    ComPtr<IDWriteFontFace> baseFace;
-    dwFont->CreateFontFace(&baseFace);
-
-    ComPtr<IDWriteFontFace5> fontFace;
-    baseFace.As(&fontFace);
-
-    DWRITE_FONT_METRICS dwFm{};
-    fontFace->GetMetrics(&dwFm);
-
-    int ascent = static_cast<int>(dwFm.ascent * size / dwFm.designUnitsPerEm);
-    int descent = static_cast<int>(dwFm.descent * size / dwFm.designUnitsPerEm);
-    int height = ascent + descent;
-
-    if (fm)
-    {
-        fm->ascent = ascent;
-        fm->descent = descent;
-        fm->height = height;
-    }
-
-    litehtml::uint_ptr handle = m_nextHandle++;
-    m_fonts[handle] = std::make_unique<DWriteFontWrapper>(
-        fmt.Get(), fontFace.Get(), height, ascent, descent);
-    return handle;
 }
 
-// ----------------------------------------------------------
-//  draw_text
-// ----------------------------------------------------------
-void DWriteEngine::draw_text(litehtml::uint_ptr hdc,
+
+// ---------- 辅助：UTF-8 ↔ UTF-16 ----------
+
+
+// ---------- 字体缓存 ----------
+struct FontPair {
+    ComPtr<IDWriteTextFormat> format;
+    ComPtr<IDWriteFontFace>   face;
+    int size;
+};
+
+// ---------- 实现 ----------
+void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     const char* text,
     litehtml::uint_ptr hFont,
     litehtml::web_color color,
     const litehtml::position& pos)
 {
-    /* 0. 最早期防御 */
-    if (!hdc || !text || !*text) return;
-    auto it = m_fonts.find(hFont);
-    if (it == m_fonts.end()) return;
+    assert(rt && SUCCEEDED(rt->GetFactory(nullptr)));
+    if (!text || !*text || !hFont) return;
 
-    /* 1. 安全包装裸指针 */
-    ComPtr<ID2D1RenderTarget> rt;
-    rt.Attach(reinterpret_cast<ID2D1RenderTarget*>(hdc));
-    if (!rt) return;
-
-    /* 2. 设备丢失 & 零尺寸  ------------------ 修正 1 */
-    D2D1_SIZE_F sz = rt->GetSize();          // ← 无参版本
-    if (sz.width <= 0.0f || sz.height <= 0.0f) return;
-
-    /* 3. 字符串转换 ------------------------- 修正 2 */
-    int len = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
-    if (len <= 0) return;
-    std::wstring wstr(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, text, -1, wstr.data(), len);
-    wstr.pop_back();                       // 去掉末尾 L'\0'
-
-    /* 4. TextLayout ------------------------- 修正 3 */
-    ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(factory()->CreateTextLayout(
-        wstr.c_str(),
-        static_cast<UINT32>(wstr.size()),
-        it->second->fmt.Get(),
-        sz.width,                    // 用 RT 实际宽度
-        sz.height,
-        &layout)))
+    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
+    FontPair* fp = reinterpret_cast<FontPair*>(hFont);
+    if (!rt) {
+        OutputDebugStringA("rt == nullptr\n");
         return;
+    }
 
-    /* 5. 画刷 */
+
     ComPtr<ID2D1SolidColorBrush> brush;
-    if (FAILED(rt->CreateSolidColorBrush(
+    rt->CreateSolidColorBrush(
         D2D1::ColorF(color.red / 255.0f,
             color.green / 255.0f,
             color.blue / 255.0f,
             color.alpha / 255.0f),
-        &brush)))
+        &brush);
+    // 3. 文本
+    std::wstring wtxt = a2w(text);
+    UINT32 textLen = static_cast<UINT32>(wtxt.size());
+    if (textLen == 0) return;
+    if (wtxt.empty()) return;
+    // 4. 用足够大的布局宽度，避免文字被截断
+    const float maxWidth = 8192.0f;   // 足够大
+    const float maxHeight = 512.0f;
+
+
+
+    ComPtr<IDWriteTextLayout> layout;
+    m_dwrite->CreateTextLayout(
+        wtxt.c_str(), textLen,
+        fp->format.Get(),
+        maxWidth,
+        maxHeight,
+        &layout);
+
+    if (!layout) {
+        OutputDebugStringA("layout == nullptr\n");
         return;
+    }
 
-    /* 6. 保存/恢复变换 */
-    D2D1_MATRIX_3X2_F oldTrans{};
-    rt->GetTransform(&oldTrans);
-    rt->SetTransform(D2D1::Matrix3x2F::Translation(
-        static_cast<float>(pos.x),
-        static_cast<float>(pos.y)));
-    rt->DrawTextLayout(D2D1::Point2F(0.0f, 0.0f), layout.Get(), brush.Get());
-    rt->SetTransform(oldTrans);
+    // 4. 直接绘制：litehtml 已把 pos 转为相对于当前片段左上角
+    rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
+        static_cast<float>(pos.y)),
+        layout.Get(),
+        brush.Get());
 
-    /* 7. 释放临时引用 */
-    rt.Detach();
+
+    //std::vector<DWRITE_CLUSTER_METRICS> cms;
+    //UINT32 actual = 0;
+    //layout->GetClusterMetrics(nullptr, 0, &actual);   // 先拿数量
+    //if (actual) {
+    //    cms.resize(actual);
+    //    layout->GetClusterMetrics(cms.data(), actual, &actual);
+    //}
+
+    //// 打印
+    //for (size_t i = 0; i < cms.size(); ++i) {
+    //    OutputDebugStringW(std::format(L"[{}] width={:.3f}\n",
+    //        i, cms[i].width).c_str());
+    //}
+    //DWRITE_TEXT_METRICS tm;
+    //layout->GetMetrics(&tm);
+    //for (wchar_t ch : wtxt) {
+    //    OutputDebugStringW(std::format(L"U+{:04X} ", (unsigned)ch).c_str());
+    //}
+    //OutputDebugStringW(std::format(L"text=\"{}\", width={}\n", wtxt.data(), tm.width).c_str());
+
+
 }
-// ----------------------------------------------------------
-//  delete_font
-// ----------------------------------------------------------
-void DWriteEngine::delete_font(litehtml::uint_ptr hFont)
+
+
+
+void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
+    const litehtml::borders& borders,
+    const litehtml::position& draw_pos,
+    bool root)
 {
-    m_fonts.erase(hFont);
+    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
+    ComPtr<ID2D1SolidColorBrush> brush;
+    rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &brush);
+
+    D2D1_RECT_F rc = D2D1::RectF(
+        (float)draw_pos.left(), (float)draw_pos.top(),
+        (float)draw_pos.right(), (float)draw_pos.bottom());
+
+    if (borders.left.width > 0) {
+        brush->SetColor(D2D1::ColorF(
+            borders.left.color.red / 255.0f,
+            borders.left.color.green / 255.0f,
+            borders.left.color.blue / 255.0f,
+            borders.left.color.alpha / 255.0f));
+        rt->FillRectangle(
+            D2D1::RectF(rc.left, rc.top,
+                rc.left + borders.left.width, rc.bottom),
+            brush.Get());
+    }
+    if (borders.right.width > 0) {
+        brush->SetColor(D2D1::ColorF(
+            borders.right.color.red / 255.0f,
+            borders.right.color.green / 255.0f,
+            borders.right.color.blue / 255.0f,
+            borders.right.color.alpha / 255.0f));
+        rt->FillRectangle(
+            D2D1::RectF(rc.right - borders.right.width, rc.top,
+                rc.right, rc.bottom),
+            brush.Get());
+    }
+    if (borders.top.width > 0) {
+        brush->SetColor(D2D1::ColorF(
+            borders.top.color.red / 255.0f,
+            borders.top.color.green / 255.0f,
+            borders.top.color.blue / 255.0f,
+            borders.top.color.alpha / 255.0f));
+        rt->FillRectangle(
+            D2D1::RectF(rc.left, rc.top,
+                rc.right, rc.top + borders.top.width),
+            brush.Get());
+    }
+    if (borders.bottom.width > 0) {
+        brush->SetColor(D2D1::ColorF(
+            borders.bottom.color.red / 255.0f,
+            borders.bottom.color.green / 255.0f,
+            borders.bottom.color.blue / 255.0f,
+            borders.bottom.color.alpha / 255.0f));
+        rt->FillRectangle(
+            D2D1::RectF(rc.left, rc.bottom - borders.bottom.width,
+                rc.right, rc.bottom),
+            brush.Get());
+    }
+
+}
+
+litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
+    int size,
+    int weight,
+    litehtml::font_style italic,
+    unsigned int decoration,
+    litehtml::font_metrics* fm)
+{
+    if (!m_dwrite || !fm) return 0;
+
+    /*----------------------------------------------------------
+      1. 把 font-family 字符串拆成单个字体名
+    ----------------------------------------------------------*/
+    auto split_font_list = [](const std::string& src) -> std::vector<std::wstring>
+        {
+            std::vector<std::wstring> out;
+            std::string token;
+            for (size_t i = 0, n = src.size(); i < n; ++i)
+            {
+                if (src[i] == ',')
+                {
+                    token = trim_any(token);
+                    if (!token.empty())
+                        out.emplace_back(a2w(token));
+                    token.clear();
+                }
+                else
+                {
+                    token += src[i];
+                }
+            }
+            token = trim_any(token);
+            if (!token.empty())
+                out.emplace_back(a2w(token));
+            return out;
+        };
+
+    std::vector<std::wstring> faces = split_font_list(faceName ? faceName : "Segoe UI");
+
+    /*----------------------------------------------------------
+      2. 逐个尝试创建 IDWriteTextFormat
+    ----------------------------------------------------------*/
+
+    /* 提前拿到系统字体集合（只需一次即可） */
+    ComPtr<IDWriteFontCollection> sysColl;
+    m_dwrite->GetSystemFontCollection(&sysColl, FALSE);
+
+    ComPtr<IDWriteTextFormat> fmt;
+
+    for (const auto& f : faces)
+    {
+        UINT32 index = 0;
+        BOOL   exists = FALSE;
+
+        /* 1. 私有集合 */
+        if (m_privateFonts)
+        {
+            m_privateFonts->FindFamilyName(f.c_str(), &index, &exists);
+            if (exists &&
+                SUCCEEDED(m_dwrite->CreateTextFormat(
+                    f.c_str(), m_privateFonts.Get(),
+                    static_cast<DWRITE_FONT_WEIGHT>(weight),
+                    italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                    : DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    static_cast<float>(size),
+                    L"en-us",
+                    &fmt)))
+            {
+                m_actualFamily = f;          // 保存命中的家族名
+                OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
+                break;
+            }
+        }
+
+        /* 2. 系统集合 */
+        index = 0;
+        exists = FALSE;
+        sysColl->FindFamilyName(f.c_str(), &index, &exists);
+        if (exists &&
+            SUCCEEDED(m_dwrite->CreateTextFormat(
+                f.c_str(), nullptr,
+                static_cast<DWRITE_FONT_WEIGHT>(weight),
+                italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                : DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                static_cast<float>(size),
+                L"en-us",
+                &fmt)))
+        {
+            m_actualFamily = f;              // 保存命中的家族名
+            OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
+            break;
+        }
+    }
+
+    if (!fmt){
+        OutputDebugStringW(L"获取字体:");
+        OutputDebugStringW(a2w(faceName).c_str());
+        OutputDebugStringW(L" 失败，使用默认字体\n");
+        m_dwrite->CreateTextFormat(
+            L"Segoe UI", nullptr,
+            static_cast<DWRITE_FONT_WEIGHT>(weight),
+            italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+            : DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            static_cast<float>(size),
+            L"en-us",
+            &fmt); 
+    }
+
+    if (!fmt) {
+        OutputDebugStringW(L"加载默认字体失败\n");
+        return 0; }
+    /*----------------------------------------------------------
+      用命中的字体家族名去拿真正的字体并计算度量
+    ----------------------------------------------------------*/
+ 
+    ComPtr<IDWriteFontFamily>     family;
+    ComPtr<IDWriteFont>           dwFont;
+
+    /* 根据命中的来源选择集合 */
+    ComPtr<IDWriteFontCollection> targetCollection;
+    if (!m_actualFamily.empty())
+    {
+        UINT32 index = 0;
+        BOOL   exists = FALSE;
+        if (m_privateFonts && m_privateFonts->FindFamilyName(m_actualFamily.c_str(), &index, &exists) && exists)
+            targetCollection = m_privateFonts;
+        else
+            targetCollection = sysColl;
+
+        targetCollection->FindFamilyName(m_actualFamily.c_str(), &index, &exists);
+        if (exists)
+        {
+            targetCollection->GetFontFamily(index, &family);
+            family->GetFirstMatchingFont(
+                static_cast<DWRITE_FONT_WEIGHT>(weight),
+                DWRITE_FONT_STRETCH_NORMAL,
+                italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                : DWRITE_FONT_STYLE_NORMAL,
+                &dwFont);
+
+            DWRITE_FONT_METRICS dwFm{};
+            dwFont->GetMetrics(&dwFm);
+            float dip = static_cast<float>(size) / dwFm.designUnitsPerEm;
+            fm->ascent = static_cast<int>(dwFm.ascent * dip + 0.5f);
+            fm->descent = static_cast<int>(dwFm.descent * dip + 0.5f);
+            fm->height = static_cast<int>((dwFm.ascent + dwFm.descent + dwFm.lineGap) * dip + 0.5f);
+            fm->x_height = static_cast<int>(dwFm.xHeight * dip + 0.5f);
+        }
+    }
+    /*----------------------------------------------------------
+      6. 返回句柄
+    ----------------------------------------------------------*/
+    FontPair* fp = new FontPair{ fmt, nullptr, size };
+
+    return reinterpret_cast<litehtml::uint_ptr>(fp);
+}
+
+void D2DBackend::delete_font(litehtml::uint_ptr h)
+{
+    if (h) delete reinterpret_cast<FontPair*>(h);
+}
+
+void D2DBackend::draw_background(litehtml::uint_ptr hdc,
+    const std::vector<litehtml::background_paint>& bg)
+{
+    assert(m_rt && "render target is null");
+    if (bg.empty()) return;
+
+    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
+
+    for (const auto& b : bg)
+    {
+        //--------------------------------------------------
+        // 1. 纯色背景
+        //--------------------------------------------------
+        if (b.image.empty())
+        {
+            ComPtr<ID2D1SolidColorBrush> brush;
+            rt->CreateSolidColorBrush(
+                D2D1::ColorF(b.color.red / 255.0f,
+                    b.color.green / 255.0f,
+                    b.color.blue / 255.0f,
+                    b.color.alpha / 255.0f),
+                &brush);
+
+            D2D1_RECT_F rc = D2D1::RectF(
+                (float)b.border_box.left(), (float)b.border_box.top(),
+                (float)b.border_box.right(), (float)b.border_box.bottom());
+
+            rt->FillRectangle(rc, brush.Get());
+            continue;
+        }
+
+        //--------------------------------------------------
+        // 2. 图片背景
+        //--------------------------------------------------
+        auto it = g_img_cache.find(b.image);
+        if (it == g_img_cache.end()) continue;   // 还没加载
+
+        const ImageFrame& frame = it->second;
+        if (frame.rgba.empty()) continue;
+
+        // 如果已经缓存过 D2D 位图，直接拿；否则创建一次再缓存
+        ComPtr<ID2D1Bitmap> bmp;
+        auto d2d_it = m_d2dBitmapCache.find(b.image);
+        if (d2d_it != m_d2dBitmapCache.end())
+        {
+            bmp = d2d_it->second;
+        }
+        else
+        {
+            D2D1_BITMAP_PROPERTIES bp =
+                D2D1::BitmapProperties(
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                        D2D1_ALPHA_MODE_PREMULTIPLIED));
+
+            HRESULT hr = rt->CreateBitmap(
+                D2D1::SizeU(frame.width, frame.height),
+                frame.rgba.data(),
+                frame.stride,
+                bp,
+                &bmp);
+
+            if (SUCCEEDED(hr))
+                m_d2dBitmapCache.emplace(b.image, bmp);
+        }
+
+        if (!bmp) continue;
+
+        // 简单拉伸到 border_box；需要平铺/居中的话再算源/目标矩形
+        D2D1_RECT_F dst = D2D1::RectF(
+            (float)b.border_box.left(), (float)b.border_box.top(),
+            (float)b.border_box.right(), (float)b.border_box.bottom());
+
+        rt->DrawBitmap(bmp.Get(), dst);
+    }
+}
+
+int D2DBackend::pt_to_px(int pt) const
+{
+    return MulDiv(pt, 96, 72);   // 96 DPI
+}
+int D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+{
+    if (!text || !*text || !hFont) return 0;
+    FontPair* fp = reinterpret_cast<FontPair*>(hFont);
+    if (!fp || !fp->format) { OutputDebugStringA("fp->format is null\n"); return 0; }
+
+    std::wstring wtxt = a2w(text);
+    if (wtxt.empty()) return 0;
+    UINT32 textLen = static_cast<UINT32>(wtxt.size());
+    if (textLen == 0) return 0;
+    ComPtr<IDWriteTextLayout> layout;
+    const float maxWidth = 65536.0f;
+    const float maxHeight = 0.0f;
+    HRESULT hr = m_dwrite->CreateTextLayout(
+        wtxt.data(), textLen,
+        fp->format.Get(),
+        maxWidth, maxHeight,
+        &layout);
+    if (FAILED(hr)) return 0;
+
+    // 1. 关闭所有可能压缩空白的选项
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 };
+    layout->SetTrimming(&trimming, nullptr);
+
+    // 2. 用 cluster 宽度累加，避免“纯空白字符串”返回 0
+    std::vector<DWRITE_CLUSTER_METRICS> cms;
+    UINT32 count = 0;
+    layout->GetClusterMetrics(nullptr, 0, &count);
+    if (count == 0) return 0;
+    cms.resize(count);
+    layout->GetClusterMetrics(cms.data(), count, &count);
+
+    float total = 0.0f;
+    for (const auto& cm : cms)
+        total += cm.width;
+
+    return static_cast<int>(total + 0.5f);
+}
+
+// GDI backend
+GdiCanvas::GdiCanvas(int w, int h) : m_w(w), m_h(h)
+{
+    // 创建内存 DC 与 32-bit 位图
+    HDC screenDC = GetDC(nullptr);
+    m_memDC = CreateCompatibleDC(screenDC);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;   // top-down DIB
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    m_bmp = CreateDIBSection(screenDC, &bi, DIB_RGB_COLORS, nullptr, nullptr, 0);
+    m_old = (HBITMAP)SelectObject(m_memDC, m_bmp);
+    ReleaseDC(nullptr, screenDC);
+
+    // 创建后端
+    m_backend = std::make_unique<GdiBackend>(m_memDC);
+}
+
+GdiCanvas::~GdiCanvas()
+{
+    if (m_old) SelectObject(m_memDC, m_old);
+    if (m_bmp) DeleteObject(m_bmp);
+    if (m_memDC) DeleteDC(m_memDC);
+}
+
+void GdiCanvas::present(HDC hdc, int x, int y)
+{
+    BitBlt(hdc, x, y, m_w, m_h, m_memDC, 0, 0, SRCCOPY);
+}
+
+
+
+struct GdiFont {
+    HFONT hFont;
+    TEXTMETRIC tm;
+};
+
+/* ---------- 工具：RGB 转 COLORREF ---------- */
+static COLORREF to_cr(litehtml::web_color c)
+{
+    return RGB(c.red, c.green, c.blue);
+}
+
+/* ---------- 工具：UTF-8 → UTF-16 ---------- */
+
+
+/* ---------- 7 个接口实现 ---------- */
+void GdiBackend::draw_text(litehtml::uint_ptr hdc,
+    const char* text,
+    litehtml::uint_ptr hFont,
+    litehtml::web_color color,
+    const litehtml::position& pos)
+{
+    if (!text || !hFont) return;
+    HDC dc = reinterpret_cast<HDC>(hdc);
+    GdiFont* f = reinterpret_cast<GdiFont*>(hFont);
+
+    HFONT old = (HFONT)SelectObject(dc, f->hFont);
+    SetTextColor(dc, to_cr(color));
+    SetBkMode(dc, TRANSPARENT);
+
+    std::wstring w = a2w(text);
+    ExtTextOutW(dc, pos.x, pos.y, ETO_CLIPPED, nullptr,
+        w.c_str(), (UINT)w.size(), nullptr);
+
+    SelectObject(dc, old);
+}
+
+void GdiBackend::draw_borders(litehtml::uint_ptr hdc,
+    const litehtml::borders& borders,
+    const litehtml::position& draw_pos,
+    bool root)
+{
+    HDC dc = reinterpret_cast<HDC>(hdc);
+    HPEN oldPen = (HPEN)SelectObject(dc, GetStockObject(DC_PEN));
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
+
+    auto drawEdge = [&](int x, int y, int w, int h, litehtml::border br) {
+        if (br.width <= 0) return;
+        SetDCPenColor(dc, to_cr(br.color));
+        RECT rc{ x, y, x + w, y + h };
+        Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
+        };
+
+    int l = draw_pos.left(), t = draw_pos.top();
+    int r = draw_pos.right(), b = draw_pos.bottom();
+
+    // 四条边
+    drawEdge(l, t, borders.left.width, b - t, borders.left);
+    drawEdge(r - borders.right.width, t, borders.right.width, b - t, borders.right);
+    drawEdge(l, t, r - l, borders.top.width, borders.top);
+    drawEdge(l, b - borders.bottom.width, r - l, borders.bottom.width, borders.bottom);
+
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+}
+
+litehtml::uint_ptr GdiBackend::create_font(const char* faceName,
+    int size,
+    int weight,
+    litehtml::font_style italic,
+    unsigned int decoration,
+    litehtml::font_metrics* fm)
+{
+    std::wstring wface = a2w(faceName ? faceName : "Segoe UI");
+    HFONT hFont = CreateFontW(
+        -size, 0, 0, 0,
+        weight,
+        italic == litehtml::font_style_italic ? TRUE : FALSE,
+        FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        wface.c_str());
+
+    HDC dc = m_hdc;
+    HFONT old = (HFONT)SelectObject(dc, hFont);
+    GdiFont* f = new GdiFont{ hFont };
+    GetTextMetrics(dc, &f->tm);
+    SelectObject(dc, old);
+
+    if (fm) {
+        fm->ascent = f->tm.tmAscent;
+        fm->descent = f->tm.tmDescent;
+        fm->height = f->tm.tmHeight;
+        fm->x_height = f->tm.tmHeight / 2; // 近似
+    }
+    return reinterpret_cast<litehtml::uint_ptr>(f);
+}
+
+void GdiBackend::delete_font(litehtml::uint_ptr h)
+{
+    if (h) {
+        GdiFont* f = reinterpret_cast<GdiFont*>(h);
+        DeleteObject(f->hFont);
+        delete f;
+    }
+}
+
+void GdiBackend::draw_background(litehtml::uint_ptr hdc,
+    const std::vector<litehtml::background_paint>& bg)
+{
+    if (bg.empty()) return;
+    HDC dc = reinterpret_cast<HDC>(hdc);
+
+    for (const auto& b : bg) {
+        RECT rc{ b.border_box.left(), b.border_box.top(),
+                 b.border_box.right(), b.border_box.bottom() };
+
+        HBRUSH br = CreateSolidBrush(to_cr(b.color));
+        FillRect(dc, &rc, br);
+        DeleteObject(br);
+    }
+}
+
+int GdiBackend::pt_to_px(int pt) const
+{
+    return MulDiv(pt, GetDeviceCaps(m_hdc, LOGPIXELSY), 72);
+}
+
+int GdiBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+{
+    if (!hFont || !text) return 0;
+    HFONT hF = reinterpret_cast<HFONT>(hFont);
+    HDC hdc = GetDC(nullptr);
+    HGDIOBJ old = SelectObject(hdc, hF);
+
+    SIZE sz{};
+    std::wstring wtxt = a2w(text);
+    GetTextExtentPoint32W(hdc, wtxt.c_str(), static_cast<int>(wtxt.size()), &sz);
+
+    SelectObject(hdc, old);
+    ReleaseDC(nullptr, hdc);
+    return sz.cx;
+}
+// freetype backend
+struct FreetypeCtx {
+    FT_Library lib = nullptr;
+    FreetypeCtx() { FT_Init_FreeType(&lib); }
+    ~FreetypeCtx() { if (lib) FT_Done_FreeType(lib); }
+};
+
+static FreetypeCtx g_ft;   // 全局单例
+
+FreetypeCanvas::FreetypeCanvas(int w, int h, int dpi)
+    : m_w(w), m_h(h), m_dpi(dpi)
+{
+    m_pixels.resize(static_cast<size_t>(w) * h * 4, 0); // RGBA
+    m_backend = std::make_unique<FreetypeBackend>(
+        w, h, dpi, m_pixels.data(), w * 4, g_ft.lib);
+}
+
+FreetypeCanvas::~FreetypeCanvas() = default;
+
+void FreetypeCanvas::present(HDC hdc, int x, int y)
+{
+    // 把 RGBA 像素 BitBlt 到 HDC
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = m_w;
+    bi.bmiHeader.biHeight = -m_h; // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    StretchDIBits(hdc,
+        x, y, m_w, m_h,
+        0, 0, m_w, m_h,
+        m_pixels.data(),
+        &bi,
+        DIB_RGB_COLORS,
+        SRCCOPY);
+}
+
+struct FreetypeFont {
+    FT_Face face = nullptr;
+    int size = 0;
+};
+
+
+
+FreetypeBackend::FreetypeBackend(int w, int h, int dpi,
+    uint8_t* surface, int stride,
+    FT_Library lib)
+    : m_w(w), m_h(h), m_dpi(dpi),
+    m_surface(surface), m_stride(stride), m_lib(lib) {
+}
+
+/* ---------- 文本 ---------- */
+void FreetypeBackend::draw_text(litehtml::uint_ptr,
+    const char* text,
+    litehtml::uint_ptr hFont,
+    litehtml::web_color color,
+    const litehtml::position& pos)
+{
+    if (!text || !*text || !hFont) return;
+    auto* font = reinterpret_cast<FreetypeFont*>(hFont);
+
+    std::wstring wtxt = a2w(text);
+    FT_Set_Pixel_Sizes(font->face, 0, font->size);
+
+    int x = pos.x;
+    for (wchar_t ch : wtxt) {
+        if (FT_Load_Char(font->face, ch, FT_LOAD_RENDER)) continue;
+        FT_Bitmap& bmp = font->face->glyph->bitmap;
+        int y = pos.y + font->face->glyph->bitmap_top;
+        blit_glyph(x, y, bmp, color);
+        x += font->face->glyph->advance.x >> 6;
+    }
+}
+
+/* ---------- 背景 ---------- */
+void FreetypeBackend::draw_background(litehtml::uint_ptr,
+    const std::vector<litehtml::background_paint>& bg)
+{
+    for (const auto& b : bg) {
+        fill_rect(b.border_box, b.color);
+    }
+}
+
+/* ---------- 边框 ---------- */
+void FreetypeBackend::draw_borders(litehtml::uint_ptr,
+    const litehtml::borders& borders,
+    const litehtml::position& draw_pos,
+    bool)
+{
+    auto drawEdge = [&](int x, int y, int w, int h, litehtml::border br) {
+        if (br.width <= 0) return;
+        fill_rect(litehtml::position(x, y, w, h), br.color);
+        };
+    int l = draw_pos.left(), t = draw_pos.top();
+    int r = draw_pos.right(), b = draw_pos.bottom();
+    drawEdge(l, t, borders.left.width, b - t, borders.left);
+    drawEdge(r - borders.right.width, t, borders.right.width, b - t, borders.right);
+    drawEdge(l, t, r - l, borders.top.width, borders.top);
+    drawEdge(l, b - borders.bottom.width, r - l, borders.bottom.width, borders.bottom);
+}
+
+/* ---------- 字体 ---------- */
+litehtml::uint_ptr FreetypeBackend::create_font(const char* faceName,
+    int size,
+    int weight,
+    litehtml::font_style italic,
+    unsigned int,
+    litehtml::font_metrics* fm)
+{
+    std::string path = "C:/Windows/Fonts/"; // 可扩展
+    path += faceName ? faceName : "segoeui.ttf";
+
+    FT_Face face;
+    if (FT_New_Face(m_lib, path.c_str(), 0, &face)) return 0;
+
+    auto* font = new FreetypeFont{ face, size };
+
+    if (fm) {
+        FT_Set_Pixel_Sizes(face, 0, size);
+        fm->ascent = face->size->metrics.ascender >> 6;
+        fm->descent = -(face->size->metrics.descender >> 6);
+        fm->height = (face->size->metrics.height) >> 6;
+        fm->x_height = fm->height / 2; // 近似
+    }
+    return reinterpret_cast<litehtml::uint_ptr>(font);
+}
+
+void FreetypeBackend::delete_font(litehtml::uint_ptr h)
+{
+    if (h) {
+        auto* f = reinterpret_cast<FreetypeFont*>(h);
+        FT_Done_Face(f->face);
+        delete f;
+    }
+}
+
+int FreetypeBackend::pt_to_px(int pt) const
+{
+    return MulDiv(pt, m_dpi, 72);
+}
+
+/* ---------- 内部工具 ---------- */
+void FreetypeBackend::fill_rect(const litehtml::position& rc,
+    litehtml::web_color c)
+{
+    uint8_t* dst = m_surface + rc.y * m_stride + rc.x * 4;
+    for (int y = 0; y < rc.height; ++y) {
+        uint8_t* p = dst;
+        for (int x = 0; x < rc.width; ++x) {
+            p[0] = c.blue;
+            p[1] = c.green;
+            p[2] = c.red;
+            p[3] = c.alpha;
+            p += 4;
+        }
+        dst += m_stride;
+    }
+}
+
+void FreetypeBackend::blit_glyph(int x, int y,
+    const FT_Bitmap& bmp,
+    litehtml::web_color c)
+{
+    for (int j = 0; j < static_cast<int>(bmp.rows); ++j) {
+        for (int i = 0; i < static_cast<int>(bmp.width); ++i) {
+            uint8_t a = bmp.buffer[j * bmp.pitch + i];
+            if (!a) continue;
+            int px = x + i;
+            int py = y + j;
+            if (px < 0 || py < 0 || px >= m_w || py >= m_h) continue;
+
+            uint8_t* dst = m_surface + py * m_stride + px * 4;
+            // 简单 alpha blend
+            uint8_t inv = 255 - a;
+            dst[0] = (dst[0] * inv + c.blue * a) / 255;
+            dst[1] = (dst[1] * inv + c.green * a) / 255;
+            dst[2] = (dst[2] * inv + c.red * a) / 255;
+            dst[3] = 255;
+        }
+    }
+}
+
+int FreetypeBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+{
+    if (!text || !*text || !hFont) return 0;
+
+    FT_Face face = reinterpret_cast<FT_Face>(hFont);
+
+    /* ---------- 1. UTF-8 → UTF-32 ---------- */
+    std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> conv;
+    std::u32string u32 = conv.from_bytes(text);
+
+    int pen_x = 0;          // 26.6 固定小数
+    for (char32_t ch : u32)
+    {
+        /* 2. 加载字形索引 */
+        FT_UInt glyph_index = FT_Get_Char_Index(face, ch);
+        if (!glyph_index) continue;   // 缺字
+
+        /* 3. 加载字形（默认标志即可） */
+        FT_Error err = FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
+        if (err) continue;
+
+        /* 4. 累加 advance */
+        pen_x += face->glyph->advance.x;   // 26.6 格式
+    }
+
+    /* 5. 26.6 → 像素 */
+    return (pen_x + 32) >> 6;   // 四舍五入
+}
+
+void EPUBBook::load_all_fonts() {
+    g_canvas->backend()->load_all_fonts();
+}
+
+//void EPUBBook::load_all_fonts()
+//{
+//    for (const auto& item : g_book.ocf_pkg_.manifest)
+//    {
+//        const std::wstring& mime = item.media_type;
+//        if (mime != L"application/x-font-ttf" &&
+//            mime != L"application/font-sfnt" &&
+//            mime != L"font/otf" &&
+//            mime != L"font/ttf" &&
+//            mime != L"font/woff" &&
+//            mime != L"font/woff2" &&
+//            mime != L"application/truetype" &&
+//            mime != L"application/opentype")
+//        {
+//            continue;
+//        }
+//
+//        std::wstring wpath = g_zipIndex.find(item.href);
+//        EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
+//        if (mf.data.empty())
+//        {
+//            OutputDebugStringW((L"[Font] 字体文件为空: " + wpath + L"\n").c_str());
+//            continue;
+//        }
+//
+//        // 1. 取文件名（不含路径）
+//        wchar_t fileName[MAX_PATH]{};
+//        wcscpy_s(fileName, wpath.c_str());
+//        PathStripPathW(fileName);   // ✅ 安全：C 风格数组
+//
+//        // 2. 拼临时完整路径
+//        wchar_t tmpDir[MAX_PATH]{};
+//        GetTempPathW(MAX_PATH, tmpDir);
+//
+//        wchar_t tmpFile[MAX_PATH]{};
+//        PathCombineW(tmpFile, tmpDir, fileName);
+//
+//        // 3. 写临时文件
+//        HANDLE hFile = CreateFileW(tmpFile,
+//            GENERIC_WRITE,
+//            0,
+//            nullptr,
+//            CREATE_ALWAYS,
+//            FILE_ATTRIBUTE_NORMAL,
+//            nullptr);
+//        if (hFile == INVALID_HANDLE_VALUE)
+//        {
+//            OutputDebugStringW((L"[Font] 写临时文件失败: " + std::wstring(fileName) + L"\n").c_str());
+//            continue;
+//        }
+//
+//        DWORD written = 0;
+//        WriteFile(hFile, mf.data.data(), (DWORD)mf.data.size(), &written, nullptr);
+//        CloseHandle(hFile);
+//
+//        // 4. 注册到进程私有字体表
+//        int ret = AddFontResourceExW(tmpFile, FR_PRIVATE, 0);
+//        if (ret == 0)
+//        {
+//            OutputDebugStringW((L"[Font] 添加失败: " + std::wstring(tmpFile) + L"\n").c_str());
+//            DeleteFileW(tmpFile);
+//            continue;
+//        }
+//
+//        OutputDebugStringW((L"[Font] 添加成功: " + std::wstring(tmpFile) + L"\n").c_str());
+//
+//        g_tempFontFiles.emplace_back(tmpFile);   // 记录路径，退出时删除
+//    }
+//}
+
+/* ---------- 1. 静态工厂 ---------- */
+
+void AppBootstrap::makeBackend(Renderer which, void* ctx)
+{
+    switch (which) {
+    case Renderer::GDI:{
+         std::make_unique<GdiBackend>(ctx ? static_cast<HDC>(ctx) : g_hMemDC);
+    }
+    case Renderer::D2D: {
+        if (!ctx && !g_d2dRT) throw std::runtime_error("D2D render target not ready");
+        RECT rc;
+        GetClientRect(g_hView, &rc);
+        int w = rc.right;
+        int h = rc.bottom;
+        g_canvas = std::make_unique<D2DCanvas>(w, h, ctx ? static_cast<ID2D1RenderTarget*>(ctx) : g_d2dRT.Get());
+    }
+    case Renderer::FreeType: {
+        // 内部自己准备像素缓冲
+        int w = 1024, h = 768, dpi = 96, stride = w * 4;
+        std::vector<uint8_t> buf(h * stride);
+        std::make_unique<FreetypeBackend>(w, h, dpi, buf.data(), stride, g_ftLib);
+    }
+    }
+}
+
+void AppBootstrap::initBackend(Renderer which) {
+    //if (g_canvas) return;
+    switch (which) {
+    case Renderer::GDI: {
+        /* 1) 基础设施 */
+        g_hMemDC = CreateCompatibleDC(nullptr);          // GDI
+
+    }
+    case Renderer::D2D: {
+        /* 1) D2D 工厂 */
+        D2D1CreateFactory(
+            D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            __uuidof(ID2D1Factory1),            // 接口 GUID
+            nullptr,                          // 工厂选项（可 nullptr）
+            reinterpret_cast<void**>(g_d2dFactory.GetAddressOf()));
+        /* 2) DXGI 工厂 & 适配器 */
+
+        ComPtr<IDXGIFactory> dxgiFactory;
+        CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&dxgiFactory);
+        ComPtr<IDXGIAdapter> adapter;
+        dxgiFactory->EnumAdapters(0, &adapter);
+
+        /* 3) D3D11 设备 */
+        D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
+        ComPtr<ID3D11Device> d3dDevice;
+        D3D11CreateDevice(
+            adapter.Get(),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            levels, 1,
+            D3D11_SDK_VERSION,
+            &d3dDevice,
+            nullptr,
+            nullptr);
+
+        RECT rc; GetClientRect(g_hView, &rc);
+        ComPtr<ID2D1HwndRenderTarget> hwndRT;
+        g_d2dFactory->CreateHwndRenderTarget(
+            D2D1::RenderTargetProperties(),
+            D2D1::HwndRenderTargetProperties(
+                g_hView,
+                D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top)),
+            hwndRT.GetAddressOf());   // ← 关键：GetAddressOf()
+        //ComPtr<ID2D1RenderTarget> g_d2dRT;
+        hwndRT.As(&g_d2dRT);
+    }
+    case Renderer::FreeType: {
+        FT_Init_FreeType(&g_ftLib);                      // FreeType
+
+    }
+    }
+}
+
+
+
+//------------------------------------------
+// 公共辅助：从 EPUB 提取字体 blob
+//------------------------------------------
+static std::vector<std::pair<std::wstring, std::vector<uint8_t>>>
+collect_epub_fonts()
+{
+    std::vector<std::pair<std::wstring, std::vector<uint8_t>>> fonts;
+    for (const auto& item : g_book.ocf_pkg_.manifest)
+    {
+        const std::wstring& mime = item.media_type;
+        if (mime == L"application/x-font-ttf" ||
+            mime == L"application/font-sfnt" ||
+            mime == L"font/otf" ||
+            mime == L"font/ttf" ||
+            mime == L"font/woff" ||
+            mime == L"font/woff2")
+        {
+            std::wstring wpath = g_zipIndex.find(item.href);
+            EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
+            if (!mf.data.empty())
+                fonts.emplace_back(wpath, std::move(mf.data));
+        }
+    }
+    return fonts;
+}
+
+//------------------------------------------
+// 3.1  GDI 实现
+//------------------------------------------
+void GdiBackend::load_all_fonts()
+{
+    auto fonts = collect_epub_fonts();
+    for (auto& [path, blob] : fonts)
+    {
+        // 1. 写临时文件
+        wchar_t tmpPath[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmpPath);
+        wchar_t fileName[MAX_PATH]{};
+        wcscpy_s(fileName, path.c_str());
+        PathStripPathW(fileName);
+        PathCombineW(tmpPath, tmpPath, fileName);
+
+        HANDLE h = CreateFileW(tmpPath, GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        DWORD written = 0;
+        WriteFile(h, blob.data(), (DWORD)blob.size(), &written, nullptr);
+        CloseHandle(h);
+
+        // 2. 注册到进程
+        if (AddFontResourceExW(tmpPath, FR_PRIVATE, 0))
+        {
+            g_tempFontFiles.emplace_back(tmpPath);   // 退出时 RemoveFontResourceEx + DeleteFile
+            OutputDebugStringW((L"[GDI] 已加载字体: " + std::wstring(tmpPath) + L"\n").c_str());
+        }
+        else
+        {
+            DeleteFileW(tmpPath);
+        }
+    }
+    SendMessage(HWND_BROADCAST, WM_FONTCHANGE, 0, 0);   // 通知 GDI
+}
+
+//------------------------------------------
+// 3.2  DirectWrite 实现
+//------------------------------------------
+void D2DBackend::load_all_fonts()
+{
+    auto fonts = collect_epub_fonts();
+    if (fonts.empty()) return;
+
+    // 先清理旧字体
+    unload_fonts();
+
+    if (SUCCEEDED(CreateCompatibleFontCollection(
+        m_dwrite.Get(), fonts, &m_privateFonts, m_tempFontFiles)))
+    {
+        OutputDebugStringA("[DWrite] 字体已加载（兼容模式）\n");
+    }
+}
+
+void D2DBackend::unload_fonts()
+{
+    if (m_privateFonts) m_privateFonts.Reset();
+    // Win7/8 需要删除临时文件
+    for (const auto& p : m_tempFontFiles)
+    {
+        m_dwrite->UnregisterFontCollectionLoader(
+            static_cast<IDWriteFontCollectionLoader*>(nullptr));
+        DeleteFileW(p.c_str());
+    }
+    m_tempFontFiles.clear();
+}
+
+//------------------------------------------
+// 3.3  FreeType 实现
+//------------------------------------------
+
+
+
+void FreetypeBackend::load_all_fonts()
+{
+    // 1. 收集字体（文件名 → 二进制数据）
+    auto fonts = collect_epub_fonts();   // 返回 vector<pair<path, blob>>
+    if (fonts.empty()) return;
+
+    // 2. 清理旧字体
+    for (FT_Face f : m_faces)
+        FT_Done_Face(f);
+    m_faces.clear();
+    m_fontBlobs.clear();
+
+    // 3. 加载新字体
+    for (auto& [path, blob] : fonts)
+    {
+        // 必须保持 blob 生命周期，FreeType 不会复制
+        m_fontBlobs.emplace_back(std::move(blob));
+
+        FT_Face face = nullptr;
+        FT_Error err = FT_New_Memory_Face(
+            m_lib,                       // 构造函数里传进来的 FT_Library
+            m_fontBlobs.back().data(),   // 数据首地址
+            (FT_Long)m_fontBlobs.back().size(),
+            0,                           // face_index
+            &face);
+
+        if (err == 0)
+        {
+            m_faces.emplace_back(face);
+            OutputDebugStringW((L"[FreeType] loaded " + path + L"\n").c_str());
+        }
+        else
+        {
+            OutputDebugStringW((L"[FreeType] failed to load " + path + L"\n").c_str());
+        }
+    }
+}
+
+
+
+// -------------------------------------------------
+// 静态工厂
+// -------------------------------------------------
+HRESULT MemoryFontLoader::CreateCollection(
+    IDWriteFactory* dwrite,
+    const std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts,
+    IDWriteFontCollection** out)
+{
+    if (!dwrite || !out) return E_INVALIDARG;
+
+    // 1. 注册 loader（只注册一次）
+    static bool registered = false;
+    if (!registered)
+    {
+        Microsoft::WRL::ComPtr<MemoryFontLoader> stub(new MemoryFontLoader(nullptr, {}));
+        HRESULT hr = dwrite->RegisterFontCollectionLoader(stub.Get());
+        if (FAILED(hr)) return hr;
+        registered = true;
+    }
+
+    // 2. 把 vector<blob> 打包成一块连续内存
+    std::vector<std::vector<uint8_t>> blobs;
+    blobs.reserve(fonts.size());
+    for (const auto& [name, data] : fonts)
+        blobs.emplace_back(data);
+
+    // 3. 创建自定义集合
+    return dwrite->CreateCustomFontCollection(
+        static_cast<IDWriteFontCollectionLoader*>(nullptr),   // 用 key 区分
+        blobs.data(),
+        static_cast<UINT32>(blobs.size() * sizeof(blobs[0])),
+        out);
+}
+
+// -------------------------------------------------
+// IUnknown
+// -------------------------------------------------
+HRESULT MemoryFontLoader::QueryInterface(REFIID riid, void** ppv)
+{
+    if (riid == __uuidof(IUnknown) ||
+        riid == __uuidof(IDWriteFontCollectionLoader))
+    {
+        *ppv = static_cast<IDWriteFontCollectionLoader*>(this);
+    }
+    else if (riid == __uuidof(IDWriteFontFileEnumerator))
+    {
+        *ppv = static_cast<IDWriteFontFileEnumerator*>(this);
+    }
+    else
+    {
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    return S_OK;
+}
+
+// -------------------------------------------------
+// IDWriteFontCollectionLoader
+// -------------------------------------------------
+HRESULT MemoryFontLoader::CreateEnumeratorFromKey(
+    IDWriteFactory* factory,
+    const void* collectionKey, UINT32 collectionKeySize,
+    IDWriteFontFileEnumerator** enumerator)
+{
+    if (!factory || !enumerator) return E_INVALIDARG;
+
+    // collectionKey 指向 vector<vector<uint8_t>>
+    const auto* blobs = reinterpret_cast<const std::vector<uint8_t>*>(collectionKey);
+    size_t count = collectionKeySize / sizeof(std::vector<uint8_t>);
+    if (!blobs || count == 0) return E_INVALIDARG;
+
+    Microsoft::WRL::ComPtr<MemoryFontLoader> loader(
+        new MemoryFontLoader(factory, std::vector<std::vector<uint8_t>>(blobs, blobs + count)));
+    *enumerator = loader.Detach();
+    return S_OK;
+}
+
+// -------------------------------------------------
+// IDWriteFontFileEnumerator
+// -------------------------------------------------
+HRESULT MemoryFontLoader::MoveNext(BOOL* hasCurrentFile)
+{
+    if (!hasCurrentFile) return E_INVALIDARG;
+    *hasCurrentFile = FALSE;
+
+    if (idx_ < blobs_.size())
+    {
+        HRESULT hr = CreateInMemoryFontFile(factory_.Get(),
+            blobs_[idx_].data(),
+            static_cast<UINT32>(blobs_[idx_].size()),
+            &current_);
+        *hasCurrentFile = SUCCEEDED(hr);
+        ++idx_;
+        return hr;
+    }
+    return S_OK;
+}
+
+HRESULT MemoryFontLoader::GetCurrentFontFile(IDWriteFontFile** fontFile)
+{
+    if (!fontFile) return E_INVALIDARG;
+    *fontFile = current_.Get();
+    if (*fontFile) (*fontFile)->AddRef();
+    return S_OK;
+}
+
+
+
+
+HRESULT MemoryFontLoader::CreateInMemoryFontFile(
+    IDWriteFactory* factory,
+    const void* data,
+    UINT32 size,
+    IDWriteFontFile** out)
+{
+    using Microsoft::WRL::MakeAndInitialize;
+
+    Microsoft::WRL::ComPtr<InMemoryFontFileLoader> loader;
+    HRESULT hr = MakeAndInitialize<InMemoryFontFileLoader>(&loader);
+    if (FAILED(hr)) return hr;
+
+    hr = factory->RegisterFontFileLoader(loader.Get());
+    if (FAILED(hr) && hr != DWRITE_E_ALREADYREGISTERED) return hr;
+
+    return loader->CreateInMemoryFontFileReference(
+        factory,
+        data,
+        size,
+        nullptr,
+        out);
+}
+
+
+
+// ---------- IUnknown ----------
+HRESULT TempFileFontLoader::QueryInterface(REFIID riid, void** ppv)
+{
+    if (riid == __uuidof(IUnknown) ||
+        riid == __uuidof(IDWriteFontCollectionLoader))
+    {
+        *ppv = static_cast<IDWriteFontCollectionLoader*>(this);
+    }
+    else if (riid == __uuidof(IDWriteFontFileEnumerator))
+    {
+        *ppv = static_cast<IDWriteFontFileEnumerator*>(this);
+    }
+    else
+    {
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    return S_OK;
+}
+
+// ---------- 静态工厂 ----------
+HRESULT TempFileFontLoader::CreateCollection(
+    IDWriteFactory* dwrite,
+    const std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts,
+    IDWriteFontCollection** out,
+    std::vector<std::wstring>& tempPaths)
+{
+    if (!dwrite || !out) return E_INVALIDARG;
+
+    // 注册 loader（只注册一次）
+    static bool reg = false;
+    if (!reg)
+    {
+        Microsoft::WRL::ComPtr<TempFileFontLoader> stub(new TempFileFontLoader(nullptr, {}));
+        dwrite->RegisterFontCollectionLoader(stub.Get());
+        reg = true;
+    }
+
+    // 写临时文件
+    std::vector<std::wstring> paths;
+    for (const auto& [name, blob] : fonts)
+    {
+        wchar_t tmpDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmpDir);
+
+        wchar_t tmpFile[MAX_PATH]{};
+        PathCombineW(tmpFile, tmpDir, PathFindFileNameW(name.c_str()));
+
+        HANDLE h = CreateFileW(tmpFile, GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) continue;
+
+        DWORD written = 0;
+        WriteFile(h, blob.data(), (DWORD)blob.size(), &written, nullptr);
+        CloseHandle(h);
+
+        paths.push_back(tmpFile);
+    }
+
+    // 创建集合
+    auto* key = paths.data();
+    UINT32 keySize = static_cast<UINT32>(paths.size() * sizeof(wchar_t*));
+    HRESULT hr = dwrite->CreateCustomFontCollection(
+        static_cast<IDWriteFontCollectionLoader*>(nullptr),
+        key, keySize, out);
+
+    if (SUCCEEDED(hr))
+        tempPaths.swap(paths);
+    return hr;
+}
+
+// ---------- IDWriteFontCollectionLoader ----------
+HRESULT TempFileFontLoader::CreateEnumeratorFromKey(
+    IDWriteFactory* factory,
+    const void* collectionKey, UINT32 collectionKeySize,
+    IDWriteFontFileEnumerator** enumerator)
+{
+    if (!factory || !enumerator) return E_INVALIDARG;
+
+    const auto* paths = reinterpret_cast<const wchar_t* const*>(collectionKey);
+    size_t count = collectionKeySize / sizeof(wchar_t*);
+
+    std::vector<std::wstring> vec(paths, paths + count);
+    Microsoft::WRL::ComPtr<TempFileFontLoader> e(new TempFileFontLoader(factory, vec));
+    *enumerator = e.Detach();
+    return S_OK;
+}
+
+// ---------- IDWriteFontFileEnumerator ----------
+HRESULT TempFileFontLoader::MoveNext(BOOL* hasCurrentFile)
+{
+    if (!hasCurrentFile) return E_INVALIDARG;
+    *hasCurrentFile = FALSE;
+
+    if (idx_ < paths_.size())
+    {
+        HRESULT hr = factory_->CreateFontFileReference(
+            paths_[idx_].c_str(), nullptr, &current_);
+        *hasCurrentFile = SUCCEEDED(hr);
+        ++idx_;
+        return hr;
+    }
+    return S_OK;
+}
+
+HRESULT TempFileFontLoader::GetCurrentFontFile(IDWriteFontFile** fontFile)
+{
+    if (!fontFile) return E_INVALIDARG;
+    *fontFile = current_.Get();
+    if (*fontFile) (*fontFile)->AddRef();
+    return S_OK;
+}
+
+bool AppBootstrap::init() {
+    initBackend(g_cfg.fontRenderer);
+    makeBackend(g_cfg.fontRenderer, nullptr);
+    if (!g_cfg.disableJS) { enableJS(); }
+    else { m_js = nullptr; }
+    return true;
+}
+
+void AppBootstrap::shutdown() {
+    if (m_js) duk_destroy_heap(m_js);
+}
+
+// GdiCanvas
+litehtml::uint_ptr GdiCanvas::getContext()
+{
+    return reinterpret_cast<litehtml::uint_ptr>(m_memDC);
+}
+
+void GdiCanvas::BeginDraw() { /* GDI 无需配对调用，留空 */ }
+void GdiCanvas::EndDraw() { /* 留空或在此处 BitBlt 到窗口 DC */ }
+
+litehtml::uint_ptr D2DCanvas::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_rt.Get());}
+void D2DCanvas::BeginDraw() { 
+    m_rt->BeginDraw(); 
+    m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));   // 先排除红色干扰
+}
+void D2DCanvas::EndDraw() { m_rt->EndDraw(); }
+
+// FreetypeCanvas
+litehtml::uint_ptr FreetypeCanvas::getContext()
+{
+    return reinterpret_cast<litehtml::uint_ptr>(m_backend.get());
+}
+
+void FreetypeCanvas::BeginDraw() { /* 留空或清屏 */ }
+void FreetypeCanvas::EndDraw() { /* 留空或刷新显示 */ }
+
+
+void GdiCanvas::resize(int width, int height){
+    m_w = width;
+    m_h = height;
+}
+
+void D2DCanvas::resize(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+
+    m_w = width;
+    m_h = height;
+
+    // 释放旧的离屏目标
+    m_rt.Reset();
+    m_backend.reset();          // 让 D2DBackend 也重建
+
+    // 用像素尺寸重新创建
+    ComPtr<ID2D1BitmapRenderTarget> bmpRT;
+    HRESULT hr = m_devCtx->CreateCompatibleRenderTarget(
+        D2D1::SizeF(static_cast<float>(m_w), static_cast<float>(m_h)), // 逻辑尺寸
+        &bmpRT);
+    if (SUCCEEDED(hr))
+    {
+        m_rt = std::move(bmpRT);
+        m_backend = std::make_unique<D2DBackend>(m_rt);
+    }
+}
+
+void FreetypeCanvas::resize(int width, int height) {
+    m_w = width;
+    m_h = height;
 }
