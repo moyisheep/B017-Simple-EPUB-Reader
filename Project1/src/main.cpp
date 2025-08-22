@@ -137,6 +137,7 @@ struct AppStates {
     std::atomic_bool needRelayout{ true };   // 是否需要重新排版
     std::atomic_bool isCaching{ false };   // 后台是否正在渲染
 
+    bool isLoaded = false;
     // 工具：生成新令牌，旧令牌立即失效
     void newCancelToken() {
         if (cancelToken) cancelToken->store(true);
@@ -1923,7 +1924,7 @@ std::shared_ptr<SimpleContainer> g_container;
 EPUBBook  g_book;
 std::shared_ptr<litehtml::document> g_doc;
 Paginator g_pg;
-
+Gdiplus::Image* g_pSplashImg = nullptr;
 std::future<void> g_parse_task;
 
 
@@ -2095,7 +2096,6 @@ void UpdateCache()
     g_pg.render(g_canvas.get(), g_scrollY);
 }
 
-
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -2109,6 +2109,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         wchar_t file[MAX_PATH]{};
         DragQueryFileW(reinterpret_cast<HDROP>(w), 0, file, MAX_PATH);
         DragFinish(reinterpret_cast<HDROP>(w));
+
 
 
         // 1. 等待上一次任务结束（简单做法：阻塞等待）
@@ -2145,6 +2146,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_EPUB_PARSED: {
+
+        g_states.isLoaded = true;
+        ShowWindow(g_hStatus, SW_SHOW);
+        ShowWindow(g_hView, SW_SHOW);
+        ShowWindow(g_hwndTV, SW_SHOW);
+
         g_last_html_path = g_book.ocf_pkg_.spine[0].href;
         std::string html = g_book.load_html(g_last_html_path);
        
@@ -2167,6 +2174,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_SIZE:
     {
+        
         SendMessage(g_hStatus, WM_SIZE, 0, 0);
 
         RECT rcStatus, rcClient;
@@ -2187,9 +2195,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         MoveWindow(g_hView, TV_W, 0, cx - TV_W, cy, TRUE);
         UpdateCache();
         SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
-
-        UpdateWindow(g_hWnd);
         UpdateWindow(g_hView);
+      
+        InvalidateRect(g_hWnd, nullptr, TRUE);  // TRUE = 先发送 WM_ERASEBKGND
+        UpdateWindow(g_hWnd);
+
         return 0;
     }
     case WM_LOAD_ERROR: {
@@ -2198,8 +2208,50 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         free(msg);                // 对应 CoTaskMemAlloc / _wcsdup
         return 0;
     }
-    case WM_PAINT: {
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(g_hWnd, &ps);
+        RECT rc;
+        GetClientRect(g_hWnd, &rc);
+        // 1. 强制整屏刷白
+    // ① 先整屏刷成红色——肉眼可见
+   
 
+        // 如果还没加载 EPUB，就画起始图
+        if (!g_states.isLoaded && g_pSplashImg)
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+
+            RECT rc;
+            GetClientRect(g_hWnd, &rc);
+            Gdiplus::RectF win(0.0f, 0.0f,
+                static_cast<float>(rc.right),
+                static_cast<float>(rc.bottom));
+
+            // 计算保持比例的缩放因子
+            float imgW = static_cast<float>(g_pSplashImg->GetWidth());
+            float imgH = static_cast<float>(g_pSplashImg->GetHeight());
+            float scale = std::max(win.Width / imgW, win.Height / imgH);
+
+            float drawW = imgW * scale;
+            float drawH = imgH * scale;
+
+            // 居中
+            float x = (win.Width - drawW) / 2.0f;
+            float y = (win.Height - drawH) / 2.0f;
+
+            g.DrawImage(g_pSplashImg,
+                Gdiplus::RectF(x, y, drawW, drawH),
+                0, 0, imgW, imgH,
+                Gdiplus::UnitPixel);
+        }
+        else
+        {
+            // 原有绘制逻辑（交给子控件或默认处理）
+        }
+        EndPaint(g_hWnd, &ps);
         return 0;
     }
 
@@ -2291,8 +2343,45 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProc(h, m, w, l);
 
 }
+// 从资源加载 PNG → Gdiplus::Image*
+Gdiplus::Image* LoadPngFromResource(HINSTANCE hInst, UINT resId)
+{
+    // 1. 找到资源
+    HRSRC hRes = FindResource(hInst, MAKEINTRESOURCE(resId), L"PNG");
+    if (!hRes) return nullptr;
 
+    DWORD resSize = SizeofResource(hInst, hRes);
+    HGLOBAL hResData = LoadResource(hInst, hRes);
+    if (!hResData) return nullptr;
 
+    const void* pResData = LockResource(hResData);   // 无需解锁，进程结束自动释放
+
+    // 2. 把内存块包装成 IStream
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, resSize);
+    if (!hMem) return nullptr;
+
+    void* pMem = GlobalLock(hMem);
+    memcpy(pMem, pResData, resSize);
+    GlobalUnlock(hMem);
+
+    IStream* pStream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hMem, TRUE, &pStream)))
+    {
+        GlobalFree(hMem);
+        return nullptr;
+    }
+
+    // 3. 用 GDI+ 解码
+    Gdiplus::Image* img = new Gdiplus::Image(pStream);
+    pStream->Release();   // CreateStreamOnHGlobal 第二个参数 TRUE → hMem 会被自动释放
+
+    if (img->GetLastStatus() != Gdiplus::Ok)
+    {
+        delete img;
+        return nullptr;
+    }
+    return img;
+}
 
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
@@ -2347,6 +2436,9 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
+
+    g_pSplashImg = LoadPngFromResource(g_hInst, IDB_PNG1);
+
     g_bootstrap = std::make_unique<AppBootstrap>();
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
 
@@ -2357,6 +2449,11 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
     
     EnableClearType();
+    // =====初始化隐藏=====
+    ShowWindow(g_hStatus, SW_HIDE);
+    ShowWindow(g_hwndTV, SW_HIDE);
+    ShowWindow(g_hView, SW_HIDE);
+    // ====================
     ShowWindow(g_hWnd, n);
     UpdateWindow(g_hWnd);
     MSG msg{};
@@ -2861,12 +2958,12 @@ D2DCanvas::D2DCanvas(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
 void D2DCanvas::present(HDC hdc, int x, int y)
 {
     if (!m_devCtx) return;
-
+    
     m_backend->m_rt->GetBitmap(&m_bmp);
-
+ 
     // 2. 开始绘制
     m_devCtx->BeginDraw();
-    m_devCtx->Clear(D2D1::ColorF(D2D1::ColorF::White));
+    //m_devCtx->Clear(D2D1::ColorF(D2D1::ColorF::White));
     m_devCtx->DrawBitmap(m_bmp.Get());
     m_devCtx->EndDraw();
 

@@ -9,4 +9,8 @@
   <ItemGroup>
     <ResourceCompile Include="src\resource.rc" />
   </ItemGroup>
+  <ItemGroup>
+    <Image Include="splash.png" />
+    <Image Include="src\splash.png" />
+  </ItemGroup>
 </Project>

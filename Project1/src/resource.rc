@@ -1,14 +1,23 @@
+// Microsoft Visual C++ generated resource script.
+//
 #include "resource.h"
+
 
 IDR_MENU_MAIN MENU
 BEGIN
-POPUP "&显示"
-BEGIN
-MENUITEM "&禁用CSS", IDM_TOGGLE_CSS, CHECKED
-MENUITEM "禁用 JavaScript(&J)", IDM_TOGGLE_JS, CHECKED
+    POPUP "&显示"
+    BEGIN
+        MENUITEM "&禁用CSS",                      IDM_TOGGLE_CSS, CHECKED
+        MENUITEM "禁用 JavaScript(&J)",           IDM_TOGGLE_JS, CHECKED
+    END
+    POPUP "信息(&I)"
+    BEGIN
+        MENUITEM "当前字体(&F)...",                 IDM_INFO_FONTS
+    END
 END
-POPUP "信息(&I)"
-BEGIN
-MENUITEM "当前字体(&F)...", IDM_INFO_FONTS
-END
-END
+
+
+
+IDB_PNG1                PNG                     "splash.png"
+
+

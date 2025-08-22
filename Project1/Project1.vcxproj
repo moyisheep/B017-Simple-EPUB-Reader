@@ -34,6 +34,10 @@
     <ClInclude Include="src\js_runtime.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
+  <ItemGroup>
+    <Image Include="splash.png" />
+    <Image Include="src\splash.png" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
