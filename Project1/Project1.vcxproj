@@ -19,12 +19,19 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\js_factory.cpp" />
+    <ClCompile Include="src\js_factory.h" />
+    <ClCompile Include="src\duktape_engine.cpp" />
+    <ClCompile Include="src\js_runtime.cpp" />
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src\resource.rc" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\duktape_engine.h" />
+    <ClInclude Include="src\js_engine.h" />
+    <ClInclude Include="src\js_runtime.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

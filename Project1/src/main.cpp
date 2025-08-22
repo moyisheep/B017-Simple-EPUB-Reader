@@ -23,7 +23,8 @@
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml/litehtml.h>
-
+#include <litehtml/document.h>
+#include <litehtml/element.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #pragma comment(lib, "freetype.lib")
@@ -42,6 +43,7 @@ using namespace Gdiplus;
 #include <wininet.h>
 #include "resource.h"
 #include <duktape.h>
+
 #include <litehtml/el_text.h>
 
 
@@ -51,13 +53,12 @@ using namespace Gdiplus;
 #include <dwrite_3.h>
 #include <d2d1.h>
 #include <wrl/client.h>
-#include <unordered_map>
-#include <string>
+
 #include <codecvt>
 #include <locale>
 #pragma comment(lib, "dwrite.lib")
 #include <d2d1_3.h>        // ID2D1DeviceContext / ID2D1Bitmap1
-#include <wrl/client.h>    // Microsoft::WRL::ComPtr
+
 #pragma comment(lib, "d2d1.lib")
 #include <dwrite_1.h>   // 需要 IDWriteTextFormat1
 #include <d2d1_1.h>       // D2D 1.1
@@ -69,13 +70,12 @@ using namespace Gdiplus;
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
-// 简单的错误检查宏
-#include <wincodec.h>
-#include <dwrite_1.h>   // IDWriteInMemoryFontFileLoader
+
 #include <robuffer.h>   // IBufferByteAccess
 #include <new>
 #include <wrl.h>
 #include <wrl/implements.h>   // 关键
+#include "js_runtime.h"
 #pragma comment(lib, "windowscodecs.lib")
 #ifndef HR
 #define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
@@ -211,6 +211,71 @@ static const std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
     {L"gulim",                 L"Gulim"},
     {L"dotum",                 L"Dotum"}
 };
+
+// 1. 纯虚接口
+
+
+
+//class duktape_engine : public js_engine {
+//    
+//public:
+//    duktape_engine();
+//    ~duktape_engine() override;
+//
+//    /* js_engine 接口 */
+//    bool init() override;
+//    void shutdown() override;
+//    //void bind_document(litehtml::document*) override;
+//    void eval(const std::string& code,
+//        const std::string& filename = "<inline>") override;
+//    void pump_tasks() override;
+//
+//private:
+//    /* 内部工具函数 */
+//    static duk_ret_t duk_console_log(duk_context*);
+//    //static duk_ret_t duk_get_element_by_id(duk_context*);
+//    //static duk_ret_t duk_element_inner_html_get(duk_context*);
+//    //static duk_ret_t duk_element_inner_html_set(duk_context*);
+//    static void duk_fatal_handler(void* udata, const char* msg);
+//    //static duk_ret_t duk_document_body_get(duk_context* ctx);
+//    //static duk_ret_t duk_document_get_body(duk_context* ctx);
+//    //static duk_ret_t duk_body_append_child(duk_context* ctx);
+//    //static duk_ret_t duk_create_element(duk_context* ctx);
+//    //static duk_idx_t push_element(duk_context* ctx, std::shared_ptr<litehtml::element> el);
+//    std::shared_ptr<litehtml::document> m_doc;   // 裸指针
+//    duk_context* ctx_ = nullptr;
+//
+//};
+
+//static litehtml::element::ptr
+//find_element_by_id(litehtml::element* node, const std::string& id)
+//{
+//    if (!node) return nullptr;
+//
+//    // 跳过文本节点
+//    if (node->get_tagName() == "#text")
+//        return nullptr;
+//
+//    // 匹配 id
+//    const char* node_id = node->get_attr("id");
+//    if (node_id && id == node_id)
+//        return node->shared_from_this();
+//
+//    // 遍历子节点
+//    for (auto& child : node->children())
+//    {
+//        auto res = find_element_by_id(child.get(), id);
+//        if (res) return res;
+//    }
+//    return nullptr;
+//}
+/* 显式注册：无宏，仅一行 */
+//static bool reg_duktape = [] {
+//    js_factory::instance().add("duktape", [] { return std::make_unique<duktape_engine>(); });
+//    return true;
+//    }();
+//
+
 struct ImageFrame
 {
     uint32_t width = 0;
@@ -228,6 +293,138 @@ static bool isWin10OrLater()
         return ::VerifyVersionInfoW(&os, VER_MAJORVERSION, mask) != FALSE;
         }();
     return once;
+}
+
+
+// HTML 转义辅助函数
+#include <algorithm>
+#include <cctype>
+#include <set>
+#include <sstream>
+
+// HTML 转义辅助函数
+std::string _escape_html(const std::string& s) {
+    std::ostringstream oss;
+    for (char c : s) {
+        switch (c) {
+        case '&':  oss << "&amp;";  break;
+        case '<':  oss << "&lt;";   break;
+        case '>':  oss << "&gt;";   break;
+        case '"':  oss << "&quot;"; break;
+        case '\'': oss << "&apos;"; break;
+        default:   oss << c;       break;
+        }
+    }
+    return oss.str();
+}
+
+// 自闭合标签集合
+static const std::set<std::string> void_tags = {
+    "area", "base", "br", "col", "embed", "hr", "img",
+    "input", "keygen", "link", "meta", "param", "source",
+    "track", "wbr"
+};
+
+// 转换为小写函数
+std::string to_lower(const std::string& str) {
+    std::string lower_str = str;
+    std::transform(lower_str.begin(), lower_str.end(), lower_str.begin(),
+        [](unsigned char c) { return std::tolower(c); });
+    return lower_str;
+}
+
+std::string generate_html(litehtml::element::ptr elem) {
+    if (!elem) return "";
+
+    std::ostringstream oss;
+
+    // 处理文本节点
+    if (elem->is_text()) {
+        std::string text;
+        elem->get_text(text);
+        if (!text.empty()) { // 只有当有文本内容时才输出
+            oss << _escape_html(text);
+        }
+    }
+    // 处理普通元素
+    else {
+        const char* tag_name = elem->get_tagName();
+        if (!tag_name) return "";
+
+        // 输出开始标签
+        oss << "<" << tag_name;
+
+        //// 使用 dump_get_attrs 获取所有属性
+        //auto attrs = elem->dump_get_attrs();
+        //for (const auto& attr : attrs) {
+        //    oss << " " << std::get<0>(attr) << "=\""
+        //        << _escape_html(std::get<1>(attr)) << "\"";
+        //}
+        // 修改后的属性处理
+        std::vector<const char*> standardAttrs = {
+            "id", "class", "name", "value", "type", "src", "href"
+        };
+
+        for (const char* name : standardAttrs) {
+            const char* value = elem->get_attr(name);
+            if (value && value[0] != '\0') {
+                oss << " " << name << "=\"" << _escape_html(value) << "\"";
+            }
+        }
+
+        // 处理自闭合标签
+        std::string tag_str = to_lower(tag_name);
+        bool is_void = (void_tags.find(tag_str) != void_tags.end());
+
+        if (is_void) {
+            oss << "/>";
+        }
+        else {
+            oss << ">";
+
+            // 递归处理子元素
+            const auto& children = elem->children();
+            for (const auto& child : children) {
+                oss << generate_html(child);
+            }
+
+            // 输出闭合标签
+            oss << "</" << tag_name << ">";
+        }
+    }
+
+    return oss.str();
+}
+
+// 完整的文档导出函数
+std::string get_document_html(litehtml::document::ptr doc) {
+    if (!doc) return "";
+
+    // 添加文档类型声明
+    std::ostringstream oss;
+    oss << "<!DOCTYPE html>";
+
+    // 从根元素开始生成
+    if (doc->root()) {
+        oss << generate_html(doc->root());
+    }
+
+    return oss.str();
+}
+
+void save_document_html(litehtml::document::ptr doc) {
+    std::string modified_html = get_document_html(doc);
+
+    // 输出到文件
+    std::ofstream out("output.html");
+    if (out.is_open()) {
+        out << modified_html;
+        out.close();
+        std::cout << "HTML 导出成功" << std::endl;
+    }
+    else {
+        std::cerr << "无法创建输出文件" << std::endl;
+    }
 }
 
 class InMemoryFontFileLoader
@@ -477,27 +674,28 @@ std::shared_ptr<IRenderBackend> g_backend = nullptr;
 std::unordered_map<std::string, ImageFrame> g_img_cache;
 class AppBootstrap {
 public:
+    AppBootstrap();
+    ~AppBootstrap();
     struct script_info
     {
-        litehtml::string src;
-        litehtml::string inline_code;
+        litehtml::element::ptr el;   // 只需要保留节点指针
     };
-    bool init();
-    void shutdown();
+
+ 
     void makeBackend(Renderer which, void* ctx);
     void initBackend(Renderer which);
     void enableJS();
-    void disableJS() { if (m_js) { duk_destroy_heap(m_js); m_js = nullptr; } }
+    void disableJS();
     void bind_host_objects();   // 新增
     void run_pending_scripts();
 
     void switchBackend(std::unique_ptr<IRenderBackend> newBackend) {
         g_backend = std::move(newBackend);
     }
-    std::vector<script_info> m_pending_scripts;
-private:
-    duk_context* m_js = nullptr;   // ① Duktape 虚拟机
 
+    std::vector<script_info> m_pending_scripts;
+
+    std::unique_ptr<js_runtime> m_jsrt;   // 替换裸 duk_context*
 
 };
 
@@ -1865,8 +2063,10 @@ void UpdateCache()
     if (w <= 0 || h <= 0) return;
 
     /* 1) 重新分页 */
+
+
     g_doc->render(w, litehtml::render_all);
-    if (!g_cfg.disableJS) g_bootstrap->run_pending_scripts();
+
     g_pg.load(g_doc.get(), w, h);
 
     /* 2) 按需重建画布 */
@@ -1880,6 +2080,8 @@ void UpdateCache()
     /* 3) 渲染整页 */
     g_pg.render(g_canvas.get(), g_scrollY);
 }
+
+
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -1937,13 +2139,18 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_container.reset();
         g_container = std::make_shared<SimpleContainer>(L".");
         g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
+        /* 关键：DOM 刚建好，立即回填内联脚本 */
+        if (!g_cfg.disableJS) {
+            g_bootstrap->bind_host_objects();
 
+            g_bootstrap->run_pending_scripts(); // 立即执行
+            // 在脚本执行后导出 HTML
+
+        }
         g_scrollY = 0;
 
         // 2) 立即把第 0 页画到缓存位图
         UpdateCache();          // 复用前面给出的 UpdateCache()
-
-        // 3) 更新滚动条
 
         // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
         InvalidateRect(g_hView, nullptr, FALSE);
@@ -2140,7 +2347,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
     g_bootstrap = std::make_unique<AppBootstrap>();
-    g_bootstrap->init();
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
 
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
@@ -2197,6 +2403,15 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     // 完整兜底 UA 样式表（litehtml 专用）
  
     g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
+    /* 关键：DOM 刚建好，立即回填内联脚本 */
+    if (!g_cfg.disableJS) {
+        g_bootstrap->bind_host_objects();
+
+        g_bootstrap->run_pending_scripts(); // 立即执行
+        save_document_html(g_doc);
+    }
+
+
     g_scrollY = 0;
 
     RECT rc;
@@ -2204,9 +2419,9 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     int w = rc.right;
     int h = rc.bottom;
     if (w <= 0 || h <= 0) return;
-
-    g_doc->render(w, litehtml::render_all);    // -1 表示“不限高度”
     if (!g_cfg.disableJS) { g_bootstrap->run_pending_scripts(); }   // 现在才跑脚本
+    g_doc->render(w, litehtml::render_all);    // -1 表示“不限高度”
+
     /* 3. 跳转到锚点 */
     if (!id.empty())
     {
@@ -2283,53 +2498,23 @@ SimpleContainer::create_element(const char* tag,
     const litehtml::string_map& attrs,
     const std::shared_ptr<litehtml::document>& doc)
 {
-    if (litehtml::t_strcasecmp(tag, "script") == 0)
-    {
-        AppBootstrap::script_info si;
-        auto it = attrs.find("src");
-        if (it != attrs.end()) si.src = it->second;
+    if (litehtml::t_strcasecmp(tag, "script") != 0)
+        return nullptr;   // 让 litehtml 自己建别的节点
+    if (g_cfg.disableJS) { return nullptr; }
 
-        // 内联代码暂时留空，等节点文本解析完再回填
-        si.inline_code.clear();
-        g_bootstrap->m_pending_scripts.emplace_back(std::move(si));
-    }
-    return nullptr;   // 其余元素交给 litehtml 默认流程
+    /* 1. 建节点（litehtml 会把内联文本自动收进来） */
+    auto el = std::make_shared<litehtml::html_tag>(doc);
+    el->set_tagName(tag);
+
+    /* 2. 记录到待执行列表 */
+    AppBootstrap::script_info si;
+    si.el = el;
+    g_bootstrap->m_pending_scripts.emplace_back(std::move(si));
+    return el;
 }
 
 
 
-void AppBootstrap::run_pending_scripts()
-{
-    for (auto& script : m_pending_scripts)
-    {
-        // 取出 <script> 里的文本
-        litehtml::string code;
-     
-        if (!script.src.empty())
-        {
-            std::wstring w_path = g_zipIndex.find(a2w(script.src));
-            EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
-            code = std::string(reinterpret_cast<const char*>(mf.data.data()),
-                mf.data.size());
-         
-        }
-        else
-        {
-            // 2. 没有 src，就取节点内部文本
-            code = script.inline_code;
-        }
-        if (!code.empty())
-        {
-            duk_push_string(m_js, code.c_str());
-            if (duk_peval(m_js) != 0)   // 安全执行
-            {
-                OutputDebugStringA(duk_safe_to_string(m_js, -1));
-            }
-            duk_pop(m_js);
-        }
-    }
-    m_pending_scripts.clear();
-}
 void SimpleContainer::import_css(litehtml::string& text,
     const litehtml::string& url,
     litehtml::string& baseurl)
@@ -2522,145 +2707,6 @@ void SimpleContainer::draw_list_marker(litehtml::uint_ptr hdc,
 }
 
 
-// ---------- 1. console ----------
-static duk_ret_t js_console_log(duk_context* ctx)
-{
-    const char* msg = duk_safe_to_string(ctx, 0);
-    OutputDebugStringA("JS: ");
-    OutputDebugStringA(msg);
-    OutputDebugStringA("\n");
-    return 0;
-}
-
-// ---------- 2. setTimeout ----------
-struct TimeoutData
-{
-    duk_context* ctx;
-    int fn_ref;
-};
-static void __stdcall timeout_cb(void* ud, unsigned long timer_low, unsigned long timer_high)
-{
-    TimeoutData* td = static_cast<TimeoutData*>(ud);
-    duk_push_global_stash(td->ctx);
-    duk_get_prop_index(td->ctx, -1, td->fn_ref);
-    if (duk_pcall(td->ctx, 0) != 0)
-        OutputDebugStringA(duk_safe_to_string(td->ctx, -1));
-    duk_pop(td->ctx);               // pop result
-    duk_del_prop_index(td->ctx, -1, td->fn_ref);
-    duk_pop(td->ctx);               // pop stash
-    delete td;
-}
-static duk_ret_t js_setTimeout(duk_context* ctx)
-{
-    if (!duk_is_function(ctx, 0)) return 0;
-    int delay = duk_to_int(ctx, 1);
-    duk_push_global_stash(ctx);
-    int ref = duk_get_top_index(ctx);
-    duk_dup(ctx, 0);
-    duk_put_prop_index(ctx, -2, ref);
-
-    TimeoutData* td = new TimeoutData{ ctx, ref };
-    CreateThreadpoolTimer(
-        (PTP_TIMER_CALLBACK)timeout_cb,
-        td,
-        nullptr);
-    return 0;
-}
-
-// ---------- 3. fetch ----------
-static duk_ret_t js_fetch(duk_context* ctx)
-{
-    const char* url = duk_require_string(ctx, 0);
-    // 极简同步实现：直接读 zip
-    duk_push_this(ctx);                      // 拿到 EPUBHost 对象
-    duk_get_prop_string(ctx, -1, "\xff""self");
-    SimpleContainer* self = static_cast<SimpleContainer*>(duk_get_pointer(ctx, -1));
-    std::wstring wpath = g_zipIndex.find(a2w(url));
-    EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
-    if (mf.data.empty())
-    {
-        duk_push_null(ctx);
-        return 1;
-    }
-    std::string text(reinterpret_cast<const char*>(mf.data.data()), mf.data.size());
-    duk_push_string(ctx, text.c_str());
-    return 1;
-}
-
-// ---------- 4. document ----------
-static duk_ret_t js_doc_get_by_tag(duk_context* ctx)
-{
-    const char* tag = duk_require_string(ctx, 0);
-    // 这里只是演示：返回一个固定对象
-    duk_push_object(ctx);
-    duk_push_string(ctx, tag);
-    duk_put_prop_string(ctx, -2, "tagName");
-    return 1;
-}
-
-// ---------- 5. window ----------
-static duk_ret_t js_window_scroll(duk_context* ctx)
-{
-    int x = duk_require_int(ctx, 0);
-    int y = duk_require_int(ctx, 1);
-    // 真正项目里调用 C++ 滚动接口
-    OutputDebugStringA(("scrollTo(" + std::to_string(x) + "," + std::to_string(y) + ")\n").c_str());
-    return 0;
-}
-
-// ---------- 绑定入口 ----------
-void AppBootstrap::bind_host_objects()
-{
-    // 在 bind_host_objects() 里
-    duk_push_object(m_js);                       // prototype
-    duk_push_c_function(m_js, js_fetch, 1);
-    duk_put_prop_string(m_js, -2, "fetch");
-    duk_push_pointer(m_js, this);                // 把 this 存到原型
-    duk_put_prop_string(m_js, -2, "\xff""self");
-    duk_put_global_string(m_js, "EPUBHost");     // 全局变量 EPUBHost
-
-    // console
-    duk_push_object(m_js);
-    duk_push_c_function(m_js, js_console_log, 1);
-    duk_put_prop_string(m_js, -2, "log");
-    duk_put_global_string(m_js, "console");
-
-    // setTimeout
-    duk_push_c_function(m_js, js_setTimeout, 2);
-    duk_put_global_string(m_js, "setTimeout");
-
-    // fetch
-    duk_push_c_function(m_js, js_fetch, 1);
-    duk_put_global_string(m_js, "fetch");
-
-    // document
-    duk_push_object(m_js);
-    duk_push_c_function(m_js, js_doc_get_by_tag, 1);
-    duk_put_prop_string(m_js, -2, "getElementsByTagName");
-    duk_put_global_string(m_js, "document");
-
-    // window
-    duk_push_object(m_js);
-    duk_push_c_function(m_js, js_window_scroll, 2);
-    duk_put_prop_string(m_js, -2, "scrollTo");
-    duk_put_global_string(m_js, "window");
-}
-
-void AppBootstrap::enableJS() {
-    m_js = duk_create_heap_default();
-    if (!m_js) {throw std::runtime_error("Duktape init failed"); }
-    bind_host_objects();   // 关键：注册宿主对象
-    duk_push_c_function(m_js, [](duk_context* ctx)->duk_ret_t {
-        const char* id = duk_require_string(ctx, 0);
-        auto self = static_cast<SimpleContainer*>(duk_require_pointer(ctx, 1));
-        duk_push_boolean(ctx, self->m_anchor_map.find(id) != self->m_anchor_map.end());
-        return 1;
-        }, 2);
-    duk_put_global_string(m_js, "hasAnchor");
-
-    duk_eval_string(m_js, "'Duktape inside SimpleContainer ready';");
-    duk_pop(m_js);
-}
 
 
 // --------------------------------------------------
@@ -2675,6 +2721,56 @@ std::string PreprocessHTML(std::string html)
     html = std::regex_replace(html,
         std::regex(R"(<title\b[^>]*?/\s*>)", std::regex::icase),
         "<title></title>");
+
+
+    //-------------------------------------------------
+    // 2. 自闭合 <script .../> → <script ...>code</script>
+    //-------------------------------------------------
+  // 2. 自闭合 <script .../> → <script ...>code</script>
+    if (g_cfg.disableCSS) {
+        // (?s) 不是 std::regex 的标准写法，这里用 [\s\S]* 代替“任意字符含换行”
+        static const std::regex killAllScript(
+            R"(<script\b[^>]*>(?:[^<]*(?:<(?!/script>)[^<]*)*)?</script>)",
+            std::regex::icase | std::regex::optimize);
+        html = std::regex_replace(html, killAllScript, "");
+    }
+    else
+    {
+        std::regex  scRe(R"(<script\b([^>]*)\bsrc\s*=\s*["']([^"']*)["']([^>]*)/\s*>)",
+            std::regex::icase);
+        std::string out;
+        out.reserve(html.size());
+
+        std::sregex_iterator it(html.begin(), html.end(), scRe);
+        std::sregex_iterator end;
+        size_t last = 0;
+
+        for (; it != end; ++it)
+        {
+            const std::smatch& m = *it;
+
+            // 2.1 读文件
+            std::string src = m[2].str();
+            std::wstring w_path = g_zipIndex.find(a2w(src));
+            EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
+            std::string code;
+            if (!mf.data.empty())
+                code.assign(reinterpret_cast<const char*>(mf.data.data()),
+                    mf.data.size());
+
+            // 2.2 去掉 src 属性
+            std::string attrs = m[1].str() + m[3].str();
+            attrs = std::regex_replace(attrs,
+                std::regex(R"(\s*\bsrc\s*=\s*["'][^"']*["'])", std::regex::icase), "");
+
+            // 2.3 拼成对标签
+            out.append(html, last, m.position() - last);
+            out += "<script" + attrs + ">" + code + "</script>";
+            last = m.position() + m.length();
+        }
+        out.append(html, last, std::string::npos);
+        html.swap(out);
+    }
     //-------------------------------------------------
     // 2. EPUB 3 的 <meta property="..." content="..."/>
     //     litehtml 只认识 name/content，不认识 property
@@ -3039,7 +3135,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                     &fmt)))
             {
                 m_actualFamily = f;          // 保存命中的家族名
-                OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
+                //OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
                 break;
             }
         }
@@ -3060,15 +3156,16 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                 &fmt)))
         {
             m_actualFamily = f;              // 保存命中的家族名
-            OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
+            //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
             break;
         }
+        OutputDebugStringW((L"[DWrite] 未找到字体：" + f + L"\n").c_str());
     }
 
     if (!fmt){
-        OutputDebugStringW(L"获取字体:");
+        OutputDebugStringW(L"[DWrite] 未找到字体:");
         OutputDebugStringW(a2w(faceName).c_str());
-        OutputDebugStringW(L" 失败，使用默认字体\n");
+        OutputDebugStringW(L"  使用默认字体\n");
         m_dwrite->CreateTextFormat(
             L"Segoe UI", nullptr,
             static_cast<DWRITE_FONT_WEIGHT>(weight),
@@ -3081,7 +3178,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     }
 
     if (!fmt) {
-        OutputDebugStringW(L"加载默认字体失败\n");
+        OutputDebugStringW(L"[DWrite] 加载默认字体失败\n");
         return 0; }
     /*----------------------------------------------------------
       用命中的字体家族名去拿真正的字体并计算度量
@@ -4100,16 +4197,14 @@ HRESULT MemoryFontLoader::CreateInMemoryFontFile(
 
 
 
-bool AppBootstrap::init() {
+AppBootstrap::AppBootstrap() {
     initBackend(g_cfg.fontRenderer);
     makeBackend(g_cfg.fontRenderer, nullptr);
     if (!g_cfg.disableJS) { enableJS(); }
-    else { m_js = nullptr; }
-    return true;
 }
 
-void AppBootstrap::shutdown() {
-    if (m_js) duk_destroy_heap(m_js);
+AppBootstrap::~AppBootstrap() {
+
 }
 
 // GdiCanvas
@@ -4331,3 +4426,473 @@ void D2DBackend::resize(int width, int height) {
 void FreetypeBackend::resize(int width, int height) {
 
 }
+
+
+
+
+
+
+///* ---------- 构造 / 析构 ---------- */
+//duktape_engine::duktape_engine() = default;
+//duktape_engine::~duktape_engine() { shutdown(); }
+//
+///* ---------- 生命周期 ---------- */
+//void duktape_engine::duk_fatal_handler(void* udata, const char* msg)
+//{
+//    auto* self = static_cast<duktape_engine*>(udata);
+//    if (self && self->m_logger) self->m_logger(msg);
+//}
+//
+//bool duktape_engine::init()
+//{
+//    ctx_ = duk_create_heap(nullptr, nullptr, nullptr,
+//        this,           // userdata
+//        duk_fatal_handler);
+//    if (!ctx_) return false;
+//
+//    /* console.log */
+//    duk_push_object(ctx_);
+//    duk_push_c_function(ctx_, duk_console_log, DUK_VARARGS);
+//    duk_push_pointer(ctx_, this);
+//    duk_put_prop_string(ctx_, -2, "\xFF" "self");
+//    duk_put_prop_string(ctx_, -2, "log");
+//    duk_put_global_string(ctx_, "console");
+//
+//
+//    return true;
+//}
+//
+//void duktape_engine::shutdown() {
+//    if (ctx_) {
+//        duk_destroy_heap(ctx_);
+//        ctx_ = nullptr;
+//    }
+//}
+//
+///* ---------- 执行脚本 ---------- */
+//void duktape_engine::eval(const std::string& code,
+//    const std::string& filename)
+//{
+//    if (!ctx_) { OutputDebugStringA("ctx is null\n"); return; }
+//    duk_idx_t top = duk_get_top(ctx_);          // 记住栈顶
+//    char buf[512];
+//    //snprintf(buf, sizeof(buf), "eval() size=%zu, data=|%s|\n", code.size(), code.c_str());
+//    //OutputDebugStringA(buf);
+//
+//    duk_push_string(ctx_, code.c_str());
+//    if (duk_peval(ctx_) != 0) {
+//        snprintf(buf, sizeof(buf), "Duktape error: %s\n", duk_safe_to_string(ctx_, -1));
+//        OutputDebugStringA(buf);
+//    }
+//    else {
+//        snprintf(buf, sizeof(buf), "Duktape ok, result=%s\n", duk_safe_to_string(ctx_, -1));
+//        OutputDebugStringA(buf);
+//    }
+//    duk_set_top(ctx_, top);                     // 强制恢复栈平衡
+//
+//}
+//
+///* ---------- 事件循环 ---------- */
+//void duktape_engine::pump_tasks()
+//{
+//}
+
+void AppBootstrap::enableJS()
+{
+    if (!m_jsrt) m_jsrt = std::make_unique<js_runtime>(g_doc.get());
+    if (!m_jsrt->switch_engine("duktape"))
+        OutputDebugStringA("[Duktape] Duktape init failed\n");
+    else {
+        OutputDebugStringA("[Duktape] Duktape init OK\n");
+        m_jsrt->set_logger(OutputDebugStringA);
+        m_jsrt->eval("console.log('hello from duktape\n');");
+    }
+}
+
+void AppBootstrap::disableJS()
+{
+    m_jsrt.reset();   // 直接销毁即可，js_runtime 会负责 shutdown
+}
+
+void AppBootstrap::run_pending_scripts()
+{
+    if (!m_jsrt) return;          // 没有 JS 引擎就跳过
+    for (const auto& script : m_pending_scripts)
+    {
+        litehtml::string code;
+        script.el->get_text(code);  // 取出 <script> 里的纯文本
+        if (!code.empty())
+            m_jsrt->eval(code, "<script>");  // 交给 QuickJS / Duktape / V8
+    }
+    m_pending_scripts.clear();    // 执行完清空
+}
+
+void AppBootstrap::bind_host_objects()
+{
+    if (!m_jsrt) return;
+    m_jsrt->bind_document(g_doc.get());   // js_runtime 内部会转发到当前引擎
+}
+
+
+
+///* ---------- 绑定 document ---------- */
+//void duktape_engine::bind_document(litehtml::document* doc)
+//{
+//    auto* box = new std::shared_ptr<litehtml::document>(doc);
+//    if (!ctx_) {
+//        OutputDebugStringA("[DUK] bind_document: ctx_ is null\n");
+//        return;
+//    }
+//    OutputDebugStringA("[DUK] === bind_document start ===\n");
+//
+//    /* ---------- 1. 创建 document 对象 ---------- */
+//    duk_push_global_object(ctx_);               // [global]
+//    duk_push_object(ctx_);                      // [global, document]
+//    duk_push_pointer(ctx_, box);
+//    duk_put_prop_string(ctx_, -2, "__ptr");
+//
+//    /* ---------- 2. 其余 API ---------- */
+//    duk_push_c_function(ctx_, duk_get_element_by_id, 1);
+//    duk_push_pointer(ctx_, box);
+//    duk_put_prop_string(ctx_, -2, "\xFF" "shared_doc");
+//    duk_put_prop_string(ctx_, -2, "getElementById");
+//
+//    duk_push_c_function(ctx_, duk_document_get_body, 0);
+//    duk_push_pointer(ctx_, box);
+//    duk_put_prop_string(ctx_, -2, "\xFF" "shared_doc");
+//    duk_put_prop_string(ctx_, -2, "getBody");
+//
+//    duk_push_c_function(ctx_, duk_create_element, 1);
+//    duk_push_pointer(ctx_, box);
+//    duk_put_prop_string(ctx_, -2, "\xFF" "shared_doc");
+//    duk_put_prop_string(ctx_, -2, "createElement");
+//
+//    /* ---------- 3. document.body（一次性属性） ---------- */
+//
+//
+//    /* ---------- 4. 挂到全局 ---------- */
+//    duk_put_prop_string(ctx_, -2, "document");
+//    duk_pop(ctx_);
+//
+//}
+///* ---------- 工具：把 shared_ptr 存到 stash ---------- */
+//static void stash_element(duk_context* ctx,
+//    const litehtml::element::ptr& el)
+//{
+//    duk_push_heap_stash(ctx);
+//    duk_push_pointer(ctx, el.get());
+//    duk_push_pointer(ctx, new std::shared_ptr<litehtml::element>(el));
+//    duk_put_prop(ctx, -3);
+//    duk_pop(ctx);
+//}
+//
+//static litehtml::element::ptr
+//get_stashed_element(duk_context* ctx, litehtml::element* raw)
+//{
+//    duk_push_heap_stash(ctx);
+//    duk_push_pointer(ctx, raw);
+//    duk_get_prop(ctx, -2);
+//    auto* sp = static_cast<std::shared_ptr<litehtml::element>*>(
+//        duk_get_pointer(ctx, -1));
+//    litehtml::element::ptr ret = *sp;
+//    duk_pop_3(ctx);
+//    return ret;
+//}
+//
+///* ---------- createElement ---------- */
+///* 1. 把函数改成 static 或全局 C 函数 */
+//duk_ret_t duktape_engine::duk_create_element(duk_context* ctx)
+//{
+//    /* 2. 从 magic 里取出 document* */
+//    duk_push_current_function(ctx);
+//    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
+//    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
+//        duk_require_pointer(ctx, -1));
+//    duk_pop_2(ctx);
+//    if (!doc_sp) {
+//        OutputDebugStringA("[DUK] document* is null\n");
+//        duk_push_null(ctx);
+//        return 1;
+//    }
+//
+//    /* 3. 正常干活 */
+//    const char* tag = duk_require_string(ctx, 0);
+//    auto el = doc_sp->create_element(tag ? tag : "div", {});
+//    if (!el) {
+//        duk_push_null(ctx);
+//        return 1;
+//    }
+//
+//    stash_element(ctx, el);          // 保存 shared_ptr
+//    duk_push_object(ctx);            // 返回 JS 对象
+//    duk_push_pointer(ctx, el.get());
+//    duk_put_prop_string(ctx, -2, "__ptr");
+//    return 1;
+//}
+///* ---------- appendChild ---------- */
+///* 原型对象上真正的 appendChild 实现 */
+//duk_ret_t duktape_engine::duk_body_append_child(duk_context* ctx)
+//{
+//    /* 0. this -> parent */
+//    duk_push_this(ctx);
+//    duk_get_prop_string(ctx, -1, "\xFF" "element");
+//    auto* parent_sp = static_cast<std::shared_ptr<litehtml::element>*>(
+//        duk_require_buffer(ctx, -1, nullptr));
+//
+//    /* 1. 第 0 个参数 -> child */
+//    duk_dup(ctx, 0);   // child JS object
+//    duk_get_prop_string(ctx, -1, "\xFF" "element");
+//    auto* child_sp = static_cast<std::shared_ptr<litehtml::element>*>(
+//        duk_require_buffer(ctx, -1, nullptr));
+//
+//    /* 2. 如果 child 已经有父节点，先摘掉 */
+//    if ((*child_sp)->parent()) {
+//        (*child_sp)->parent()->removeChild(*child_sp);
+//    }
+//
+//    /* 3. 挂到新父节点 */
+//    (*parent_sp)->appendChild(*child_sp);
+//
+//    /* 4. 返回 child */
+//    duk_dup(ctx, 0);
+//    return 1;
+//}
+//
+///* ---------- 8. document.body 的 getter 里顺便挂 appendChild ---------- */
+//duk_ret_t duktape_engine::duk_document_body_get(duk_context* ctx)
+//{
+//    OutputDebugStringA("[DUK] duk_document_body_get called\n");
+//    /* 取出 shared_ptr<document> */
+//    duk_push_current_function(ctx);
+//    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
+//    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
+//        duk_require_pointer(ctx, -1));
+//    duk_pop_2(ctx);
+//
+//    auto body_sp = find_body(doc_sp->root());
+//    if (!body_sp) { duk_push_null(ctx); return 1; }
+//
+//    /* 用统一的包装函数：内部带 shared_ptr buffer */
+//    push_element(ctx, body_sp);   // 栈顶就是 JS 对象
+//
+//    return 1;
+//}
+//
+///* ---------- 内部工具 ---------- */
+//duk_ret_t duktape_engine::duk_document_get_body(duk_context* ctx)
+//{
+//    /* 直接复用 duk_document_body_get 的实现 */
+//    return duk_document_body_get(ctx);
+//}
+////duk_ret_t duktape_engine::duk_document_get_body(duk_context* ctx) {
+////    DUK_TRACE(ctx, "getBody: entry");
+////
+////    duk_push_current_function(ctx);
+////    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
+////    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
+////        duk_require_pointer(ctx, -1));
+////    duk_pop_2(ctx);
+////    if (!doc_sp) {
+////        OutputDebugStringA("[DUK] document* is null\n");
+////        duk_push_null(ctx);
+////        return 1;
+////    }
+////
+////    auto body = find_body(doc_sp->root());
+////    if (!body) {
+////        duk_push_null(ctx);
+////        return 1;
+////    }
+////
+////    duk_idx_t obj = duk_push_object(ctx);           // [this, obj]
+////    duk_push_pointer(ctx, body.get());
+////    duk_put_prop_string(ctx, obj, "__ptr");
+////
+////    duk_push_c_function(ctx, duk_element_inner_html_get, 0);
+////    duk_push_c_function(ctx, duk_element_inner_html_set, 1);
+////    duk_def_prop(ctx, obj,
+////        DUK_DEFPROP_HAVE_GETTER |
+////        DUK_DEFPROP_HAVE_SETTER |
+////        DUK_DEFPROP_ENUMERABLE);
+////
+////    duk_replace(ctx, 0);                            // [obj]
+////    return 1;
+////}
+//duk_ret_t duktape_engine::duk_console_log(duk_context* ctx)
+//{
+//    duk_push_current_function(ctx);                // -> [func]
+//    duk_get_prop_string(ctx, -1, "\xFF" "self");   // -> [func, this]
+//    auto* self = static_cast<duktape_engine*>(duk_get_pointer(ctx, -1));
+//    duk_pop_2(ctx);                                // -> []
+//
+//    if (!self || !self->m_logger) return 0;
+//
+//    std::stringstream ss;
+//    for (int i = 0, n = duk_get_top(ctx); i < n; ++i) {
+//        ss << duk_to_string(ctx, i) << (i + 1 == n ? "" : " ");
+//    }
+//    self->m_logger(ss.str().c_str());
+//    return 0;
+//}
+//
+//static const char* duk_get_type_names(duk_context* ctx, duk_idx_t idx)
+//{
+//    switch (duk_get_type(ctx, idx)) {
+//    case DUK_TYPE_UNDEFINED: return "undefined";
+//    case DUK_TYPE_NULL:      return "null";
+//    case DUK_TYPE_BOOLEAN:   return duk_get_boolean(ctx, idx) ? "true" : "false";
+//    case DUK_TYPE_NUMBER:    return "number";
+//    case DUK_TYPE_STRING:    return duk_get_string(ctx, idx);
+//    case DUK_TYPE_OBJECT:    return "object";
+//    default:                 return "unknown";
+//    }
+//}
+//
+//duk_ret_t duktape_engine::duk_get_element_by_id(duk_context* ctx)
+//{
+//    DUK_TRACE(ctx, "getElementById: entry");
+//
+//    /* 1. 取出 this（document 对象） */
+//    duk_push_current_function(ctx);
+//    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
+//    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
+//        duk_require_pointer(ctx, -1));
+//    duk_pop_2(ctx);
+//    if (!doc_sp) {
+//        OutputDebugStringA("[DUK] document* is null\n");
+//        duk_push_null(ctx);
+//        return 1;
+//    }
+//
+//    /* 2. 取 id 参数 */
+//    const char* id = duk_require_string(ctx, 0);
+//
+//    /* 3. 查找元素 */
+//    auto el = find_element_by_id(doc_sp->root().get(), id);
+//    if (!el) {
+//        OutputDebugStringA("[DUK] getElementById: element not found\n");
+//        duk_push_null(ctx);
+//        return 1;
+//    }
+//
+//    /* 4. 创建 JS 对象 —— 此时栈干净，只有 [id] */
+//    duk_idx_t obj = duk_push_object(ctx);           // [id, obj]
+//
+//    /* 5. 保存 C++ 指针 */
+//    duk_push_pointer(ctx, el.get());                // [id, obj, ptr]
+//    duk_put_prop_string(ctx, obj, "__ptr");         // [id, obj]
+//
+//    /* 6. tagName */
+//    const char* tag = el->get_tagName();      // 直接就是 UTF-8
+//    duk_push_string(ctx, tag ? tag : "");     // 防止空指针
+//    duk_put_prop_string(ctx, obj, "tagName");  // [id, obj]
+//
+//
+//
+//    /* 打印返回值类型和内容 */
+//    duk_dup(ctx, -1);                      // 复制栈顶（返回值）
+//    const char* t = duk_get_type_names(ctx, -1);  // 自己写的辅助函数
+//    OutputDebugStringA(std::format("[DUK] return: {}", t).c_str());
+//    OutputDebugStringA("\n");
+//    duk_pop(ctx);
+//    return 1;                                       // [obj]
+//}
+//
+//
+//
+//// 把 element 及其子树序列化成 HTML
+//static void element_to_html(const litehtml::element::ptr& el,
+//    std::string& out)
+//{
+//    if (!el) return;
+//
+//    const char* tag = el->get_tagName();
+//    if (!tag || !*tag) return;          // 文本/注释节点
+//
+//    out += '<';
+//    out += tag;
+//
+//    // 拼属性
+//    auto attrs = el->dump_get_attrs();  // 返回 vector<tuple<name,value>>
+//    for (const auto& [name, value] : attrs)
+//    {
+//        out += ' ';
+//        out += name;
+//        out += "=\"";
+//        out += value;
+//        out += '\"';
+//    }
+//
+//    if (el->children().empty())
+//    {
+//        // 自闭合
+//        out += " />";
+//    }
+//    else
+//    {
+//        out += '>';
+//        for (const auto& child : el->children())
+//            element_to_html(child, out);
+//        out += "</";
+//        out += tag;
+//        out += '>';
+//    }
+//}
+//
+//
+//duk_ret_t duktape_engine::duk_element_inner_html_get(duk_context* ctx)
+//{
+//    OutputDebugStringA("[DUK] innerHTML_get: entered\n");
+//    DUK_TRACE(ctx, "get-entry");
+//
+//    /* 栈: [this]  (this 在 0) */
+//    duk_get_prop_string(ctx, 0, "__ptr");      // [this, ptr]
+//    DUK_TRACE(ctx, "get-after-get-prop");
+//
+//    auto* el = static_cast<litehtml::element*>(duk_get_pointer(ctx, -1));
+//    duk_pop(ctx);                              // [this]
+//    DUK_TRACE(ctx, "get-after-pop-ptr");
+//
+//    if (!el) {
+//        OutputDebugStringA("[DUK] innerHTML_get: el == nullptr\n");
+//        duk_push_string(ctx, "");
+//        DUK_TRACE(ctx, "get-before-return-null");
+//        return 1;
+//    }
+//
+//    std::string html;
+//    element_to_html(el->shared_from_this(), html);
+//
+//    duk_push_string(ctx, html.c_str());        // [this, html]
+//    DUK_TRACE(ctx, "get-after-push-html");
+//
+//    duk_replace(ctx, 0);                       // [html]
+//    DUK_TRACE(ctx, "get-before-return");
+//    return 1;
+//}
+//duk_ret_t duktape_engine::duk_element_inner_html_set(duk_context* ctx)
+//{
+//    OutputDebugStringA("[DUK] innerHTML_set: entered\n");
+//    DUK_TRACE(ctx, "set-entry");
+//
+//    /* 栈: [this, html]  (this=0, html=1) */
+//    duk_get_prop_string(ctx, 0, "__ptr");      // [this, html, ptr]
+//    DUK_TRACE(ctx, "set-after-get-prop");
+//
+//    auto* el = static_cast<litehtml::element*>(duk_get_pointer(ctx, -1));
+//    duk_pop(ctx);                              // [this, html]
+//    DUK_TRACE(ctx, "set-after-pop-ptr");
+//
+//    const char* html = duk_require_string(ctx, 1);
+//    OutputDebugStringA("[DUK] innerHTML_set: html = ");
+//    OutputDebugStringA(html);
+//    OutputDebugStringA("\n");
+//
+//    if (el && el->get_document()) {
+//        el->clearRecursive();
+//        el->get_document()->append_children_from_string(*el, html);
+//    }
+//    DUK_TRACE(ctx, "set-before-return");
+//    return 0;
+//}
+
