@@ -70,7 +70,9 @@ using namespace Gdiplus;
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#include <cctype>
 
+#include <queue>
 #include <robuffer.h>   // IBufferByteAccess
 #include <new>
 #include <wrl.h>
@@ -102,17 +104,48 @@ std::wstring g_currentHtmlDir = L"";
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
 constexpr UINT WM_EPUB_UPDATE_SCROLLBAR = WM_APP + 2;
 constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
+constexpr UINT WM_EPUB_CACHE_UPDATED = WM_APP + 4;
+constexpr UINT WM_EPUB_ANCHOR = WM_APP + 5;
 // -------------- 运行时策略 -----------------
 enum class Renderer { GDI, D2D, FreeType };
   // 可随时改
 
 struct AppSettings {
-    bool disableCSS = false;   // 默认启用
-    bool disableJS = false;   // 默认不禁用 JS
+    bool disableCSS = false;   // 默认启用 css
+    bool disableJS = true;   // 默认禁用 JS
     bool disablePreprocessHTML = false;
     Renderer fontRenderer = Renderer::D2D;
+    std::set<std::wstring> font_serif = { L"Source Han Serif SC", 
+        L"Noto Serif CJK SC", 
+        L"SimSun", 
+        L"Times New Roman" };
+    std::set<std::wstring> font_sans_serif = { L"Source Han Sans SC", 
+        L"Noto Sans CJK SC", 
+        L"Microsoft YaHei", 
+        L"PingFang SC", 
+        L"Arial" };
+    std::set<std::wstring> font_monospace = { L"JetBrains Mono", 
+        L"Sarasa Gothic SC", 
+        L"Consolas", 
+        L"Courier New" };
 };
+struct AppStates {
+    // ---- 取消令牌 ----
+    std::shared_ptr<std::atomic_bool> cancelToken;
+
+    // ---- 状态机 ----
+    std::atomic_bool needRelayout{ true };   // 是否需要重新排版
+    std::atomic_bool isCaching{ false };   // 后台是否正在渲染
+
+    // 工具：生成新令牌，旧令牌立即失效
+    void newCancelToken() {
+        if (cancelToken) cancelToken->store(true);
+        cancelToken = std::make_shared<std::atomic_bool>(false);
+    }
+};
+AppStates g_states;
 AppSettings g_cfg;
+std::wstring g_last_html_path;
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
 static std::vector<std::wstring> g_tempFontFiles;
 static std::unordered_map<std::wstring, std::wstring> g_realFontNames;
@@ -212,70 +245,11 @@ static const std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
     {L"dotum",                 L"Dotum"}
 };
 
-// 1. 纯虚接口
-
-
-
-//class duktape_engine : public js_engine {
-//    
-//public:
-//    duktape_engine();
-//    ~duktape_engine() override;
-//
-//    /* js_engine 接口 */
-//    bool init() override;
-//    void shutdown() override;
-//    //void bind_document(litehtml::document*) override;
-//    void eval(const std::string& code,
-//        const std::string& filename = "<inline>") override;
-//    void pump_tasks() override;
-//
-//private:
-//    /* 内部工具函数 */
-//    static duk_ret_t duk_console_log(duk_context*);
-//    //static duk_ret_t duk_get_element_by_id(duk_context*);
-//    //static duk_ret_t duk_element_inner_html_get(duk_context*);
-//    //static duk_ret_t duk_element_inner_html_set(duk_context*);
-//    static void duk_fatal_handler(void* udata, const char* msg);
-//    //static duk_ret_t duk_document_body_get(duk_context* ctx);
-//    //static duk_ret_t duk_document_get_body(duk_context* ctx);
-//    //static duk_ret_t duk_body_append_child(duk_context* ctx);
-//    //static duk_ret_t duk_create_element(duk_context* ctx);
-//    //static duk_idx_t push_element(duk_context* ctx, std::shared_ptr<litehtml::element> el);
-//    std::shared_ptr<litehtml::document> m_doc;   // 裸指针
-//    duk_context* ctx_ = nullptr;
-//
-//};
-
-//static litehtml::element::ptr
-//find_element_by_id(litehtml::element* node, const std::string& id)
-//{
-//    if (!node) return nullptr;
-//
-//    // 跳过文本节点
-//    if (node->get_tagName() == "#text")
-//        return nullptr;
-//
-//    // 匹配 id
-//    const char* node_id = node->get_attr("id");
-//    if (node_id && id == node_id)
-//        return node->shared_from_this();
-//
-//    // 遍历子节点
-//    for (auto& child : node->children())
-//    {
-//        auto res = find_element_by_id(child.get(), id);
-//        if (res) return res;
-//    }
-//    return nullptr;
-//}
-/* 显式注册：无宏，仅一行 */
-//static bool reg_duktape = [] {
-//    js_factory::instance().add("duktape", [] { return std::make_unique<duktape_engine>(); });
-//    return true;
-//    }();
-//
-
+static std::unordered_map<std::wstring, std::set<std::wstring>>  g_fontAliasDynamic = {
+    {L"serif", g_cfg.font_serif},
+    {L"sans-serif", g_cfg.font_sans_serif}, 
+    {L"monospace", g_cfg.font_monospace}
+};
 struct ImageFrame
 {
     uint32_t width = 0;
@@ -297,10 +271,8 @@ static bool isWin10OrLater()
 
 
 // HTML 转义辅助函数
-#include <algorithm>
-#include <cctype>
-#include <set>
-#include <sstream>
+
+
 
 // HTML 转义辅助函数
 std::string _escape_html(const std::string& s) {
@@ -747,6 +719,7 @@ public:
     /* 下面 6 个函数在 .cpp 里用 IDWriteTextLayout / ID2D1SolidColorBrush 实现 */
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
     void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
+    std::vector<std::wstring> split_font_list(const std::string& src);
     litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
     void delete_font(litehtml::uint_ptr h) override;
     void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
@@ -755,7 +728,8 @@ public:
     void load_all_fonts(void);
     void unload_fonts(void);
     void resize(int width, int height) override;
- 
+    std::optional<std::wstring> mapDynamic(const std::wstring& key);
+    std::wstring resolveFace(const std::wstring& raw);
     ComPtr<ID2D1BitmapRenderTarget> m_rt;
 private:
        // 自动 AddRef/Release
@@ -765,7 +739,11 @@ private:
     std::wstring m_actualFamily;   // 保存命中的字体家族名m_actualFamily
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
     ComPtr<ID2D1RenderTarget> m_devCtx;
+    static std::wstring toLower(std::wstring s);
+    static std::optional<std::wstring> mapStatic(const std::wstring& key);
 
+
+    ComPtr<IDWriteFontCollection> m_sysFontColl;
     int  m_w, m_h;
 };
 
@@ -837,6 +815,26 @@ public:
     virtual void resize(int width, int height) = 0;
     /* 工厂：根据当前策略创建画布 */
     static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
+};
+
+
+
+class RenderWorker {
+public:
+    static RenderWorker& instance();
+    void push(int w, int h, int sy);
+    void stop();
+    ~RenderWorker();
+private:
+    RenderWorker() : worker_(&RenderWorker::loop, this) {}
+    void loop();
+    struct Task { int w, h, sy; };
+
+    std::mutex              m_;
+    std::condition_variable cv_;
+    std::optional<Task>     latest_;   // 只保留最新
+    std::atomic<bool>       stop_{ false };
+    std::thread             worker_;
 };
 
 class GdiCanvas : public ICanvas {
@@ -1468,6 +1466,7 @@ struct EPUBBook {
     std::string load_html(const std::wstring& path) const;
 
     void load_all_fonts(void);
+    void init_doc(std::string html);
     static HTREEITEM InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent)
     {
         TVINSERTSTRUCTW tvi{};
@@ -1890,11 +1889,15 @@ static ImageFrame decode_img(const EPUBBook::MemFile& mf, const wchar_t* ext)
 void Paginator::load(litehtml::document* doc, int w, int h)
 {
     m_doc = doc;
+    
     m_w = w;
     m_h = h;
     g_maxScroll = 0;
     if (!m_doc) return;
-
+    /* 1) 需要排版才排 */
+    if (g_states.needRelayout.exchange(false)) {
+        m_doc->render(m_w, litehtml::render_all);
+    }
     g_maxScroll = m_doc->height();
 }
 void Paginator::render(ICanvas* canvas, int scrollY)
@@ -1953,6 +1956,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_SIZE:
     {
+        g_states.needRelayout.store(true);
         if (g_canvas) {
             g_canvas->resize(LOWORD(lp), HIWORD(lp));
         }
@@ -1962,6 +1966,29 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             D2D1_SIZE_U size{ rc.right - rc.left, rc.bottom - rc.top };
             g_d2dRT->Resize(size);   // HwndRenderTarget 专用
         }
+        return 0;
+    }
+    case WM_EPUB_CACHE_UPDATED:
+    {
+
+        UpdateWindow(g_hView);
+  
+        return 0;
+    }
+    case WM_EPUB_ANCHOR:
+    {
+        wchar_t* sel = reinterpret_cast<wchar_t*>(wp);
+        if (sel) {
+            std::string cssSel = w2a(sel);
+            if (auto el = g_doc->root()->select_one(cssSel.c_str())) {
+                g_scrollY = el->get_placement().y;
+            }
+            free(sel);          // 对应 _wcsdup
+        }
+        UpdateCache();
+        InvalidateRect(hWnd, nullptr, FALSE);
+        UpdateWindow(g_hView);
+
         return 0;
     }
     case WM_EPUB_UPDATE_SCROLLBAR: {
@@ -2053,30 +2080,17 @@ ATOM RegisterViewClass(HINSTANCE hInst)
     return RegisterClassW(&wc);
 }
 
-// 4. UI 线程：只管发任务
+//// 4. UI 线程：只管发任务
 void UpdateCache()
 {
-    if (!g_doc) return;
+    if (!g_doc || !g_canvas) return;
 
     RECT rc; GetClientRect(g_hView, &rc);
     int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
 
-    /* 1) 重新分页 */
-
-
-    g_doc->render(w, litehtml::render_all);
 
     g_pg.load(g_doc.get(), w, h);
-
-    /* 2) 按需重建画布 */
-    if (!g_canvas) {
-        g_canvas = ICanvas::create(w, h, g_cfg.fontRenderer);
-    }
-    if (g_canvas->width() != w || g_canvas->height() != h) {
-        g_canvas->resize(w, h);
-    }
-
     /* 3) 渲染整页 */
     g_pg.render(g_canvas.get(), g_scrollY);
 }
@@ -2131,23 +2145,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_EPUB_PARSED: {
-        std::string html = g_book.load_html(g_book.ocf_pkg_.spine[0].href);
-        if (html.empty()) break;
-        if (!g_cfg.disableCSS) { html = insert_global_css(html); }
-        if (!g_cfg.disablePreprocessHTML) { html = PreprocessHTML(html); }
-        g_doc.reset();
-        g_container.reset();
-        g_container = std::make_shared<SimpleContainer>(L".");
-        g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
-        /* 关键：DOM 刚建好，立即回填内联脚本 */
-        if (!g_cfg.disableJS) {
-            g_bootstrap->bind_host_objects();
-
-            g_bootstrap->run_pending_scripts(); // 立即执行
-            // 在脚本执行后导出 HTML
-
-        }
-        g_scrollY = 0;
+        g_last_html_path = g_book.ocf_pkg_.spine[0].href;
+        std::string html = g_book.load_html(g_last_html_path);
+       
+        g_book.init_doc(html);
 
         // 2) 立即把第 0 页画到缓存位图
         UpdateCache();          // 复用前面给出的 UpdateCache()
@@ -2377,22 +2378,10 @@ void EPUBBook::LoadToc()
     for (const auto& root : tree)
         InsertTreeNode(g_hwndTV, root, TVI_ROOT);
 }
-// ---------- 点击目录跳转 ----------
-void EPUBBook::OnTreeSelChanged(const wchar_t* href)
-{
-    if (!href || !*href) return;
- 
 
-
-    /* 1. 分离文件路径与锚点 */
-    std::wstring whref(href);
-    size_t pos = whref.find(L'#');
-    std::wstring file = (pos == std::wstring::npos) ? whref : whref.substr(0, pos);
-    std::string  id = (pos == std::wstring::npos) ? "" :
-        litehtml::wchar_to_utf8(whref.substr(pos + 1));
-
+void EPUBBook::init_doc(std::string html) {
     /* 2. 加载 HTML */
-    std::string html = g_book.load_html(file.c_str());
+
 
     if (html.empty()) return;
     if (!g_cfg.disableCSS) { html = insert_global_css(html); }
@@ -2401,7 +2390,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     g_container.reset();
     g_container = std::make_shared<SimpleContainer>(L".");
     // 完整兜底 UA 样式表（litehtml 专用）
- 
+
     g_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
     /* 关键：DOM 刚建好，立即回填内联脚本 */
     if (!g_cfg.disableJS) {
@@ -2413,32 +2402,38 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 
 
     g_scrollY = 0;
+}
+// ---------- 点击目录跳转 ----------
+void EPUBBook::OnTreeSelChanged(const wchar_t* href)
+{
+    if (!href || !*href) return;
+ 
 
-    RECT rc;
-    GetClientRect(g_hView, &rc);
-    int w = rc.right;
-    int h = rc.bottom;
-    if (w <= 0 || h <= 0) return;
-    if (!g_cfg.disableJS) { g_bootstrap->run_pending_scripts(); }   // 现在才跑脚本
-    g_doc->render(w, litehtml::render_all);    // -1 表示“不限高度”
+
+    /* 1. 分离文件路径与锚点 */
+    std::wstring whref(href);
+    size_t pos = whref.find(L'#');
+    std::wstring file_path = (pos == std::wstring::npos) ? whref : whref.substr(0, pos);
+    std::string  id = (pos == std::wstring::npos) ? "" :
+        litehtml::wchar_to_utf8(whref.substr(pos + 1));
+
+    if (g_last_html_path != file_path){
+        std::string html = g_book.load_html(file_path.c_str());
+        g_book.init_doc(html);
+        g_states.needRelayout.store(true, std::memory_order_release);
+        g_last_html_path = file_path;
+        UpdateCache();
+        SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
+    }
 
     /* 3. 跳转到锚点 */
     if (!id.empty())
     {
-        std::string cssSel = "#" + id;          // "#c10"
-        litehtml::element::ptr el = g_doc->root()->select_one(cssSel.c_str());
-        if (el)
-        {
-            litehtml::position pos = el->get_placement();
-            // 同步滚动位置（示例：垂直滚动）
-            g_scrollY = pos.y;
-
-        }
+        std::wstring cssSel = L"#" + a2w(id);   // 转成宽字符
+        // WM_APP + 3 约定为“跳转到锚点选择器”
+        PostMessageW(g_hView, WM_EPUB_ANCHOR,
+            reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
     }
-
-    UpdateCache();
-    SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
-    InvalidateRect(g_hView, nullptr, FALSE);
     UpdateWindow(g_hView);
     UpdateWindow(g_hWnd);
 }
@@ -2914,6 +2909,10 @@ D2DBackend::D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
         throw std::runtime_error("CreateCompatibleRenderTarget failed");
 
     m_rt = std::move(bmpRT);            // 保存到成员变量（可选）
+
+    /* 提前拿到系统字体集合（只需一次即可） */
+ 
+    m_dwrite->GetSystemFontCollection(&m_sysFontColl, FALSE);
 }
 void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     const char* text,
@@ -3060,6 +3059,78 @@ void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
 
 }
 
+// 工具：转小写
+std::wstring  D2DBackend::toLower(std::wstring s)
+{
+    std::transform(s.begin(), s.end(), s.begin(), towlower);
+    return s;
+}
+
+// 1. 静态表映射
+std::optional<std::wstring> D2DBackend::mapStatic(const std::wstring& key)
+{
+    auto it = g_fontAlias.find(key);
+    return (it != g_fontAlias.end()) ? std::optional{ it->second } : std::nullopt;
+}
+
+// 2. 动态表映射
+// 声明改为静态，并把系统字体集合作为参数
+std::optional<std::wstring>
+D2DBackend::mapDynamic(const std::wstring& key)
+{
+   
+    auto it = g_fontAliasDynamic.find(key);
+    if (it == g_fontAliasDynamic.end())
+        return std::nullopt;
+
+    for (const std::wstring& face : it->second)
+    {
+        UINT32 index = 0;
+        BOOL   exists = FALSE;
+        m_sysFontColl->FindFamilyName(face.c_str(), &index, &exists);
+        if (exists)
+            return face;
+    }
+    return std::nullopt;
+}
+// 3. 解析单个 token
+std::wstring D2DBackend::resolveFace(const std::wstring& raw)
+{
+    const std::wstring key = toLower(raw);
+
+    if (auto v = mapStatic(key))   return *v;
+    if (auto v = mapDynamic(key))  return *v;
+    return raw;                    // 原样返回
+}
+
+std::vector<std::wstring>
+D2DBackend::split_font_list(const std::string& src) {
+    std::vector<std::wstring> out;
+    std::string token;
+    for (size_t i = 0, n = src.size(); i < n; ++i)
+    {
+        if (src[i] == ',')
+        {
+            token = trim_any(token);
+            if (!token.empty()) {
+                std::wstring face = a2w(token);
+                out.emplace_back(resolveFace(face));
+                token.clear();
+            }
+        }
+        else
+        {
+            token += src[i];
+        }
+    }
+    token = trim_any(token);
+    if (!token.empty())
+    {
+        std::wstring face = a2w(token);
+        out.emplace_back(resolveFace(face));
+    }
+    return out;
+};
 litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     int size,
     int weight,
@@ -3072,35 +3143,6 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     /*----------------------------------------------------------
       1. 把 font-family 字符串拆成单个字体名
     ----------------------------------------------------------*/
-    auto split_font_list = [](const std::string& src) -> std::vector<std::wstring>
-        {
-            std::vector<std::wstring> out;
-            std::string token;
-            for (size_t i = 0, n = src.size(); i < n; ++i)
-            {
-                if (src[i] == ',')
-                {
-                    token = trim_any(token);
-                    if (!token.empty()) {
-                        std::wstring wface = a2w(token);
-                        std::transform(wface.begin(), wface.end(), wface.begin(), towlower);
-                        auto it = g_fontAlias.find(wface);
-                        if (it != g_fontAlias.end()) { wface = it->second; }
-                        else { wface = a2w(token); }
-                        out.emplace_back(wface);
-                    }
-                    token.clear();
-                }
-                else
-                {
-                    token += src[i];
-                }
-            }
-            token = trim_any(token);
-            if (!token.empty())
-                out.emplace_back(a2w(token));
-            return out;
-        };
 
     std::vector<std::wstring> faces = split_font_list(faceName ? faceName : "Segoe UI");
 
@@ -3108,9 +3150,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
       2. 逐个尝试创建 IDWriteTextFormat
     ----------------------------------------------------------*/
 
-    /* 提前拿到系统字体集合（只需一次即可） */
-    ComPtr<IDWriteFontCollection> sysColl;
-    m_dwrite->GetSystemFontCollection(&sysColl, FALSE);
+
 
     ComPtr<IDWriteTextFormat> fmt;
 
@@ -3143,7 +3183,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
         /* 2. 系统集合 */
         index = 0;
         exists = FALSE;
-        sysColl->FindFamilyName(f.c_str(), &index, &exists);
+        m_sysFontColl->FindFamilyName(f.c_str(), &index, &exists);
         if (exists &&
             SUCCEEDED(m_dwrite->CreateTextFormat(
                 f.c_str(), nullptr,
@@ -3196,7 +3236,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
         if (m_privateFonts && m_privateFonts->FindFamilyName(m_actualFamily.c_str(), &index, &exists) && exists)
             targetCollection = m_privateFonts;
         else
-            targetCollection = sysColl;
+            targetCollection = m_sysFontColl;
 
         targetCollection->FindFamilyName(m_actualFamily.c_str(), &index, &exists);
         if (exists)
@@ -4429,74 +4469,6 @@ void FreetypeBackend::resize(int width, int height) {
 
 
 
-
-
-
-///* ---------- 构造 / 析构 ---------- */
-//duktape_engine::duktape_engine() = default;
-//duktape_engine::~duktape_engine() { shutdown(); }
-//
-///* ---------- 生命周期 ---------- */
-//void duktape_engine::duk_fatal_handler(void* udata, const char* msg)
-//{
-//    auto* self = static_cast<duktape_engine*>(udata);
-//    if (self && self->m_logger) self->m_logger(msg);
-//}
-//
-//bool duktape_engine::init()
-//{
-//    ctx_ = duk_create_heap(nullptr, nullptr, nullptr,
-//        this,           // userdata
-//        duk_fatal_handler);
-//    if (!ctx_) return false;
-//
-//    /* console.log */
-//    duk_push_object(ctx_);
-//    duk_push_c_function(ctx_, duk_console_log, DUK_VARARGS);
-//    duk_push_pointer(ctx_, this);
-//    duk_put_prop_string(ctx_, -2, "\xFF" "self");
-//    duk_put_prop_string(ctx_, -2, "log");
-//    duk_put_global_string(ctx_, "console");
-//
-//
-//    return true;
-//}
-//
-//void duktape_engine::shutdown() {
-//    if (ctx_) {
-//        duk_destroy_heap(ctx_);
-//        ctx_ = nullptr;
-//    }
-//}
-//
-///* ---------- 执行脚本 ---------- */
-//void duktape_engine::eval(const std::string& code,
-//    const std::string& filename)
-//{
-//    if (!ctx_) { OutputDebugStringA("ctx is null\n"); return; }
-//    duk_idx_t top = duk_get_top(ctx_);          // 记住栈顶
-//    char buf[512];
-//    //snprintf(buf, sizeof(buf), "eval() size=%zu, data=|%s|\n", code.size(), code.c_str());
-//    //OutputDebugStringA(buf);
-//
-//    duk_push_string(ctx_, code.c_str());
-//    if (duk_peval(ctx_) != 0) {
-//        snprintf(buf, sizeof(buf), "Duktape error: %s\n", duk_safe_to_string(ctx_, -1));
-//        OutputDebugStringA(buf);
-//    }
-//    else {
-//        snprintf(buf, sizeof(buf), "Duktape ok, result=%s\n", duk_safe_to_string(ctx_, -1));
-//        OutputDebugStringA(buf);
-//    }
-//    duk_set_top(ctx_, top);                     // 强制恢复栈平衡
-//
-//}
-//
-///* ---------- 事件循环 ---------- */
-//void duktape_engine::pump_tasks()
-//{
-//}
-
 void AppBootstrap::enableJS()
 {
     if (!m_jsrt) m_jsrt = std::make_unique<js_runtime>(g_doc.get());
@@ -4535,364 +4507,61 @@ void AppBootstrap::bind_host_objects()
 
 
 
-///* ---------- 绑定 document ---------- */
-//void duktape_engine::bind_document(litehtml::document* doc)
-//{
-//    auto* box = new std::shared_ptr<litehtml::document>(doc);
-//    if (!ctx_) {
-//        OutputDebugStringA("[DUK] bind_document: ctx_ is null\n");
-//        return;
-//    }
-//    OutputDebugStringA("[DUK] === bind_document start ===\n");
-//
-//    /* ---------- 1. 创建 document 对象 ---------- */
-//    duk_push_global_object(ctx_);               // [global]
-//    duk_push_object(ctx_);                      // [global, document]
-//    duk_push_pointer(ctx_, box);
-//    duk_put_prop_string(ctx_, -2, "__ptr");
-//
-//    /* ---------- 2. 其余 API ---------- */
-//    duk_push_c_function(ctx_, duk_get_element_by_id, 1);
-//    duk_push_pointer(ctx_, box);
-//    duk_put_prop_string(ctx_, -2, "\xFF" "shared_doc");
-//    duk_put_prop_string(ctx_, -2, "getElementById");
-//
-//    duk_push_c_function(ctx_, duk_document_get_body, 0);
-//    duk_push_pointer(ctx_, box);
-//    duk_put_prop_string(ctx_, -2, "\xFF" "shared_doc");
-//    duk_put_prop_string(ctx_, -2, "getBody");
-//
-//    duk_push_c_function(ctx_, duk_create_element, 1);
-//    duk_push_pointer(ctx_, box);
-//    duk_put_prop_string(ctx_, -2, "\xFF" "shared_doc");
-//    duk_put_prop_string(ctx_, -2, "createElement");
-//
-//    /* ---------- 3. document.body（一次性属性） ---------- */
-//
-//
-//    /* ---------- 4. 挂到全局 ---------- */
-//    duk_put_prop_string(ctx_, -2, "document");
-//    duk_pop(ctx_);
-//
-//}
-///* ---------- 工具：把 shared_ptr 存到 stash ---------- */
-//static void stash_element(duk_context* ctx,
-//    const litehtml::element::ptr& el)
-//{
-//    duk_push_heap_stash(ctx);
-//    duk_push_pointer(ctx, el.get());
-//    duk_push_pointer(ctx, new std::shared_ptr<litehtml::element>(el));
-//    duk_put_prop(ctx, -3);
-//    duk_pop(ctx);
-//}
-//
-//static litehtml::element::ptr
-//get_stashed_element(duk_context* ctx, litehtml::element* raw)
-//{
-//    duk_push_heap_stash(ctx);
-//    duk_push_pointer(ctx, raw);
-//    duk_get_prop(ctx, -2);
-//    auto* sp = static_cast<std::shared_ptr<litehtml::element>*>(
-//        duk_get_pointer(ctx, -1));
-//    litehtml::element::ptr ret = *sp;
-//    duk_pop_3(ctx);
-//    return ret;
-//}
-//
-///* ---------- createElement ---------- */
-///* 1. 把函数改成 static 或全局 C 函数 */
-//duk_ret_t duktape_engine::duk_create_element(duk_context* ctx)
-//{
-//    /* 2. 从 magic 里取出 document* */
-//    duk_push_current_function(ctx);
-//    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
-//    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
-//        duk_require_pointer(ctx, -1));
-//    duk_pop_2(ctx);
-//    if (!doc_sp) {
-//        OutputDebugStringA("[DUK] document* is null\n");
-//        duk_push_null(ctx);
-//        return 1;
-//    }
-//
-//    /* 3. 正常干活 */
-//    const char* tag = duk_require_string(ctx, 0);
-//    auto el = doc_sp->create_element(tag ? tag : "div", {});
-//    if (!el) {
-//        duk_push_null(ctx);
-//        return 1;
-//    }
-//
-//    stash_element(ctx, el);          // 保存 shared_ptr
-//    duk_push_object(ctx);            // 返回 JS 对象
-//    duk_push_pointer(ctx, el.get());
-//    duk_put_prop_string(ctx, -2, "__ptr");
-//    return 1;
-//}
-///* ---------- appendChild ---------- */
-///* 原型对象上真正的 appendChild 实现 */
-//duk_ret_t duktape_engine::duk_body_append_child(duk_context* ctx)
-//{
-//    /* 0. this -> parent */
-//    duk_push_this(ctx);
-//    duk_get_prop_string(ctx, -1, "\xFF" "element");
-//    auto* parent_sp = static_cast<std::shared_ptr<litehtml::element>*>(
-//        duk_require_buffer(ctx, -1, nullptr));
-//
-//    /* 1. 第 0 个参数 -> child */
-//    duk_dup(ctx, 0);   // child JS object
-//    duk_get_prop_string(ctx, -1, "\xFF" "element");
-//    auto* child_sp = static_cast<std::shared_ptr<litehtml::element>*>(
-//        duk_require_buffer(ctx, -1, nullptr));
-//
-//    /* 2. 如果 child 已经有父节点，先摘掉 */
-//    if ((*child_sp)->parent()) {
-//        (*child_sp)->parent()->removeChild(*child_sp);
-//    }
-//
-//    /* 3. 挂到新父节点 */
-//    (*parent_sp)->appendChild(*child_sp);
-//
-//    /* 4. 返回 child */
-//    duk_dup(ctx, 0);
-//    return 1;
-//}
-//
-///* ---------- 8. document.body 的 getter 里顺便挂 appendChild ---------- */
-//duk_ret_t duktape_engine::duk_document_body_get(duk_context* ctx)
-//{
-//    OutputDebugStringA("[DUK] duk_document_body_get called\n");
-//    /* 取出 shared_ptr<document> */
-//    duk_push_current_function(ctx);
-//    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
-//    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
-//        duk_require_pointer(ctx, -1));
-//    duk_pop_2(ctx);
-//
-//    auto body_sp = find_body(doc_sp->root());
-//    if (!body_sp) { duk_push_null(ctx); return 1; }
-//
-//    /* 用统一的包装函数：内部带 shared_ptr buffer */
-//    push_element(ctx, body_sp);   // 栈顶就是 JS 对象
-//
-//    return 1;
-//}
-//
-///* ---------- 内部工具 ---------- */
-//duk_ret_t duktape_engine::duk_document_get_body(duk_context* ctx)
-//{
-//    /* 直接复用 duk_document_body_get 的实现 */
-//    return duk_document_body_get(ctx);
-//}
-////duk_ret_t duktape_engine::duk_document_get_body(duk_context* ctx) {
-////    DUK_TRACE(ctx, "getBody: entry");
-////
-////    duk_push_current_function(ctx);
-////    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
-////    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
-////        duk_require_pointer(ctx, -1));
-////    duk_pop_2(ctx);
-////    if (!doc_sp) {
-////        OutputDebugStringA("[DUK] document* is null\n");
-////        duk_push_null(ctx);
-////        return 1;
-////    }
-////
-////    auto body = find_body(doc_sp->root());
-////    if (!body) {
-////        duk_push_null(ctx);
-////        return 1;
-////    }
-////
-////    duk_idx_t obj = duk_push_object(ctx);           // [this, obj]
-////    duk_push_pointer(ctx, body.get());
-////    duk_put_prop_string(ctx, obj, "__ptr");
-////
-////    duk_push_c_function(ctx, duk_element_inner_html_get, 0);
-////    duk_push_c_function(ctx, duk_element_inner_html_set, 1);
-////    duk_def_prop(ctx, obj,
-////        DUK_DEFPROP_HAVE_GETTER |
-////        DUK_DEFPROP_HAVE_SETTER |
-////        DUK_DEFPROP_ENUMERABLE);
-////
-////    duk_replace(ctx, 0);                            // [obj]
-////    return 1;
-////}
-//duk_ret_t duktape_engine::duk_console_log(duk_context* ctx)
-//{
-//    duk_push_current_function(ctx);                // -> [func]
-//    duk_get_prop_string(ctx, -1, "\xFF" "self");   // -> [func, this]
-//    auto* self = static_cast<duktape_engine*>(duk_get_pointer(ctx, -1));
-//    duk_pop_2(ctx);                                // -> []
-//
-//    if (!self || !self->m_logger) return 0;
-//
-//    std::stringstream ss;
-//    for (int i = 0, n = duk_get_top(ctx); i < n; ++i) {
-//        ss << duk_to_string(ctx, i) << (i + 1 == n ? "" : " ");
-//    }
-//    self->m_logger(ss.str().c_str());
-//    return 0;
-//}
-//
-//static const char* duk_get_type_names(duk_context* ctx, duk_idx_t idx)
-//{
-//    switch (duk_get_type(ctx, idx)) {
-//    case DUK_TYPE_UNDEFINED: return "undefined";
-//    case DUK_TYPE_NULL:      return "null";
-//    case DUK_TYPE_BOOLEAN:   return duk_get_boolean(ctx, idx) ? "true" : "false";
-//    case DUK_TYPE_NUMBER:    return "number";
-//    case DUK_TYPE_STRING:    return duk_get_string(ctx, idx);
-//    case DUK_TYPE_OBJECT:    return "object";
-//    default:                 return "unknown";
-//    }
-//}
-//
-//duk_ret_t duktape_engine::duk_get_element_by_id(duk_context* ctx)
-//{
-//    DUK_TRACE(ctx, "getElementById: entry");
-//
-//    /* 1. 取出 this（document 对象） */
-//    duk_push_current_function(ctx);
-//    duk_get_prop_string(ctx, -1, "\xFF" "shared_doc");
-//    auto doc_sp = *static_cast<std::shared_ptr<litehtml::document>*>(
-//        duk_require_pointer(ctx, -1));
-//    duk_pop_2(ctx);
-//    if (!doc_sp) {
-//        OutputDebugStringA("[DUK] document* is null\n");
-//        duk_push_null(ctx);
-//        return 1;
-//    }
-//
-//    /* 2. 取 id 参数 */
-//    const char* id = duk_require_string(ctx, 0);
-//
-//    /* 3. 查找元素 */
-//    auto el = find_element_by_id(doc_sp->root().get(), id);
-//    if (!el) {
-//        OutputDebugStringA("[DUK] getElementById: element not found\n");
-//        duk_push_null(ctx);
-//        return 1;
-//    }
-//
-//    /* 4. 创建 JS 对象 —— 此时栈干净，只有 [id] */
-//    duk_idx_t obj = duk_push_object(ctx);           // [id, obj]
-//
-//    /* 5. 保存 C++ 指针 */
-//    duk_push_pointer(ctx, el.get());                // [id, obj, ptr]
-//    duk_put_prop_string(ctx, obj, "__ptr");         // [id, obj]
-//
-//    /* 6. tagName */
-//    const char* tag = el->get_tagName();      // 直接就是 UTF-8
-//    duk_push_string(ctx, tag ? tag : "");     // 防止空指针
-//    duk_put_prop_string(ctx, obj, "tagName");  // [id, obj]
-//
-//
-//
-//    /* 打印返回值类型和内容 */
-//    duk_dup(ctx, -1);                      // 复制栈顶（返回值）
-//    const char* t = duk_get_type_names(ctx, -1);  // 自己写的辅助函数
-//    OutputDebugStringA(std::format("[DUK] return: {}", t).c_str());
-//    OutputDebugStringA("\n");
-//    duk_pop(ctx);
-//    return 1;                                       // [obj]
-//}
-//
-//
-//
-//// 把 element 及其子树序列化成 HTML
-//static void element_to_html(const litehtml::element::ptr& el,
-//    std::string& out)
-//{
-//    if (!el) return;
-//
-//    const char* tag = el->get_tagName();
-//    if (!tag || !*tag) return;          // 文本/注释节点
-//
-//    out += '<';
-//    out += tag;
-//
-//    // 拼属性
-//    auto attrs = el->dump_get_attrs();  // 返回 vector<tuple<name,value>>
-//    for (const auto& [name, value] : attrs)
-//    {
-//        out += ' ';
-//        out += name;
-//        out += "=\"";
-//        out += value;
-//        out += '\"';
-//    }
-//
-//    if (el->children().empty())
-//    {
-//        // 自闭合
-//        out += " />";
-//    }
-//    else
-//    {
-//        out += '>';
-//        for (const auto& child : el->children())
-//            element_to_html(child, out);
-//        out += "</";
-//        out += tag;
-//        out += '>';
-//    }
-//}
-//
-//
-//duk_ret_t duktape_engine::duk_element_inner_html_get(duk_context* ctx)
-//{
-//    OutputDebugStringA("[DUK] innerHTML_get: entered\n");
-//    DUK_TRACE(ctx, "get-entry");
-//
-//    /* 栈: [this]  (this 在 0) */
-//    duk_get_prop_string(ctx, 0, "__ptr");      // [this, ptr]
-//    DUK_TRACE(ctx, "get-after-get-prop");
-//
-//    auto* el = static_cast<litehtml::element*>(duk_get_pointer(ctx, -1));
-//    duk_pop(ctx);                              // [this]
-//    DUK_TRACE(ctx, "get-after-pop-ptr");
-//
-//    if (!el) {
-//        OutputDebugStringA("[DUK] innerHTML_get: el == nullptr\n");
-//        duk_push_string(ctx, "");
-//        DUK_TRACE(ctx, "get-before-return-null");
-//        return 1;
-//    }
-//
-//    std::string html;
-//    element_to_html(el->shared_from_this(), html);
-//
-//    duk_push_string(ctx, html.c_str());        // [this, html]
-//    DUK_TRACE(ctx, "get-after-push-html");
-//
-//    duk_replace(ctx, 0);                       // [html]
-//    DUK_TRACE(ctx, "get-before-return");
-//    return 1;
-//}
-//duk_ret_t duktape_engine::duk_element_inner_html_set(duk_context* ctx)
-//{
-//    OutputDebugStringA("[DUK] innerHTML_set: entered\n");
-//    DUK_TRACE(ctx, "set-entry");
-//
-//    /* 栈: [this, html]  (this=0, html=1) */
-//    duk_get_prop_string(ctx, 0, "__ptr");      // [this, html, ptr]
-//    DUK_TRACE(ctx, "set-after-get-prop");
-//
-//    auto* el = static_cast<litehtml::element*>(duk_get_pointer(ctx, -1));
-//    duk_pop(ctx);                              // [this, html]
-//    DUK_TRACE(ctx, "set-after-pop-ptr");
-//
-//    const char* html = duk_require_string(ctx, 1);
-//    OutputDebugStringA("[DUK] innerHTML_set: html = ");
-//    OutputDebugStringA(html);
-//    OutputDebugStringA("\n");
-//
-//    if (el && el->get_document()) {
-//        el->clearRecursive();
-//        el->get_document()->append_children_from_string(*el, html);
-//    }
-//    DUK_TRACE(ctx, "set-before-return");
-//    return 0;
-//}
 
+
+/* ---------- 实现 ---------- */
+RenderWorker& RenderWorker::instance() { static RenderWorker w; return w; }
+
+void RenderWorker::push(int w, int h, int sy)
+{
+    {
+        std::lock_guard lg(m_);
+        latest_.emplace(Task{ w,h,sy });
+    }
+    cv_.notify_one();
+}
+
+void RenderWorker::loop()
+{
+    for (;;)
+    {
+        Task task;
+        {
+            std::unique_lock ul(m_);
+            cv_.wait(ul, [this] { return stop_ || latest_.has_value(); });
+            if (stop_) break;
+            task = *latest_;
+            latest_.reset();
+        }
+
+ 
+     
+        g_pg.load(g_doc.get(), task.w, task.h);
+
+        g_states.isCaching.store(true);
+        g_pg.render(g_canvas.get(), task.sy);
+
+        g_states.isCaching.store(false);
+        PostMessage(g_hView, WM_EPUB_CACHE_UPDATED, 0, 0);
+    }
+}
+
+void RenderWorker::stop()
+{
+    { std::lock_guard lg(m_); stop_ = true; }
+    cv_.notify_one();
+    if (worker_.joinable()) worker_.join();
+}
+
+RenderWorker::~RenderWorker() { stop(); }
+
+
+//void UpdateCache()
+//{
+//    if (!g_doc || !g_canvas) return;
+//    RECT rc; GetClientRect(g_hView, &rc);
+//    int w = rc.right, h = rc.bottom;
+//    if (w <= 0 || h <= 0) return;
+//
+//    RenderWorker::instance().push(w, h, g_scrollY);
+//}
