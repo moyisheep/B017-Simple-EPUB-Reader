@@ -5048,7 +5048,7 @@ void AppBootstrap::make_tooltip_backend()
 
 void EPUBBook::show_tooltip(const std::string html, int x, int y)
 {
-    //OutputDebugStringA(("[show_tooltip] " + std::to_string(x) + " " + std::to_string(y) + "\n").c_str());
+    OutputDebugStringA(("[show_tooltip] " + std::to_string(x) + " " + std::to_string(y) + "\n").c_str());
     if (html.empty()) { hide_tooltip(); return; }
 
     // 1. 创建/重用 300×200 的 WS_POPUP 窗口
