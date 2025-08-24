@@ -104,6 +104,7 @@ enum class StatusBar{INFO = 0, FONT = 1};
 static int g_scrollY = 0;   // 当前像素偏移
 static int g_maxScroll = 0;   // 总高度 - 客户区高度
 std::wstring g_currentHtmlDir = L"";
+std::wstring g_currentHtmlPath = L"";
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
 constexpr UINT WM_EPUB_UPDATE_SCROLLBAR = WM_APP + 2;
 constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
@@ -119,9 +120,9 @@ struct AppSettings {
     bool disableJS = true;   // 默认禁用 JS
     bool disablePreprocessHTML = false;
     Renderer fontRenderer = Renderer::D2D;
-    std::string default_font_name = "Tahoma";
+    std::string default_font_name = "Calibri";
     int default_font_size = 16;
-    float line_height_multiplier = 1.5;
+    float line_height_multiplier = 1.6;
     std::set<std::wstring> font_serif = { L"Source Han Serif SC", 
         L"Noto Serif CJK SC", 
         L"SimSun", 
@@ -700,7 +701,7 @@ std::unique_ptr<AppBootstrap> g_bootstrap;
 // -------------- GDI 后端 -----------------
 class GdiBackend : public IRenderBackend {
 public:
-    explicit GdiBackend(HDC hdc) : m_hdc(hdc) {}
+    explicit GdiBackend(int width, int height);
     /* 下面 7 个函数在 .cpp 里用 ExtTextOut / Rectangle 等实现 */
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
     void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
@@ -711,22 +712,16 @@ public:
     int text_width(const char* text, litehtml::uint_ptr hFont) override;
     void load_all_fonts(void);
     void resize(int width, int height) override;
-    ~GdiBackend() {
-        if (!g_tempFontFiles.empty()) {
-            for (const auto& p : g_tempFontFiles)
-            {
-                RemoveFontResourceExW(p.c_str(), FR_PRIVATE, 0);
-                DeleteFileW(p.c_str());
-            }
-            g_tempFontFiles.clear();
-        }
-    }
+    HBITMAP get_bitmap();
+    ~GdiBackend();
     std::set<std::wstring> getCurrentFonts() override;
 private:
     HDC m_hdc;
+    HBITMAP m_memDC;
     // 缓存已创建的 HBITMAP，避免重复 GDI 转换
     std::unordered_map<std::string, HBITMAP> m_gdiBitmapCache;
-
+    int m_w;
+    int m_h;
     static COLORREF to_cr(const litehtml::web_color& c)
     {
         return RGB(c.red, c.green, c.blue);
@@ -767,7 +762,7 @@ private:
     ComPtr<ID2D1RenderTarget> m_devCtx;
     static std::wstring toLower(std::wstring s);
     static std::optional<std::wstring> mapStatic(const std::wstring& key);
-
+    float m_baselineY = 0;
 
     ComPtr<IDWriteFontCollection> m_sysFontColl;
     int  m_w, m_h;
@@ -878,6 +873,7 @@ public:
     void EndDraw() override;
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
+
 private:
     int  m_w, m_h;
     HDC  m_memDC;
@@ -1504,108 +1500,26 @@ struct EPUBBook {
 
     void load_all_fonts(void);
     void init_doc(std::string html);
-    static HTREEITEM InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent)
-    {
-        TVINSERTSTRUCTW tvi{};
-        tvi.hParent = hParent;
-        tvi.hInsertAfter = TVI_LAST;
-        tvi.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
-        tvi.item.pszText = const_cast<LPWSTR>(node.data->label.c_str());
-        tvi.item.lParam = reinterpret_cast<LPARAM>(_wcsdup(node.data->href.c_str()));
-        tvi.item.cChildren = node.children.empty() ? 0 : 1;
-        HTREEITEM hItem = TreeView_InsertItem(tv, &tvi);
+    static HTREEITEM InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent);
 
-        for (const auto& child : node.children)
-            InsertTreeNode(tv, child, hItem);
+    static std::wstring extract_text(const tinyxml2::XMLElement* a);
 
-        return hItem;
-    }
-    static std::wstring extract_text(const tinyxml2::XMLElement* a)
-    {
-        if (!a) return L"";
-
-        // 1. 拿到 <a> 的完整 XML 字符串
-        tinyxml2::XMLPrinter printer;
-        a->Accept(&printer);
-        std::string xml = printer.CStr();   // "<a ...><span ...>I</span>: The Meadow</a>"
-
-        // 2. 去掉最外层 <a ...> 和 </a>
-        size_t start = xml.find('>') + 1;
-        size_t end = xml.rfind('<');
-        if (start == std::string::npos || end == std::string::npos || end <= start)
-            return L"";
-
-        std::string inner = xml.substr(start, end - start);   // "<span ...>I</span>: The Meadow"
-
-        // 3. 简单剥掉所有标签（正则或手写）
-        std::regex tag_re("<[^>]*>");
-        std::string plain = std::regex_replace(inner, tag_re, "");
-
-        return a2w(plain);   // "I: The Meadow"
-    }
     // 递归解析 EPUB3-Nav <ol>
     static void parse_nav_list(tinyxml2::XMLElement* ol, int level,
         const std::string& opf_dir,
-        std::vector<OCFNavPoint>& out)
-    {
-        if (!ol) return;
-        for (auto* li = ol->FirstChildElement("li"); li; li = li->NextSiblingElement("li"))
-        {
-            auto* a = li->FirstChildElement("a");
-            if (!a) continue;
+        std::vector<OCFNavPoint>& out);
 
-            OCFNavPoint np;
-            np.label = extract_text(a);
-            np.href = a2w(a->Attribute("href") ? a->Attribute("href") : "");
-            if (!np.href.empty())
-                np.href = g_zipIndex.find(np.href);
-            np.order = level;               // 层级深度
-            out.emplace_back(std::move(np));
-
-            // 递归子 <ol>
-            if (auto* sub = li->FirstChildElement("ol"))
-                parse_nav_list(sub, level + 1, opf_dir, out);
-        }
-    }
 
     // 递归解析 NCX <navPoint>
     static void parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
         const std::string& opf_dir,
-        std::vector<OCFNavPoint>& out)
-    {
-        if (!navPoint) return;
-        for (auto* pt = navPoint; pt; pt = pt->NextSiblingElement("navPoint"))
-        {
-            auto* lbl = pt->FirstChildElement("navLabel");
-            auto* txt = lbl ? lbl->FirstChildElement("text") : nullptr;
-            auto* con = pt->FirstChildElement("content");
+        std::vector<OCFNavPoint>& out);
 
-            OCFNavPoint np;
-
-            np.label = txt ? extract_text(txt) : L"";
-            np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
-            if (!np.href.empty())
-                np.href = g_zipIndex.find(np.href);
-            np.order = level;               // 层级深度
-            out.emplace_back(std::move(np));
-
-            // 递归子 <navPoint>
-            parse_ncx_points(pt->FirstChildElement("navPoint"), level + 1, opf_dir, out);
-        }
-    }
 
 
 
     EPUBBook() noexcept {}
-    ~EPUBBook() { 
-        mz_zip_reader_end(&zip);
-        for (const auto& path : g_tempFontFiles)
-        {
-            RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
-            DeleteFileW(path.c_str());
-        }
-        g_tempFontFiles.clear();
-    }
+    ~EPUBBook();
 };
 
 
@@ -1641,6 +1555,7 @@ EPUBBook::MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
 std::string EPUBBook::load_html(const std::wstring& path) const {
     namespace fs = std::filesystem;
     g_currentHtmlDir = fs::path(path).parent_path().wstring();
+    g_currentHtmlPath = path;
     auto it = cache.find(path);
     if (it != cache.end()) return std::string(it->second.begin(), it->second.size());
     EPUBBook::MemFile mf = read_zip(path.c_str());
@@ -1846,11 +1761,14 @@ public:
     void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
     int pt_to_px(int pt) const override;
 
+
     //自定义函数
     void hide_tooltip();
- 
     static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
-    void show_tooltip(const std::string& html, int x, int y);
+    void show_tooltip(const std::string html, int x, int y);
+    HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
+    std::wstring           m_tooltip_url;          // 缓存当前 url
+    std::shared_ptr<litehtml::document> m_tooltip_doc;
 
 
     ~SimpleContainer()
@@ -1859,10 +1777,6 @@ public:
 
     }
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
-  
-    HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
-    std::wstring           m_tooltip_url;          // 缓存当前 url
-    std::shared_ptr<litehtml::document> m_tooltip_doc;
 
 private:
     std::wstring m_root;
@@ -1873,9 +1787,6 @@ private:
 
     // 3. 默认字体句柄（FontWrapper 是你自己的字体包装类）
     HFONT m_hDefaultFont = nullptr;
-
-
-
 
 };
 
@@ -1949,25 +1860,124 @@ std::future<void> g_parse_task;
 
 
 // 工具：把客户区坐标 → 文档坐标
-litehtml::element::ptr element_from_point(litehtml::element::ptr root, int x, int y) {
-    if (!root) return nullptr; // 倒序遍历（后渲染的在上面，先匹配） 
-    const auto& ch = root->children(); 
-    for (auto it = ch.rbegin(); it != ch.rend(); ++it) 
-    { 
-        if (auto hit = element_from_point(*it, x, y)) 
-        { 
-            return hit; 
-        }
-    } // 检查自身 
-    //litehtml::position pos = root->get_placement(); 
-    litehtml::position pos = root->get_placement();
+//litehtml::element::ptr element_from_point(litehtml::element::ptr root, int x, int y) {
+//    if (!root) return nullptr; // 倒序遍历（后渲染的在上面，先匹配） 
+//    const auto& ch = root->children(); 
+//    for (auto it = ch.rbegin(); it != ch.rend(); ++it) 
+//    { 
+//        if (auto hit = element_from_point(*it, x, y)) 
+//        { 
+//            return hit; 
+//        }
+//    } // 检查自身 
+//    //litehtml::position pos = root->get_placement(); 
+//    litehtml::position pos = root->get_placement();
+//
+//    if (x >= pos.left() && x < pos.right() && y >= pos.top() && y < pos.bottom()) 
+//    {
+//        return root; 
+//    } 
+//    return nullptr; 
+//}
 
-    if (x >= pos.left() && x < pos.right() && y >= pos.top() && y < pos.bottom()) 
+// 向上找最近的 <a>，遇到 <p> 停止；返回 <a> 元素或 nullptr
+litehtml::element::ptr find_link_in_chain(litehtml::element::ptr start)
+{
+    for (auto cur = start; cur; cur = cur->parent())
     {
-        return root; 
-    } 
-    return nullptr; 
+        const char* tag = cur->get_tagName();
+        if (std::strcmp(tag, "p") == 0) break;
+        if (std::strcmp(tag, "a") == 0) return cur;
+    }
+    return nullptr;
 }
+
+// 从 href 中提取锚点 id（去掉 '#'）
+std::string extract_anchor(const char* href)
+{
+    if (!href) return "";
+    const char* p = std::strrchr(href, '#');
+    return p ? (p+1 ) : "";
+}
+
+
+#include <vector>
+#include <algorithm>
+#include <unordered_set>
+
+static bool skip_attr(const std::string& val)
+{
+    if (val.empty()) return true;
+    if (val == "0")  return true;
+    return std::all_of(val.begin(), val.end(),
+        [](unsigned char c) { return std::isspace(c); });
+}
+
+static std::string get_html(litehtml::element::ptr el)
+{
+    if (!el) return "";
+    std::string out;
+
+    out += "<";
+    out += el->get_tagName();
+
+    // 常见属性名，按需增删
+    static const char* attr_names[] = {
+        "id","class","style","title","alt","href","src","type","name","value"
+    };
+
+    for (const char* name : attr_names)
+    {
+        const char* val = el->get_attr(name);
+        if (val && !skip_attr(val))
+        {
+            out += " ";
+            out += name;
+            out += "=\"";
+            out += val;
+            out += "\"";
+        }
+    }
+
+    out += ">";
+
+    for (auto child : el->children())
+    {
+        if (child->is_text())
+        {
+            std::string txt;
+            child->get_text(txt);
+            out += txt;
+        }
+        else
+        {
+            out += get_html(child);
+        }
+    }
+
+    out += "</";
+    out += el->get_tagName();
+    out += ">";
+    return out;
+}
+
+// 3. 核心函数：用 select_one 找 id，再向上找 <p>
+std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string& anchorId)
+{
+    if (anchorId.empty()) return "";
+    // 构造 CSS 选择器
+    std::string sel = "#" + anchorId;
+    auto target = doc->root()->select_one(sel);
+    if (!target) return "";
+
+    // 向上找最近的 <p>
+    auto p = target;
+    while (p && std::strcmp(p->get_tagName(), "p") != 0)
+        p = p->parent();
+    if (!p) p = target;          // 兜底：直接返回自身
+    return get_html(p);
+}
+
 LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -1988,27 +1998,34 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSEMOVE:
     {
-        //int x = GET_X_LPARAM(lp);
-        //int y = GET_Y_LPARAM(lp);
-        //if (!g_doc) { return 0; }
-        //auto new_hover = element_from_point(g_doc->root(), x, y + g_scrollY);
+        int x = GET_X_LPARAM(lp);
+        int y = GET_Y_LPARAM(lp);
+        int doc_x = x;
+        int doc_y = y + g_scrollY;
 
-        //if (new_hover && new_hover->get_tagName() == "a")
-        //{
-        //    const char* href = new_hover->get_attr("href");
-        //    if (href && href[0] == '#')
-        //    {
-        //        std::string html = SimpleContainer::get_anchor_html(
-        //            g_doc.get(), href + 1);   // 去掉 #
-        //        g_container->show_tooltip(html.c_str(), x, y);
-        //    }
-        //    else
-        //        g_container->hide_tooltip();
-        //}
-        //else
-        //{
-        //    g_container->hide_tooltip();
-        //}
+        if (!g_doc) return 0;
+
+        auto hit = g_doc->root_render()->get_element_by_point(doc_x, doc_y, 0, 0);
+        auto link = find_link_in_chain(hit);
+
+        std::string html;
+        if (link)
+        {
+            std::string id = extract_anchor(link->get_attr("href"));
+            if (!id.empty()) {
+                html = html_of_anchor_paragraph(g_doc.get(), id);
+            }
+        }
+         
+
+        if (!html.empty())
+        {
+            g_container->show_tooltip(html, x, y);
+        }
+        else
+        {
+            g_container->hide_tooltip();
+        }
         break;
     }
     case WM_EPUB_CACHE_UPDATED:
@@ -2187,7 +2204,6 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DragFinish(reinterpret_cast<HDROP>(w));
 
 
-
         // 1. 等待上一次任务结束（简单做法：阻塞等待）
         if (g_parse_task.valid()) {
             g_parse_task.wait();
@@ -2235,12 +2251,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         std::string html = g_book.load_html(g_last_html_path);
        
         g_book.init_doc(html);
-
+        g_states.needRelayout.store(true, std::memory_order_release);
         // 2) 立即把第 0 页画到缓存位图
         UpdateCache();          // 复用前面给出的 UpdateCache()
 
         // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
-        InvalidateRect(g_hView, nullptr, FALSE);
+        InvalidateRect(g_hView, nullptr, true);
         InvalidateRect(g_hWnd, nullptr, FALSE);
         UpdateWindow(g_hView);
         UpdateWindow(g_hWnd);
@@ -2468,33 +2484,100 @@ Gdiplus::Image* LoadPngFromResource(HINSTANCE hInst, UINT resId)
     }
     return img;
 }
+bool SaveHDCAsBmp(HDC hdc, int width, int height, const wchar_t* name)
+{
+    // 1. 创建兼容的内存 DC 和位图
+    HDC     memDC = CreateCompatibleDC(hdc);
+    BITMAPINFO bi = { 0 };
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = width;
+    bi.bmiHeader.biHeight = height;   // 正数 = 底-上 DIB
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 24;       // 24-bit RGB
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP hBmp = CreateDIBSection(memDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hBmp) { DeleteDC(memDC); return false; }
+
+    // 2. 把 hdc 内容拷到 DIB
+    HGDIOBJ oldBmp = SelectObject(memDC, hBmp);
+    BitBlt(memDC, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
+
+    // 3. 构造 BITMAPFILEHEADER + DIB 数据
+    BITMAPFILEHEADER bfh = { 0 };
+    bfh.bfType = 0x4D42; // 'BM'
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    DWORD dibSize = ((width * 3 + 3) & ~3) * height; // 每行 4 字节对齐
+    bfh.bfSize = bfh.bfOffBits + dibSize;
+
+    // 4. 写文件
+    HANDLE hFile = CreateFileW(name,
+        GENERIC_WRITE,
+        0, nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        SelectObject(memDC, oldBmp);
+        DeleteObject(hBmp);
+        DeleteDC(memDC);
+        return false;
+    }
+
+    DWORD written = 0;
+    WriteFile(hFile, &bfh, sizeof(bfh), &written, nullptr);
+    WriteFile(hFile, &bi.bmiHeader, sizeof(bi.bmiHeader), &written, nullptr);
+    WriteFile(hFile, bits, dibSize, &written, nullptr);
+    CloseHandle(hFile);
+
+    // 5. 清理
+    SelectObject(memDC, oldBmp);
+    DeleteObject(hBmp);
+    DeleteDC(memDC);
+    return true;
+}
 LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 {
     switch (m)
     {
     case WM_PAINT:
     {
+        OutputDebugStringA("WM_PAINT\n");
         SimpleContainer* self = reinterpret_cast<SimpleContainer*>(
             GetWindowLongPtr(hwnd, GWLP_USERDATA));
-        if (!self || !self->m_tooltip_doc) break;
+        if (!self || !self->m_tooltip_doc) 
+        { 
+            OutputDebugStringA("[TooltipProc] self or doc null\n");
+            break; 
+        }
 
+
+   
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-
+        if (!hdc)
+        {
+            OutputDebugStringA("[TooltipProc] BeginPaint failed\n");
+            break;
+        }
         // 让 litehtml 画到 hdc
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        litehtml::position clip(0, 0, rc.right, rc.bottom);
+ 
         self->m_tooltip_doc->draw(
             reinterpret_cast<litehtml::uint_ptr>(hdc),   // 强制转换
-            0, 0, nullptr);
+            0, 0, &clip);
 
+        SaveHDCAsBmp(hdc, w, h, L"tooltip_dump.bmp");
         EndPaint(hwnd, &ps);
         return 0;
     }
-    case WM_EPUB_TOOLTIP:   // 异步加载完成
-        SetProp(hwnd, L"BMP", (HANDLE)w);
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
     case WM_DESTROY:
-        RemoveProp(hwnd, L"BMP");
+    
         return 0;
     }
     return DefWindowProc(hwnd, m, w, l);
@@ -2634,8 +2717,7 @@ void EPUBBook::init_doc(std::string html) {
 // ---------- 点击目录跳转 ----------
 void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 {
-    if (!href || !*href) return;
- 
+    if (!href || !*href || !g_doc) return;
 
 
     /* 1. 分离文件路径与锚点 */
@@ -3190,6 +3272,9 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
         return;
     }
 
+    //layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    //    0,
+    //    0); // 0.8 ≈ 拉丁基线位置
 
     //// ====== 插入 baseline 对齐 ======
     //DWRITE_LINE_METRICS lineMetrics{};
@@ -3199,7 +3284,7 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
 
     // 4. 直接绘制：litehtml 已把 pos 转为相对于当前片段左上角
     rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
-        static_cast<float>(pos.y )),
+        static_cast<float>(pos.y)),
         layout.Get(),
         brush.Get());
 
@@ -3482,17 +3567,19 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                 italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
                 : DWRITE_FONT_STYLE_NORMAL,
                 &dwFont);
+   
 
-            DWRITE_FONT_METRICS dwFm{};
-            dwFont->GetMetrics(&dwFm);
-
-            float dip = static_cast<float>(size) / dwFm.designUnitsPerEm;
-            fm->ascent = static_cast<int>(dwFm.ascent * dip + 0.5f);
-            fm->descent = static_cast<int>(dwFm.descent * dip + 0.5f);
-            fm->height = static_cast<int>((dwFm.ascent + dwFm.descent + dwFm.lineGap) * dip * g_cfg.line_height_multiplier + 0.5f);
-            fm->x_height = static_cast<int>(dwFm.xHeight * dip + 0.5f);
-
-
+                  
+                DWRITE_FONT_METRICS fm0 = {};
+                dwFont->GetMetrics(&fm0);
+                float dip = static_cast<float>(size) / fm0.designUnitsPerEm;
+                fm->ascent = static_cast<int>(fm0.ascent * dip + 0.5f);
+                fm->descent = static_cast<int>(fm0.descent * dip + 0.5f);
+                fm->height = static_cast<int>((fm0.ascent + fm0.descent + fm0.lineGap)
+                    * dip * g_cfg.line_height_multiplier + 0.5f);
+                fm->x_height = static_cast<int>(fm0.xHeight * dip + 0.5f);
+                m_baselineY = (fm->height - (fm->ascent + fm->descent)) * 0.5f + fm->ascent;
+            
         }
     }
     /*----------------------------------------------------------
@@ -3631,22 +3718,9 @@ int D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
 // GDI backend
 GdiCanvas::GdiCanvas(int w, int h) : m_w(w), m_h(h)
 {
-    // 创建内存 DC 与 32-bit 位图
-    HDC screenDC = GetDC(nullptr);
-    m_memDC = CreateCompatibleDC(screenDC);
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;   // top-down DIB
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    m_bmp = CreateDIBSection(screenDC, &bi, DIB_RGB_COLORS, nullptr, nullptr, 0);
-    m_old = (HBITMAP)SelectObject(m_memDC, m_bmp);
-    ReleaseDC(nullptr, screenDC);
 
     // 创建后端
-    m_backend = std::make_unique<GdiBackend>(m_memDC);
+    m_backend = std::make_unique<GdiBackend>(m_w, m_h);
 }
 
 GdiCanvas::~GdiCanvas()
@@ -4074,25 +4148,23 @@ void EPUBBook::load_all_fonts() {
 
 void AppBootstrap::makeBackend(Renderer which, void* ctx)
 {
+    RECT rc;
+    GetClientRect(g_hView, &rc);
+    int w = rc.right;
+    int h = rc.bottom;
     switch (which) {
     case Renderer::GDI:{
-         std::make_unique<GdiBackend>(ctx ? static_cast<HDC>(ctx) : g_hMemDC);
+         g_canvas = std::make_unique<GdiCanvas>(w, h);
          return;
     }
     case Renderer::D2D: {
         if (!ctx && !g_d2dRT) throw std::runtime_error("D2D render target not ready");
-        RECT rc;
-        GetClientRect(g_hView, &rc);
-        int w = rc.right;
-        int h = rc.bottom;
         g_canvas = std::make_unique<D2DCanvas>(w, h, ctx ? static_cast<ID2D1RenderTarget*>(ctx) : g_d2dRT.Get());
         return;
     }
     case Renderer::FreeType: {
         // 内部自己准备像素缓冲
-        int w = 1024, h = 768, dpi = 96, stride = w * 4;
-        std::vector<uint8_t> buf(h * stride);
-        std::make_unique<FreetypeBackend>(w, h, dpi, buf.data(), stride, g_ftLib);
+        g_canvas = std::make_unique<FreetypeCanvas>(w, h, 72);
         return;
     }
     }
@@ -4159,21 +4231,53 @@ void AppBootstrap::initBackend(Renderer which) {
 //------------------------------------------
 // 公共辅助：从 EPUB 提取字体 blob
 //------------------------------------------
-static std::wstring make_safe_filename(std::wstring_view src, int index)
+
+static std::wstring make_safe_filename(std::wstring_view src)
 {
-    std::wstring out{ src };
-    const std::wstring illegal = L"<>:\"/\\|?*";
-    for (wchar_t& c : out)
-        if (illegal.find(c) != std::wstring::npos) c = L'_';
+    // 1. 去掉路径，只保留纯文件名
+    size_t last = src.find_last_of(L"/\\");
+    std::wstring name = (last == std::wstring::npos)
+        ? std::wstring{ src }
+    : std::wstring{ src.substr(last + 1) };
 
-    // 去掉目录分隔符，只保留纯文件名
-    size_t lastSlash = out.find_last_of(L"/\\");
-    if (lastSlash != std::wstring::npos)
-        out = out.substr(lastSlash + 1);
+    // 2. 去掉前后空格/句点
+    const std::wregex trim_re(L"^[ \\.]+|[ \\.]+$");
+    name = std::regex_replace(name, trim_re, L"");
 
-    // 加上序号，确保唯一
-    return std::to_wstring(index) + L"_" + out;
+    // 3. 替换非法字符为单个下划线
+    const std::wregex illegal_re(L"[<>:\"/\\\\|?*\\x00-\\x1F]+");
+    name = std::regex_replace(name, illegal_re, L"_");
+
+    // 4. 处理 Windows 保留设备名
+    const std::wregex reserved_re(
+        L"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\\..*)?$",
+        std::regex_constants::icase);
+    if (std::regex_match(name, reserved_re))
+        name = L"_" + name;
+
+    // 5. 空文件名兜底
+    if (name.empty())
+        name = L"file";
+
+    // 6. 拼上序号
+    return  name;
 }
+
+//static std::wstring make_safe_filename(std::wstring_view src, int index)
+//{
+//    std::wstring out{ src };
+//    const std::wstring illegal = L"<>:\"/\\|?*";
+//    for (wchar_t& c : out)
+//        if (illegal.find(c) != std::wstring::npos) c = L'_';
+//
+//    // 去掉目录分隔符，只保留纯文件名
+//    size_t lastSlash = out.find_last_of(L"/\\");
+//    if (lastSlash != std::wstring::npos)
+//        out = out.substr(lastSlash + 1);
+//
+//    // 加上序号，确保唯一
+//    return std::to_wstring(index) + L"_" + out;
+//}
 
 //static std::vector<std::pair<std::wstring, std::vector<uint8_t>>>
 //collect_epub_fonts()
@@ -4200,35 +4304,92 @@ static std::wstring make_safe_filename(std::wstring_view src, int index)
 //}
 namespace fs = std::filesystem;
 
-std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts()
+// 大小写不敏感的 set / map 比较器
+struct CaseInsensitiveLess
+{
+    bool operator()(const std::wstring& a, const std::wstring& b) const
+    {
+        return _wcsicmp(a.c_str(), b.c_str()) < 0;
+    }
+};
+
+inline int hex_to_int(wchar_t c)
+{
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+    if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+    return 0;   // 非法字符按 0 处理
+}
+// 简单 URL decode（仅处理 %20 等）
+std::wstring url_decode(const std::wstring& in)
+{
+    std::wstring out;
+    for (size_t i = 0; i < in.size(); ++i)
+    {
+        if (in[i] == L'%' && i + 2 < in.size())
+        {
+            int hi = hex_to_int(in[i + 1]);
+            int lo = hex_to_int(in[i + 2]);
+            out.push_back(static_cast<wchar_t>((hi << 4) | lo));
+            i += 2;
+        }
+        else
+            out.push_back(in[i]);
+    }
+    return out;
+}
+
+std::vector<std::pair<std::wstring, std::vector<uint8_t>>>
+collect_epub_fonts()
 {
     std::vector<std::pair<std::wstring, std::vector<uint8_t>>> fonts;
-    int index = 0;
-
-    // 常见字体后缀（小写）
-    const std::set<std::wstring> font_exts = {
+    const std::set<std::wstring, CaseInsensitiveLess> font_exts = {
         L".ttf", L".otf", L".woff", L".woff2"
     };
+    std::unordered_set<std::wstring> used_names;
 
     for (const auto& item : g_book.ocf_pkg_.manifest)
     {
-        // 取纯文件名并转成小写
-        fs::path p(item.href);
-        std::wstring ext = p.extension().wstring();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-
-        if (font_exts.count(ext))
+        std::wstring href = item.href;
+        std::wstring ext;               // 最终扩展名，带前导点
+        size_t lastDot = href.find_last_of(L'.');
+        if (lastDot != std::wstring::npos && lastDot + 1 < href.size())
         {
-            std::wstring wpath = g_zipIndex.find(item.href);
+            ext = href.substr(lastDot);   // 包含点
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+        }
+        else
+        {
+            continue;   // 没有扩展名，跳过
+        }
+        if (!font_exts.count(ext)) continue;
+
+        std::wstring href_key = url_decode(item.href);
+        std::wstring wpath = g_zipIndex.find(href_key);
+        if (wpath.empty()) continue;
+
+        // 生成唯一文件名（不再用 index 参数）
+        std::wstring base = href;
+        std::wstring safe = make_safe_filename(base);   // 现在只接受一个参数
+        std::wstring unique = safe;
+        int counter = 1;
+        while (used_names.count(unique))
+        {
+            fs::path tmp(unique);
+            unique = tmp.stem().wstring() + L"_" + std::to_wstring(counter++) + tmp.extension().wstring();
+        }
+        used_names.insert(unique);
+
+        try
+        {
             EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
             if (!mf.data.empty())
-                fonts.emplace_back(make_safe_filename(wpath, index++),
-                    std::move(mf.data));
+                fonts.emplace_back(std::move(unique), std::move(mf.data));
         }
+        catch (...) { /* log & skip */ }
     }
     return fonts;
 }
-
 //------------------------------------------
 // 3.1  GDI 实现
 //------------------------------------------
@@ -4275,7 +4436,7 @@ void D2DBackend::load_all_fonts()
     if (fonts.empty()) return;
 
     // 先清理旧字体
-    unload_fonts();
+    //unload_fonts();
   
     if (SUCCEEDED(CreateCompatibleFontCollection(
         m_dwrite.Get(), fonts, &m_privateFonts, m_tempFontFiles)))
@@ -4548,6 +4709,7 @@ void FreetypeCanvas::EndDraw() { /* 留空或刷新显示 */ }
 void GdiCanvas::resize(int width, int height){
     m_w = width;
     m_h = height;
+    m_backend->resize(width, height);
 }
 
 void D2DCanvas::resize(int width, int height)
@@ -4719,6 +4881,9 @@ FreetypeBackend::~FreetypeBackend()
 }
 
 void GdiBackend::resize(int width, int height) {
+    m_w = width;
+    m_h = height;
+
     
 }
 void D2DBackend::resize(int width, int height) {
@@ -4838,8 +5003,9 @@ RenderWorker::~RenderWorker() { stop(); }
 //    RenderWorker::instance().push(w, h, g_scrollY);
 //}
 
-void SimpleContainer::show_tooltip(const std::string& html, int x, int y)
+void SimpleContainer::show_tooltip(const std::string html, int x, int y)
 {
+    //OutputDebugStringA(("show_tooltip: html.size=" + std::to_string(html.size()) + "\n").c_str());
     if (html.empty()) { hide_tooltip(); return; }
 
     // 1. 创建/重用 300×200 的 WS_POPUP 窗口
@@ -4852,22 +5018,29 @@ void SimpleContainer::show_tooltip(const std::string& html, int x, int y)
             0, 0, 300, 200,
             nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
         SetWindowLongPtr(m_tooltip, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
     }
+   
 
-    // 2. 用 litehtml 解析 HTML
+
     m_tooltip_doc = litehtml::document::createFromString(
-        html.c_str(), this, nullptr);   // 复用 SimpleContainer 作为容器
+        html.c_str(), g_container.get(), nullptr, nullptr);
 
-    // 3. 计算大小：让 litehtml 自己排版
-    litehtml::position client(0, 0, 300, 200);
     m_tooltip_doc->render(300);
+    // 3. 计算大小：让 litehtml 自己排版
+    litehtml::position client(0, 0, 500, 500);
 
-    // 4. 显示窗口
+
+    // ④ 最终定位
     SetWindowPos(m_tooltip, HWND_TOPMOST,
-        x + 16, y + 16,
-        300, m_tooltip_doc->height(),
+        client.x, client.y, client.width, client.height,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
     InvalidateRect(m_tooltip, nullptr, TRUE);
+    int doc_w = m_tooltip_doc->width();
+    int doc_h = m_tooltip_doc->height();
+    wchar_t buf[128];
+    swprintf_s(buf, L"doc size after render: %d x %d\n", doc_w, doc_h);
+    OutputDebugStringW(buf);
 }
 
 void SimpleContainer::hide_tooltip()
@@ -5091,3 +5264,131 @@ std::set<std::wstring> FreetypeBackend::getCurrentFonts()
 {
     return {};
 }
+
+
+void EPUBBook::parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
+    const std::string& opf_dir,
+    std::vector<OCFNavPoint>& out)
+{
+    if (!navPoint) return;
+    for (auto* pt = navPoint; pt; pt = pt->NextSiblingElement("navPoint"))
+    {
+        auto* lbl = pt->FirstChildElement("navLabel");
+        auto* txt = lbl ? lbl->FirstChildElement("text") : nullptr;
+        auto* con = pt->FirstChildElement("content");
+
+        OCFNavPoint np;
+
+        np.label = txt ? extract_text(txt) : L"";
+        np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
+        if (!np.href.empty())
+            np.href = g_zipIndex.find(np.href);
+        np.order = level;               // 层级深度
+        out.emplace_back(std::move(np));
+
+        // 递归子 <navPoint>
+        parse_ncx_points(pt->FirstChildElement("navPoint"), level + 1, opf_dir, out);
+    }
+}
+
+void EPUBBook::parse_nav_list(tinyxml2::XMLElement* ol, int level,
+    const std::string& opf_dir,
+    std::vector<OCFNavPoint>& out)
+{
+    if (!ol) return;
+    for (auto* li = ol->FirstChildElement("li"); li; li = li->NextSiblingElement("li"))
+    {
+        auto* a = li->FirstChildElement("a");
+        if (!a) continue;
+
+        OCFNavPoint np;
+        np.label = extract_text(a);
+        np.href = a2w(a->Attribute("href") ? a->Attribute("href") : "");
+        if (!np.href.empty())
+            np.href = g_zipIndex.find(np.href);
+        np.order = level;               // 层级深度
+        out.emplace_back(std::move(np));
+
+        // 递归子 <ol>
+        if (auto* sub = li->FirstChildElement("ol"))
+            parse_nav_list(sub, level + 1, opf_dir, out);
+    }
+}
+
+std::wstring EPUBBook::extract_text(const tinyxml2::XMLElement* a)
+{
+    if (!a) return L"";
+
+    // 1. 拿到 <a> 的完整 XML 字符串
+    tinyxml2::XMLPrinter printer;
+    a->Accept(&printer);
+    std::string xml = printer.CStr();   // "<a ...><span ...>I</span>: The Meadow</a>"
+
+    // 2. 去掉最外层 <a ...> 和 </a>
+    size_t start = xml.find('>') + 1;
+    size_t end = xml.rfind('<');
+    if (start == std::string::npos || end == std::string::npos || end <= start)
+        return L"";
+
+    std::string inner = xml.substr(start, end - start);   // "<span ...>I</span>: The Meadow"
+
+    // 3. 简单剥掉所有标签（正则或手写）
+    std::regex tag_re("<[^>]*>");
+    std::string plain = std::regex_replace(inner, tag_re, "");
+
+    return a2w(plain);   // "I: The Meadow"
+}
+
+HTREEITEM EPUBBook::InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent)
+{
+    TVINSERTSTRUCTW tvi{};
+    tvi.hParent = hParent;
+    tvi.hInsertAfter = TVI_LAST;
+    tvi.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+    tvi.item.pszText = const_cast<LPWSTR>(node.data->label.c_str());
+    tvi.item.lParam = reinterpret_cast<LPARAM>(_wcsdup(node.data->href.c_str()));
+    tvi.item.cChildren = node.children.empty() ? 0 : 1;
+    HTREEITEM hItem = TreeView_InsertItem(tv, &tvi);
+
+    for (const auto& child : node.children)
+        InsertTreeNode(tv, child, hItem);
+
+    return hItem;
+}
+
+EPUBBook::~EPUBBook() {
+    mz_zip_reader_end(&zip);
+    for (const auto& path : g_tempFontFiles)
+    {
+        RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
+        DeleteFileW(path.c_str());
+    }
+    g_tempFontFiles.clear();
+}
+
+GdiBackend::GdiBackend(int width, int height) : m_w(width), m_h(height) {    // 创建内存 DC 与 32-bit 位图
+    //HDC screenDC = GetDC(nullptr);
+    //m_memDC = CreateCompatibleDC(screenDC);
+    //BITMAPINFO bi{};
+    //bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    //bi.bmiHeader.biWidth = w;
+    //bi.bmiHeader.biHeight = -h;   // top-down DIB
+    //bi.bmiHeader.biPlanes = 1;
+    //bi.bmiHeader.biBitCount = 32;
+    //bi.bmiHeader.biCompression = BI_RGB;
+    //m_bmp = CreateDIBSection(screenDC, &bi, DIB_RGB_COLORS, nullptr, nullptr, 0);
+    //m_old = (HBITMAP)SelectObject(m_memDC, m_bmp);
+    //ReleaseDC(nullptr, screenDC);
+}
+
+GdiBackend::~GdiBackend() {
+    if (!g_tempFontFiles.empty()) {
+        for (const auto& p : g_tempFontFiles)
+        {
+            RemoveFontResourceExW(p.c_str(), FR_PRIVATE, 0);
+            DeleteFileW(p.c_str());
+        }
+        g_tempFontFiles.clear();
+    }
+}
+
