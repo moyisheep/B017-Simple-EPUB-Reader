@@ -1,93 +1,5 @@
-﻿// main.cpp  ——  优化后完整单文件
-#define _WINSOCKAPI_
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
+﻿#include "main.h"
 
-#define WM_LOAD_ERROR (WM_USER + 3)
-#include <windows.h>
-#include <windowsx.h>   // 加这一行
-#include <commctrl.h>
-#include <shellapi.h>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <map>
-#include <memory>
-#include <string>
-#include <future>
-#include <unordered_map>
-#include <algorithm>
-#include <miniz/miniz.h>
-#include <tinyxml2.h>
-#include <lunasvg/lunasvg.h>    
-using tinyxml2::XMLDocument;
-using tinyxml2::XMLElement;
-#include <litehtml/litehtml.h>
-#include <litehtml/document.h>
-#include <litehtml/element.h>
-#include <litehtml/render_item.h>
-
-#include <litehtml/html_tag.h>
-#include <ft2build.h>
-#include FT_FREETYPE_H
-#pragma comment(lib, "freetype.lib")
-#pragma comment(lib, "comctl32.lib")
-#include <objidl.h>
-#include <filesystem>
-#include <gdiplus.h>
-#pragma comment(lib, "gdiplus.lib")
-#pragma comment(lib, "ole32.lib")
-using namespace Gdiplus;
-#pragma comment(lib, "comctl32.lib")
-#include <shlwapi.h>
-#include <regex>
-#pragma comment(lib, "shlwapi.lib")
-
-#include <wininet.h>
-#include "resource.h"
-#include <duktape.h>
-
-
-
-#include <chrono>
-#include <thread>
-#include <set>
-#include <dwrite_3.h>
-#include <d2d1.h>
-#include <wrl/client.h>
-
-#include <codecvt>
-#include <locale>
-#pragma comment(lib, "dwrite.lib")
-#include <d2d1_3.h>        // ID2D1DeviceContext / ID2D1Bitmap1
-
-#pragma comment(lib, "d2d1.lib")
-#include <dwrite_1.h>   // 需要 IDWriteTextFormat1
-#include <d2d1_1.h>       // D2D 1.1
-#include <d3d11.h>        // D3D11
-#include <dxgi1_2.h>  // DXGI 1.2
-
-#include <wincodec.h>
-#pragma comment(lib, "windowscodecs.lib")
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#include <cctype>
-
-#include <queue>
-#include <robuffer.h>   // IBufferByteAccess
-#include <new>
-#include <wrl.h>
-#include <wrl/implements.h>   // 关键
-#include <iostream>
-//#include "js_runtime.h"
-#pragma comment(lib, "windowscodecs.lib")
-#ifndef HR
-#define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
-#endif
-using Microsoft::WRL::ComPtr;
-
-namespace fs = std::filesystem;
 HWND  g_hwndTV = nullptr;    // 侧边栏 TreeView
 HIMAGELIST g_hImg = nullptr;   // 图标(可选)
 HWND      g_hWnd;
@@ -111,47 +23,10 @@ constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
 constexpr UINT WM_EPUB_CACHE_UPDATED = WM_APP + 4;
 constexpr UINT WM_EPUB_ANCHOR = WM_APP + 5;
 constexpr UINT WM_EPUB_TOOLTIP = WM_APP + 6;
-// -------------- 运行时策略 -----------------
-enum class Renderer { GDI, D2D, FreeType };
+
   // 可随时改
 
-struct AppSettings {
-    bool disableCSS = false;   // 默认启用 css
-    bool disableJS = true;   // 默认禁用 JS
-    bool disablePreprocessHTML = false;
-    Renderer fontRenderer = Renderer::D2D;
-    std::string default_font_name = "Calibri";
-    int default_font_size = 16;
-    float line_height_multiplier = 1.6;
-    std::set<std::wstring> font_serif = { L"Source Han Serif SC", 
-        L"Noto Serif CJK SC", 
-        L"SimSun", 
-        L"Times New Roman" };
-    std::set<std::wstring> font_sans_serif = { L"Source Han Sans SC", 
-        L"Noto Sans CJK SC", 
-        L"Microsoft YaHei", 
-        L"PingFang SC", 
-        L"Arial" };
-    std::set<std::wstring> font_monospace = { L"JetBrains Mono", 
-        L"Sarasa Gothic SC", 
-        L"Consolas", 
-        L"Courier New" };
-};
-struct AppStates {
-    // ---- 取消令牌 ----
-    std::shared_ptr<std::atomic_bool> cancelToken;
 
-    // ---- 状态机 ----
-    std::atomic_bool needRelayout{ true };   // 是否需要重新排版
-    std::atomic_bool isCaching{ false };   // 后台是否正在渲染
-
-    bool isLoaded = false;
-    // 工具：生成新令牌，旧令牌立即失效
-    void newCancelToken() {
-        if (cancelToken) cancelToken->store(true);
-        cancelToken = std::make_shared<std::atomic_bool>(false);
-    }
-};
 AppStates g_states;
 AppSettings g_cfg;
 std::wstring g_last_html_path;
@@ -166,106 +41,14 @@ static  std::string g_globalCSS = "";
 static fs::file_time_type g_lastTime;
 std::set<std::wstring> g_activeFonts;
 
-static const std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
-    /* 英文字体 */
-    {L"charis",               L"Charis SIL"},
-    {L"charis sil",           L"Charis SIL"},
-    {L"times",                L"Times New Roman"},
-    {L"times new roman",      L"Times New Roman"},
-    {L"arial",                L"Arial"},
-    {L"helvetica",            L"Arial"},           // 在 Windows 上 Helvetica 映射到 Arial
-    {L"verdana",              L"Verdana"},
-    {L"tahoma",               L"Tahoma"},
-    {L"georgia",              L"Georgia"},
-    {L"garamond",             L"Garamond"},
-    {L"palatino",             L"Palatino Linotype"},
-    {L"palatino linotype",    L"Palatino Linotype"},
-    {L"courier",              L"Courier New"},
-    {L"courier new",          L"Courier New"},
-    {L"consolas",             L"Consolas"},
-    {L"lucida console",       L"Lucida Console"},
-    {L"lucida sans unicode",  L"Lucida Sans Unicode"},
-    {L"comic sans",           L"Comic Sans MS"},
-    {L"comic sans ms",        L"Comic Sans MS"},
-    {L"impact",               L"Impact"},
-    {L"trebuchet",            L"Trebuchet MS"},
-    {L"trebuchet ms",          L"Trebuchet MS"},
-    {L"franklin gothic",      L"Franklin Gothic Medium"},
-    {L"tradegothicltstd",        L"Trade Gothic LT Std "},
-
-    /* 思源 / 开源无衬线 */
-    {L"source sans",           L"Source Sans Pro"},
-    {L"source sans pro",       L"Source Sans Pro"},
-    {L"source serif",          L"Source Serif Pro"},
-    {L"source serif pro",      L"Source Serif Pro"},
-    {L"source code",           L"Source Code Pro"},
-    {L"source code pro",       L"Source Code Pro"},
-
-    /* 等宽 / 编程字体 */
-    {L"fira code",             L"Fira Code"},
-    {L"fira mono",             L"Fira Mono"},
-    {L"jetbrains mono",        L"JetBrains Mono"},
-    {L"cascadia code",         L"Cascadia Code"},
-    {L"cascadia mono",         L"Cascadia Mono"},
-    {L"roboto mono",           L"Roboto Mono"},
-    {L"inconsolata",           L"Inconsolata"},
-
-    /* 中文字体（简体） */
-    {L"simsun",                L"SimSun"},
-    {L"songti",                L"SimSun"},
-    {L"宋体",                  L"SimSun"},
-    {L"simhei",                L"SimHei"},
-    {L"黑体",                  L"SimHei"},
-    {L"microsoft yahei",       L"Microsoft YaHei"},
-    {L"yahei",                 L"Microsoft YaHei"},
-    {L"微软雅黑",               L"Microsoft YaHei"},
-    {L"dengxian",               L"DengXian"},
-    {L"等线",                  L"DengXian"},
-    {L"kaiti",                 L"KaiTi"},
-    {L"kaiti sc",              L"KaiTi"},
-    {L"楷体",                  L"KaiTi"},
-    {L"fangsong",              L"FangSong"},
-    {L"fangsong sc",           L"FangSong"},
-    {L"仿宋",                  L"FangSong"},
-    {L"lisu",                  L"LiSu"},
-    {L"隶书",                  L"LiSu"},
-    {L"hy-xiaolishu",          L"HYXiaoLiShu_GB18030Super"},
-
-
-    /* 中文字体（繁体） */
-    {L"mingliu",               L"MingLiU"},
-    {L"pmingliu",              L"PMingLiU"},
-    {L"mingliuhkscs",          L"MingLiU_HKSCS"},
-    {L"標楷體",                L"DFKai-SB"},
-
-    /* 日文字体 */
-    {L"ms gothic",             L"MS Gothic"},
-    {L"ms mincho",             L"MS Mincho"},
-    {L"yu gothic",             L"Yu Gothic"},
-    {L"yu mincho",             L"Yu Mincho"},
-    {L"meiryo",                L"Meiryo"},
-    {L"メイリオ",               L"Meiryo"},
-
-    /* 韩文字体 */
-    {L"malgun gothic",         L"Malgun Gothic"},
-    {L"malgun",                L"Malgun Gothic"},
-    {L"맑은 고딕",             L"Malgun Gothic"},
-    {L"batang",                L"Batang"},
-    {L"gulim",                 L"Gulim"},
-    {L"dotum",                 L"Dotum"}
-};
-
+std::unique_ptr<AppBootstrap> g_bootstrap;
+std::shared_ptr<IRenderBackend> g_backend = nullptr;
+std::unordered_map<std::string, ImageFrame> g_img_cache;
+int g_center_offset = 0;
 static std::unordered_map<std::wstring, std::set<std::wstring>>  g_fontAliasDynamic = {
     {L"serif", g_cfg.font_serif},
-    {L"sans-serif", g_cfg.font_sans_serif}, 
+    {L"sans-serif", g_cfg.font_sans_serif},
     {L"monospace", g_cfg.font_monospace}
-};
-struct ImageFrame
-{
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t stride = 0;          // 每行字节数
-    std::vector<uint8_t> rgba;     // 连续像素，8-bit * 4
 };
 
 static bool isWin10OrLater()
@@ -282,7 +65,15 @@ static bool isWin10OrLater()
 
 // HTML 转义辅助函数
 
-
+void DumpHex(const wchar_t* tag, const std::wstring& s)
+{
+    std::wostringstream oss;
+    oss << tag << L"(" << s.size() << L"): ";
+    for (wchar_t ch : s)
+        oss << std::hex << std::setw(4) << std::setfill(L'0') << static_cast<unsigned>(ch) << L" ";
+    oss << L"\n";
+    OutputDebugStringW(oss.str().c_str());
+}
 
 // HTML 转义辅助函数
 std::string _escape_html(const std::string& s) {
@@ -610,6 +401,7 @@ public:
         const wchar_t* end = p + collectionKeySize / sizeof(wchar_t);
         while (*p && p < end)
         {
+
             paths.emplace_back(p);
             p += wcslen(p) + 1;
         }
@@ -650,278 +442,6 @@ HRESULT CreateCompatibleFontCollection(
     }
 }
 
-// -------------- 抽象接口 -----------------
-class IRenderBackend {
-public:
-    virtual ~IRenderBackend() = default;
-
-    /* 必须实现的 7 个纯虚函数 */
-    virtual void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) = 0;
-    virtual void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) = 0;
-    virtual litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) = 0;
-    virtual void delete_font(litehtml::uint_ptr h) = 0;
-    virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) = 0;
-    virtual int pt_to_px(int pt) const = 0;
-    virtual int text_width(const char* text, litehtml::uint_ptr hFont) = 0;
-    virtual void load_all_fonts(void) = 0;
-    virtual void resize(int width, int height) = 0;
-    virtual std::set<std::wstring> getCurrentFonts() = 0;
-};
-std::shared_ptr<IRenderBackend> g_backend = nullptr;
-std::unordered_map<std::string, ImageFrame> g_img_cache;
-class AppBootstrap {
-public:
-    AppBootstrap();
-    ~AppBootstrap();
-    struct script_info
-    {
-        litehtml::element::ptr el;   // 只需要保留节点指针
-    };
-
- 
-
-    void enableJS();
-    void disableJS();
-    void bind_host_objects();   // 新增
-    //void make_tooltip_backend();
-    void run_pending_scripts();
-
-    void switchBackend(std::unique_ptr<IRenderBackend> newBackend) {
-        g_backend = std::move(newBackend);
-    }
-
-    std::vector<script_info> m_pending_scripts;
-
-    //std::unique_ptr<js_runtime> m_jsrt;   // 替换裸 duk_context*
-
-};
-
-
-std::unique_ptr<AppBootstrap> g_bootstrap;
-// -------------- GDI 后端 -----------------
-class GdiBackend : public IRenderBackend {
-public:
-    explicit GdiBackend(int width, int height);
-    /* 下面 7 个函数在 .cpp 里用 ExtTextOut / Rectangle 等实现 */
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
-    int pt_to_px(int pt) const override;
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_all_fonts(void);
-    void resize(int width, int height) override;
-    HBITMAP get_bitmap();
-    ~GdiBackend();
-    std::set<std::wstring> getCurrentFonts() override;
-private:
-    HDC m_hdc;
-    HBITMAP m_memDC;
-    // 缓存已创建的 HBITMAP，避免重复 GDI 转换
-    std::unordered_map<std::string, HBITMAP> m_gdiBitmapCache;
-    int m_w;
-    int m_h;
-    static COLORREF to_cr(const litehtml::web_color& c)
-    {
-        return RGB(c.red, c.green, c.blue);
-    }
-
-    // 把 ImageFrame 转成 32bpp HBITMAP
-    HBITMAP create_dib_from_frame(const ImageFrame& frame);
-};
-
-// -------------- DirectWrite-D2D 后端 -----------------
-class D2DBackend : public IRenderBackend {
-public:
-    D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx);
-    //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
-    /* 下面 6 个函数在 .cpp 里用 IDWriteTextLayout / ID2D1SolidColorBrush 实现 */
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    std::vector<std::wstring> split_font_list(const std::string& src);
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
-    int pt_to_px(int pt) const override;
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_all_fonts(void);
-    void unload_fonts(void);
-    void resize(int width, int height) override;
-    std::optional<std::wstring> mapDynamic(const std::wstring& key);
-    std::wstring resolveFace(const std::wstring& raw);
-    ComPtr<ID2D1BitmapRenderTarget> m_rt;
-    std::set<std::wstring> getCurrentFonts() override;
-private:
-       // 自动 AddRef/Release
-    ComPtr<IDWriteFactory>    m_dwrite;
-    Microsoft::WRL::ComPtr<IDWriteFontCollection> m_privateFonts;  // 新增
-    std::vector<std::wstring> m_tempFontFiles;
-    std::wstring m_actualFamily;   // 保存命中的字体家族名m_actualFamily
-    std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
-    ComPtr<ID2D1RenderTarget> m_devCtx;
-    static std::wstring toLower(std::wstring s);
-    static std::optional<std::wstring> mapStatic(const std::wstring& key);
-    float m_baselineY = 0;
-
-    ComPtr<IDWriteFontCollection> m_sysFontColl;
-    int  m_w, m_h;
-};
-
-// -------------- FreeType 后端 -----------------
-class FreetypeBackend : public IRenderBackend {
-public:
-    using RasterCB = std::function<void(int, int, const uint8_t*, int, int)>;
-    FreetypeBackend(int w, int h, int dpi,
-        uint8_t* surface, int stride,
-        FT_Library lib);
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
-    int pt_to_px(int pt) const override;
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_all_fonts(void);
-    void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-    ~FreetypeBackend();
-private:
-    int m_w, m_h, m_dpi;
-    RasterCB m_raster;
-    uint8_t* m_surface;
-    int m_stride;
-    FT_Library m_lib;
-    void blit_glyph(int x, int y,
-        const FT_Bitmap& bmp,
-        litehtml::web_color c);
-    void fill_rect(const litehtml::position& rc,
-        litehtml::web_color c);
-    std::vector<FT_Face>  m_faces;          // 已加载的 FreeType 字体
-    std::vector<std::vector<uint8_t>> m_fontBlobs; // 保持内存常驻
-    // 缓存已转换的 FT_Bitmap，避免重复解析
-    std::unordered_map<std::string, FT_Bitmap> m_ftBitmapCache;
-    /* 把 ImageFrame → FT_Bitmap（8-bit 灰度或 32-bit RGBA） */
-    static FT_Bitmap make_ft_bitmap(const ImageFrame& frame)
-    {
-        FT_Bitmap ftBmp = {};
-        ftBmp.rows = static_cast<unsigned>(frame.height);
-        ftBmp.width = static_cast<unsigned>(frame.width);
-        ftBmp.pitch = static_cast<int>(frame.stride);
-        ftBmp.buffer = const_cast<unsigned char*>(frame.rgba.data());
-        ftBmp.pixel_mode = FT_PIXEL_MODE_BGRA;   // 如果你后端是 RGBA，可改
-        ftBmp.num_grays = 256;
-        return ftBmp;
-    }
-    void draw_image(const ImageFrame& frame,
-        const litehtml::position& dst);
-};
-
-class ICanvas {
-public:
-    virtual ~ICanvas() = default;
-
-    /* 返回一个 IRenderBackend，用于 litehtml 绘制 */
-    virtual IRenderBackend* backend() = 0;
-
-    /* 把画布内容贴到窗口（WM_PAINT 用）*/
-    virtual void present(HDC hdc, int x, int y) = 0;
-
-    /* 尺寸 */
-    virtual int  width()  const = 0;
-    virtual int  height() const = 0;
-
-    virtual litehtml::uint_ptr getContext() = 0;
-    virtual void BeginDraw() = 0;
-    virtual void EndDraw() = 0;
-    virtual void resize(int width, int height) = 0;
-    virtual std::set<std::wstring> getCurrentFonts() = 0;
-    /* 工厂：根据当前策略创建画布 */
-    //static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
-};
-
-
-
-class RenderWorker {
-public:
-    static RenderWorker& instance();
-    void push(int w, int h, int sy);
-    void stop();
-    ~RenderWorker();
-private:
-    RenderWorker() : worker_(&RenderWorker::loop, this) {}
-    void loop();
-    struct Task { int w, h, sy; };
-
-    std::mutex              m_;
-    std::condition_variable cv_;
-    std::optional<Task>     latest_;   // 只保留最新
-    std::atomic<bool>       stop_{ false };
-    std::thread             worker_;
-};
-
-class GdiCanvas : public ICanvas {
-public:
-    GdiCanvas(int w, int h);
-    ~GdiCanvas();
-    IRenderBackend* backend() override { return m_backend.get(); }
-    void present(HDC hdc, int x, int y) override;
-    int width()  const override { return m_w; }
-    int height() const override { return m_h; }
-    litehtml::uint_ptr getContext() override;
-    void BeginDraw() override;
-    void EndDraw() override;
-    void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-
-private:
-    int  m_w, m_h;
-    HDC  m_memDC;
-    HBITMAP m_bmp, m_old;
-    std::unique_ptr<GdiBackend> m_backend;
-};
-
-class D2DCanvas : public ICanvas {
-public:
-    D2DCanvas(int w, int h, HWND hwnd);
-    IRenderBackend* backend() override { return m_backend.get(); }
-    void present(HDC hdc, int x, int y) override;
-    int width()  const override { return m_w; }
-    int height() const override { return m_h; }
-    litehtml::uint_ptr getContext() override;
-    void BeginDraw() override;
-    void EndDraw() override;
-    void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-private:
-    int  m_w, m_h;
-    ComPtr<ID2D1Bitmap> m_bmp;
-    std::unique_ptr<D2DBackend> m_backend;
-    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
-    ComPtr<ID2D1HwndRenderTarget> m_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
-    HWND m_hwnd = nullptr;
-
-};
-
-class FreetypeCanvas : public ICanvas {
-public:
-    FreetypeCanvas(int w, int h, int dpi);
-    ~FreetypeCanvas();
-    IRenderBackend* backend() override { return m_backend.get(); }
-    void present(HDC hdc, int x, int y) override;
-    int width()  const override { return m_w; }
-    int height() const override { return m_h; }
-    litehtml::uint_ptr getContext() override;
-    void BeginDraw() override;
-    void EndDraw() override;
-    void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-private:
-    int  m_w, m_h, m_dpi;
-    std::vector<uint8_t>        m_pixels;   // 4*w*h
-    std::unique_ptr<FreetypeBackend> m_backend;
-};
-
 
 //std::unique_ptr<ICanvas>
 //ICanvas::create(int w, int h, Renderer which)
@@ -938,17 +458,6 @@ private:
 //    }
 //    return nullptr;
 //}
-class Paginator {
-public:
-    void load(litehtml::document* doc, int w, int h);
-    void render(ICanvas* canvas, int scrollY);   // 关键：不再区分 HDC / RT
-    void clear();
-private:
-    litehtml::document* m_doc = nullptr;
-    int m_w = 0, m_h = 0;
-
-
-};
 // -------------- 工厂 -----------------
 
 
@@ -1006,7 +515,40 @@ void SavePixelsToPNG(const BYTE* pixels, UINT w, UINT h, UINT stride, const wcha
     enc->Commit();
 }
 
+void PrintFontFamilies(ComPtr<IDWriteFontCollection> fontCollection)
+{
+    ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    UINT32 familyCount = fontCollection->GetFontFamilyCount();
+    char buf[512];
 
+    for (UINT32 i = 0; i < familyCount; ++i)
+    {
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
+        fontCollection->GetFontFamily(i, &family);
+
+        Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+        family->GetFamilyNames(&names);
+
+        UINT32 idx = 0;
+        UINT32 len = 0;
+        BOOL exists = FALSE;
+        names->FindLocaleName(L"en-us", &idx, &exists);
+        if (!exists) idx = 0;
+
+        names->GetStringLength(idx, &len);
+        std::wstring wname(len + 1, 0);
+        names->GetString(idx, wname.data(), len + 1);
+
+        // 转成 UTF-8
+        std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> conv;
+        std::string name = conv.to_bytes(wname.c_str());
+        DumpHex(L"[actual]   ", wname);
+        snprintf(buf, sizeof(buf), "[Font] %s\n", name.c_str());
+        OutputDebugStringA(buf);
+    }
+
+    ::CoUninitialize();
+}
 void PrintSystemFontFamilies()
 {
     ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1339,197 +881,90 @@ inline void SetStatus(int pane, const wchar_t* msg)
         (LPARAM)msg);
 }
 
-
-// -------------- 新增数据结构 --------------
-struct OCFItem {
-    std::wstring id, href, media_type, properties;
-};
-struct OCFRef {
-    std::wstring idref, href, linear = L"yes";
-};
-struct OCFNavPoint {
-    std::wstring label, href;
-    int order = 0;
-};
-struct OCFPackage {
-    std::wstring rootfile;                // OPF 绝对路径
-    std::wstring opf_dir;                 // 目录，带 '/'
-    std::vector<OCFItem>   manifest;
-    std::vector<OCFRef>    spine;
-    std::vector<OCFNavPoint> toc;
-    std::map<std::wstring, std::wstring> meta;
-    std::wstring toc_path;
-};
-
-struct TreeNode {
-    const OCFNavPoint* data;
-    std::vector<TreeNode> children;
-};
-
-static std::vector<TreeNode> BuildTree(const std::vector<OCFNavPoint>& flat)
+/* static */
+void EPUBBook::FreeTreeData(HWND tv)
 {
-    std::vector<TreeNode> roots;
-    std::vector<TreeNode*> stack;          // 充当“当前父节点栈”
-    stack.push_back(nullptr);              // 栈底：根层
+    HTREEITEM hRoot = TreeView_GetRoot(tv);
+    std::function<void(HTREEITEM)> freeData = [&](HTREEITEM h)
+        {
+            for (; h; h = TreeView_GetNextSibling(tv, h))
+            {
+                TVITEMW tvi{ TVIF_PARAM, h };
+                TreeView_GetItem(tv, &tvi);
+                delete reinterpret_cast<TVData*>(tvi.lParam);
+
+                freeData(TreeView_GetChild(tv, h));
+            }
+        };
+    freeData(hRoot);
+}
+void EPUBBook::LoadToc()
+{
+    SendMessage(g_hwndTV, WM_SETREDRAW, FALSE, 0);
+
+    // ✅ 释放旧节点数据
+
+    TreeView_DeleteAllItems(g_hwndTV);
+
+    BuildTree(ocf_pkg_.toc, m_nodes, m_roots);
+    for (size_t r : m_roots)
+        InsertTreeNodeLazy(g_hwndTV, m_nodes[r], m_nodes, TVI_ROOT);
+
+    SendMessage(g_hwndTV, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(g_hwndTV, nullptr, nullptr,
+        RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
+}
+
+void EPUBBook::BuildTree(const std::vector<OCFNavPoint>& flat,
+    std::vector<TreeNode>& nodes,
+    std::vector<size_t>& roots)
+{
+    if (flat.empty()) return;
+    nodes.clear();
+    nodes.reserve(flat.size());
+    std::vector<size_t> stack;
+    stack.reserve(32);
+    stack.push_back(SIZE_MAX);
 
     for (const auto& np : flat)
     {
-        // 根据 order 决定栈深度
         while (stack.size() > static_cast<size_t>(np.order + 1))
             stack.pop_back();
 
-        TreeNode node{ &np, {} };
-        if (stack.back())
-            stack.back()->children.push_back(std::move(node));
-        else
-            roots.push_back(std::move(node));
+        size_t idx = nodes.size();
+        nodes.emplace_back(&np);
 
-        stack.push_back(&roots.back());    // 新节点入栈
+        if (stack.back() != SIZE_MAX)
+            nodes[stack.back()].childIdx.push_back(idx);
+        else
+            roots.push_back(idx);
+
+        stack.push_back(idx);
     }
-    return roots;
 }
 
+/* static */
+HTREEITEM EPUBBook::InsertTreeNodeLazy(HWND tv,
+    const TreeNode& node,
+    const std::vector<TreeNode>& allNodes,
+    HTREEITEM parent)
+{
+    TVINSERTSTRUCTW tvis = {};
+    tvis.hParent = parent;
+    tvis.hInsertAfter = TVI_LAST;
+    tvis.itemex.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+    tvis.itemex.pszText = LPSTR_TEXTCALLBACKW;
+    tvis.itemex.cChildren = node.childIdx.empty() ? 0 : 1;
 
+    // ✅ 使用 TVData，而不是裸指针
+    auto* data = new TVData{ &node, &allNodes };
+    tvis.itemex.lParam = reinterpret_cast<LPARAM>(data);
 
-class ZipIndexW {
-public:
-    ZipIndexW() = default;
-    explicit ZipIndexW(mz_zip_archive& zip) { build(zip); }
+    HTREEITEM hItem = TreeView_InsertItem(tv, &tvis);
+    return hItem;
+}
 
-    // 输入/输出均为 std::wstring
-    std::wstring find(std::wstring href) const {
-        // 1. 分离锚点
-        size_t pos = href.find(L'#');
-        std::wstring pure = pos == std::wstring::npos ? href : href.substr(0, pos);
-        std::wstring anchor = pos == std::wstring::npos ? L"" : href.substr(pos);
-
-        // 2. 查索引
-        std::wstring key = normalize_key(pure);
-        auto it = map_.find(key);
-        std::wstring result = it == map_.end() ? std::wstring{} : it->second;
-
-        // 3. 把锚点拼回去
-        return result.empty() ? result : result + anchor;
-    }
-
-private:
-    /* ---------- 大小写不敏感哈希/比较 ---------- */
-    struct StringHashI {
-        size_t operator()(std::wstring s) const noexcept {
-            size_t h = 0;
-            for (wchar_t c : s)
-                h = h * 131 + towlower(static_cast<wint_t>(c));
-            return h;
-        }
-    };
-    struct StringEqualI {
-        bool operator()(std::wstring a, std::wstring b) const noexcept {
-            return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-                [](wchar_t c1, wchar_t c2) {
-                    return towlower(static_cast<wint_t>(c1)) ==
-                        towlower(static_cast<wint_t>(c2));
-                });
-        }
-    };
-
-    using Map = std::unordered_map<std::wstring, std::wstring,
-        StringHashI, StringEqualI>;
-
-    Map map_;
-
-
-
-    /* ---------- 正规化路径 ---------- */
-    static std::wstring url_decode(const std::wstring& in)
-    {
-        wchar_t out[INTERNET_MAX_URL_LENGTH];
-        DWORD len = INTERNET_MAX_URL_LENGTH;
-        if (SUCCEEDED(UrlCanonicalizeW(in.c_str(), out, &len, URL_UNESCAPE)))
-            return std::wstring(out, len);
-        return in;
-    }
-
-    static std::wstring normalize_key(std::wstring href)
-    {
-        // 1. 去掉 ? 和 #
-        auto pure = href.substr(0, href.find_first_of(L"?#"));
-        // 2. URL 解码
-        pure = url_decode(pure);
-        // 3. 取文件名并转小写
-        auto filename = fs::path(pure).filename().wstring();
-        std::transform(filename.begin(), filename.end(), filename.begin(),
-            [](wchar_t c) { return towlower(static_cast<wint_t>(c)); });
-        return filename;
-    }
-
-    /* ---------- 建立索引 ---------- */
-    void build(mz_zip_archive& zip) {
-        mz_uint idx = 0;
-        mz_zip_archive_file_stat st{};
-        while (mz_zip_reader_file_stat(&zip, idx++, &st)) {
-            // miniz 返回 UTF-8，转成 wstring
-            std::wstring wpath = a2w(st.m_filename);
-            std::wstring key = normalize_key(wpath);
-            map_.emplace(std::move(key), std::move(wpath));
-        }
-    }
-
-
-
-};
-
-ZipIndexW g_zipIndex;
-// ---------- EPUB 零解压 ----------
-struct EPUBBook {
-    struct MemFile {
-        std::vector<uint8_t> data;
-        const char* begin() const { return reinterpret_cast<const char*>(data.data()); }
-        size_t      size()  const { return data.size(); }
-    };
-    mz_zip_archive zip = {};
-    std::map<std::wstring, MemFile> cache;
-
-    // -------------- EPUBBook 内部新增成员 --------------
-    OCFPackage ocf_pkg_;                     // 解析结果
-    void parse_ocf_(void);                       // 主解析入口
-    void parse_opf_(void);   // 解析 OPF
-    void parse_toc_(void);                        // 解析 TOC
-    void LoadToc(void);
-    void OnTreeSelChanged(const wchar_t* href);
-    bool load(const wchar_t* epub_path);
-    MemFile read_zip(const wchar_t* file_name) const;
-    std::string load_html(const std::wstring& path) const;
-
-    void load_all_fonts(void);
-    void init_doc(std::string html);
-    static HTREEITEM InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent);
-
-    static std::wstring extract_text(const tinyxml2::XMLElement* a);
-
-    // 递归解析 EPUB3-Nav <ol>
-    static void parse_nav_list(tinyxml2::XMLElement* ol, int level,
-        const std::string& opf_dir,
-        std::vector<OCFNavPoint>& out);
-
-
-    // 递归解析 NCX <navPoint>
-    static void parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
-        const std::string& opf_dir,
-        std::vector<OCFNavPoint>& out);
-
-    void show_tooltip(const std::string html, int x, int y);
-    void hide_tooltip();
-    static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
-
-
-    HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
-    std::wstring           m_tooltip_url;          // 缓存当前 url
-    EPUBBook() noexcept {}
-    ~EPUBBook();
-};
-
-
-EPUBBook::MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
+MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
     MemFile mf;
 
     // 2.1 先按给定宽路径找
@@ -1564,7 +999,7 @@ std::string EPUBBook::load_html(const std::wstring& path) const {
     g_currentHtmlPath = path;
     auto it = cache.find(path);
     if (it != cache.end()) return std::string(it->second.begin(), it->second.size());
-    EPUBBook::MemFile mf = read_zip(path.c_str());
+    MemFile mf = read_zip(path.c_str());
     if (mf.data.empty()) return {};
     return std::string(mf.begin(), mf.size());
 }
@@ -1580,7 +1015,7 @@ bool EPUBBook::load(const wchar_t* epub_path) {
     if (!mz_zip_reader_init_file(&zip, w2a(epub_path).c_str(), 0))
         throw std::runtime_error("zip 打开失败：" +
             std::to_string(mz_zip_get_last_error(&zip)));
-    g_zipIndex = ZipIndexW(zip);
+    m_zipIndex = ZipIndexW(zip);
     parse_ocf_();
     parse_opf_();
     parse_toc_();
@@ -1634,7 +1069,7 @@ void EPUBBook::parse_opf_() {
 
         // 只在 href 非空时拼绝对路径
         if (!item.href.empty())
-            item.href = g_zipIndex.find(item.href);
+            item.href = m_zipIndex.find(item.href);
 
         ocf_pkg_.manifest.emplace_back(std::move(item));
     }
@@ -1724,80 +1159,8 @@ void EPUBBook::parse_toc_()
     }
 }
 
-// ---------- LiteHtml 容器 ----------
-class SimpleContainer : public litehtml::document_container {
-public:
-    explicit SimpleContainer(HWND hwnd);
-    ~SimpleContainer();
-    void clear_images() { g_img_cache.clear(); }
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_image(const char* src, const char* /*baseurl*/, bool) override;
 
-    void get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
-    void get_client_rect(litehtml::position& client) const override;
-    litehtml::element::ptr create_element(const char*, const litehtml::string_map&, const std::shared_ptr<litehtml::document>&) override;
-
-    int get_default_font_size() const override { return g_cfg.default_font_size; }
-    const char* get_default_font_name() const override { return g_cfg.default_font_name.c_str(); }
-    void import_css(litehtml::string&, const litehtml::string&, litehtml::string&) override;
-
-    void set_caption(const char*) override;
-    void set_base_url(const char*) override;
-    void link(const std::shared_ptr<litehtml::document>&, const litehtml::element::ptr&) override;
-    void on_anchor_click(const char*, const litehtml::element::ptr&) override;
-    void set_cursor(const char*) override;
-    void transform_text(litehtml::string&, litehtml::text_transform) override;
-
-    void set_clip(const litehtml::position&, const litehtml::border_radiuses&) override;
-    void del_clip() override;
-
-    void get_media_features(litehtml::media_features&) const override;
-    void get_language(litehtml::string&, litehtml::string&) const override;
-
-    void draw_list_marker(litehtml::uint_ptr, const litehtml::list_marker&) override;
-  
-
-
-
-    // 渲染后端需要实现的
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
-    int pt_to_px(int pt) const override;
-
-
-
-    void makeBackend(HWND hwnd);
-    void resize(int w, int y);
-
-
-
-    
-    //自定义函数
-
-
-    std::unordered_map<std::string, ImageFrame> m_img_cache;
-    std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
-    std::shared_ptr<litehtml::document> m_doc;
-    std::unique_ptr<ICanvas> m_canvas;
-
-private:
-    std::wstring m_root;
-    // 1. 锚点表（id -> element）
-
-    // 2. 最后一次传入的 HDC，用于 set_clip / del_clip
-    HDC m_last_hdc = nullptr;
-    HWND m_hwnd = nullptr;
-    HWND m_tooltip_hwnd = nullptr;
-    // 3. 默认字体句柄（FontWrapper 是你自己的字体包装类）
-    HFONT m_hDefaultFont = nullptr;
-
-
-};
-
-static ImageFrame decode_img(const EPUBBook::MemFile& mf, const wchar_t* ext)
+static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 {
     ImageFrame frame;
     auto fmt = detect_fmt(mf.data.data(), mf.data.size(), ext);
@@ -1857,7 +1220,7 @@ static ImageFrame decode_img(const EPUBBook::MemFile& mf, const wchar_t* ext)
 HINSTANCE g_hInst;
 std::shared_ptr<SimpleContainer> g_container;
 std::shared_ptr<SimpleContainer> g_tooltip_container;
-EPUBBook  g_book;
+std::unique_ptr<EPUBBook>  g_book;
 Paginator g_pg;
 Gdiplus::Image* g_pSplashImg = nullptr;
 std::future<void> g_parse_task;
@@ -1987,7 +1350,7 @@ std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string&
     std::string inner = get_html(p);
     // 包一层带 inline-block 的 <p>
  
-    return "<style>img{display:block;width:100%;height:auto;max-height:300px;max-width:300px;}</style>" + inner;
+    return "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>" + inner;
 }
 
 LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -2006,10 +1369,11 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
-        int doc_x = x;
+
+        int doc_x = x - g_center_offset;
         int doc_y = y + g_scrollY;
 
-        if (!g_container->m_doc) return 0;
+        if (!g_container->m_doc) break;
 
         auto hit = g_container->m_doc->root_render()->get_element_by_point(doc_x, doc_y, 0, 0);
         auto link = find_link_in_chain(hit);
@@ -2017,20 +1381,26 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         std::string html;
         if (link)
         {
-            std::string id = extract_anchor(link->get_attr("href"));
-            if (!id.empty()) {
-                html = html_of_anchor_paragraph(g_container->m_doc.get(), id);
+            const char* href_raw = link->get_attr("href");
+            if (!href_raw) {
+                g_book->hide_tooltip();
+                break;
             }
+            std::string href = href_raw;
+
+
+            std::string id = extract_anchor(href.c_str());
+            if (!id.empty())
+                html = html_of_anchor_paragraph(g_container->m_doc.get(), id);
         }
-         
 
         if (!html.empty())
         {
-            g_book.show_tooltip(html, x, y);
+            g_book->show_tooltip(html, x, y);
         }
         else
         {
-            g_book.hide_tooltip();
+            g_book->hide_tooltip();
         }
         break;
     }
@@ -2189,7 +1559,6 @@ void UpdateCache()
     int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
 
-
     g_pg.load(g_container->m_doc.get(), w, h);
     /* 3) 渲染整页 */
     g_pg.render(g_container->m_canvas.get(), g_scrollY);
@@ -2214,25 +1583,21 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_parse_task.valid()) {
             g_parse_task.wait();
         }
-        if (!g_container) {
-            g_container = std::make_shared<SimpleContainer>(g_hView);
-        }
-        if (!g_tooltip_container) {
-            g_tooltip_container = std::make_shared<SimpleContainer>(g_hTooltip);
-        }
+        g_pg.clear();              // 如果你 Paginator 有 clear() 就调
+        g_container->clear();
+        g_book->clear();
+        InvalidateRect(g_hView, nullptr, true);
+        InvalidateRect(g_hwndTV, nullptr, true);
 
 
         // 2. 立即释放旧对象，防止野指针
-        g_container->m_doc.reset();
         //g_container.reset();
-        g_pg.clear();              // 如果你 Paginator 有 clear() 就调
-
+  
         // 3. 启动新任务
         SetStatus(0 ,L"正在加载...");
         g_parse_task = std::async(std::launch::async, [file] {
             try {
-                g_book = EPUBBook{};   // 保险：用新实例
-                g_book.load(file);
+                g_book->load(file);
                 PostMessage(g_hWnd, WM_EPUB_PARSED, 0, 0);
             }
             catch (const std::exception& e) {
@@ -2260,10 +1625,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
 
 
-        g_last_html_path = g_book.ocf_pkg_.spine[0].href;
-        std::string html = g_book.load_html(g_last_html_path);
+        g_last_html_path = g_book->ocf_pkg_.spine[0].href;
+        std::string html = g_book->load_html(g_last_html_path);
        
-        g_book.init_doc(html);
+        g_book->init_doc(html);
         g_states.needRelayout.store(true, std::memory_order_release);
         // 2) 立即把第 0 页画到缓存位图
         UpdateCache();          // 复用前面给出的 UpdateCache()
@@ -2367,7 +1732,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_MOUSEWHEEL: {
-
+        if(g_book){ g_book->hide_tooltip(); }
+       
         //UpdateCache();              // 关键：立即排版并缓存
         //InvalidateRect(g_hView, nullptr, FALSE);
         return 0;
@@ -2387,43 +1753,72 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         //if (g_d2dFactory) { g_d2dFactory->Release(); g_d2dFactory = nullptr; }
         if (g_hMemDC) { DeleteDC(g_hMemDC);  g_hMemDC = nullptr; }
         if (g_ftLib) { FT_Done_FreeType(g_ftLib); g_ftLib = nullptr; }
- 
+        if (g_book) { g_book->hide_tooltip(); }
         PostQuitMessage(0);
         return 0;
     }
     case WM_NOTIFY:
     {
         LPNMHDR nm = reinterpret_cast<LPNMHDR>(l);
-        if (nm->hwndFrom == g_hwndTV)
+        if (nm->hwndFrom != g_hwndTV) break;
+
+        switch (nm->code)
         {
-            // 1. 让系统完成默认选中/高亮
-            LRESULT lr = DefWindowProc(h, m, w, l);
-
-            // 2. 只在 *真正改变后* 做加载
-            if (nm->code == TVN_SELCHANGED)
+        case TVN_GETDISPINFO:
+        {
+            auto* pdi = reinterpret_cast<NMTVDISPINFO*>(l);
+            auto* data = reinterpret_cast<const TVData*>(pdi->item.lParam);
+            if (!data || !data->node || !data->node->nav)   // 三重保护
             {
-                HTREEITEM hSel = TreeView_GetSelection(g_hwndTV);
-                if (hSel)
-                {
-                    SetFocus(g_hwndTV);
+                pdi->item.pszText = const_cast <wchar_t*>(L"");
+                break;
+            }
+            pdi->item.pszText = const_cast<wchar_t*>(data->node->nav->label.c_str());
+            break;
+        }
 
-                    TVITEMW tvi{ TVIF_PARAM, hSel };
-                    if (TreeView_GetItem(g_hwndTV, &tvi))
-                    {
-                        const wchar_t* href = reinterpret_cast<const wchar_t*>(tvi.lParam);
-                        if (href && *href)
-                            g_book.OnTreeSelChanged(href);
-                    }
+        case TVN_SELCHANGED:
+        {
+            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(l);
+            TVITEMW tvi{ TVIF_PARAM, pnmtv->itemNew.hItem };
+            if (TreeView_GetItem(g_hwndTV, &tvi))
+            {
+                auto* data = reinterpret_cast<const TVData*>(tvi.lParam);
+                if (data && data->node && !data->node->nav->href.empty())
+                {
+                    g_book->OnTreeSelChanged(data->node->nav->href.c_str());
                 }
             }
-            else if (nm->code == TVN_ITEMEXPANDED)
-            {
-                UpdateWindow(g_hWnd);
-            }
+            break;
+        }
 
-            return lr;   // 必须返回 DefWindowProc 的结果
+        case TVN_ITEMEXPANDING:
+        {
+            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(l);
+            if (pnmtv->action != TVE_EXPAND) break;
+
+            auto* data = reinterpret_cast<TVData*>(pnmtv->itemNew.lParam);
+            if (!data || data->inserted) break;   // 已经插过直接返回
+
+            HTREEITEM hParent = pnmtv->itemNew.hItem;
+            for (size_t idx : data->node->childIdx)
+            {
+                const TreeNode& child = (*data->all)[idx];
+                TVINSERTSTRUCTW tvis{};
+                tvis.hParent = hParent;
+                tvis.hInsertAfter = TVI_LAST;
+                tvis.itemex.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+                tvis.itemex.pszText = LPSTR_TEXTCALLBACKW;
+                tvis.itemex.cChildren = child.childIdx.empty() ? 0 : 1;
+                auto* childData = new TVData{ &child, data->all };
+                tvis.itemex.lParam = reinterpret_cast<LPARAM>(childData);
+                TreeView_InsertItem(g_hwndTV, &tvis);
+            }
+            data->inserted = true;   // 标记已插入
+            break;
         }
         break;
+        }
     }
     case WM_COMMAND: {
         switch (LOWORD(w)) {
@@ -2441,6 +1836,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
             break;
         }
+        case WM_VSCROLL: { if (g_book) { g_book->hide_tooltip(); } break; }
+        case WM_HSCROLL: { if (g_book) { g_book->hide_tooltip(); } break; }
         case IDM_INFO_FONTS:{
             
             g_activeFonts = g_container->m_canvas->getCurrentFonts();
@@ -2625,7 +2022,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         return 0;
     }
 
-
+    if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+        SetProcessDPIAware();
 
     g_hWnd = CreateWindowW(L"EPUBLite", L"EPUB Lite Reader",
         WS_OVERLAPPEDWINDOW,
@@ -2641,7 +2039,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     g_hwndTV = CreateWindowExW(
         0, WC_TREEVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_BORDER |
-        TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
+        TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_NOTOOLTIPS,
         0, 0, 200, 600,
         g_hWnd, (HMENU)100, g_hInst, nullptr);
     g_hView = CreateWindowExW(
@@ -2656,7 +2054,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
         0, 0, 300, 200,
         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
-    
 
     g_pSplashImg = LoadPngFromResource(g_hInst, IDB_PNG1);
 
@@ -2668,7 +2065,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
         MF_BYCOMMAND | (g_cfg.disableJS ? MF_CHECKED : MF_UNCHECKED));
     EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
-
+ 
     
     EnableClearType();
     // =====初始化隐藏=====
@@ -2689,15 +2086,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 }
 
 // ---------- 目录解析 ----------
-void EPUBBook::LoadToc()
-{
-    OutputDebugStringA(("toc size = " + std::to_string(ocf_pkg_.toc.size()) + "\n").c_str());
-    TreeView_DeleteAllItems(g_hwndTV);
 
-    auto tree = BuildTree(ocf_pkg_.toc);
-    for (const auto& root : tree)
-        InsertTreeNode(g_hwndTV, root, TVI_ROOT);
-}
 
 void EPUBBook::init_doc(std::string html) {
     /* 2. 加载 HTML */
@@ -2706,7 +2095,7 @@ void EPUBBook::init_doc(std::string html) {
     if (html.empty()) return;
     if (!g_cfg.disableCSS) { html = insert_global_css(html); }
     if (!g_cfg.disablePreprocessHTML) { html = PreprocessHTML(html); }
-    g_container->m_doc.reset();
+    g_container->clear();
     //g_container.reset();
 
     // 完整兜底 UA 样式表（litehtml 专用）
@@ -2717,7 +2106,7 @@ void EPUBBook::init_doc(std::string html) {
         g_bootstrap->bind_host_objects();
 
         g_bootstrap->run_pending_scripts(); // 立即执行
-        save_document_html(g_container->m_doc);
+        //save_document_html(g_container->m_doc);
     }
 
 
@@ -2728,7 +2117,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 {
     if (!href || !*href || !g_container->m_doc) return;
 
-
+    
     /* 1. 分离文件路径与锚点 */
     std::wstring whref(href);
     size_t pos = whref.find(L'#');
@@ -2737,8 +2126,8 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
         litehtml::wchar_to_utf8(whref.substr(pos + 1));
 
     if (g_last_html_path != file_path){
-        std::string html = g_book.load_html(file_path.c_str());
-        g_book.init_doc(html);
+        std::string html = g_book->load_html(file_path.c_str());
+        g_book->init_doc(html);
         g_states.needRelayout.store(true, std::memory_order_release);
         g_last_html_path = file_path;
         UpdateCache();
@@ -2762,8 +2151,8 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
     if (m_img_cache.contains(src)) return;
 
-    std::wstring wpath = g_zipIndex.find(a2w(src));
-    EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
+    std::wstring wpath = g_book->m_zipIndex.find(a2w(src));
+    MemFile mf = g_book->read_zip(wpath.c_str());
     if (mf.data.empty())
     {
         OutputDebugStringW((L"EPUB not found: " + wpath + L"\n").c_str());
@@ -2839,8 +2228,8 @@ void SimpleContainer::import_css(litehtml::string& text,
         return;
     }
     // url 可能是相对路径，baseurl 是当前 html 所在目录
-    std::wstring w_path = g_zipIndex.find(a2w(url));
-    EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
+    std::wstring w_path = g_book->m_zipIndex.find(a2w(url));
+    MemFile mf = g_book->read_zip(w_path.c_str());
     if (!mf.data.empty())
     {
         // 直接填到 text（litehtml 期望 UTF-8）
@@ -3066,8 +2455,8 @@ std::string PreprocessHTML(std::string html)
 
             // 2.1 读文件
             std::string src = m[2].str();
-            std::wstring w_path = g_zipIndex.find(a2w(src));
-            EPUBBook::MemFile mf = g_book.read_zip(w_path.c_str());
+            std::wstring w_path = g_book->m_zipIndex.find(a2w(src));
+            MemFile mf = g_book->read_zip(w_path.c_str());
             std::string code;
             if (!mf.data.empty())
                 code.assign(reinterpret_cast<const char*>(mf.data.data()),
@@ -3200,15 +2589,38 @@ D2DCanvas::D2DCanvas(int w, int h, HWND hwnd)
         nullptr);
 
     RECT rc; GetClientRect(m_hwnd, &rc);
+    float dpiX, dpiY;
+    m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);
+    float scale = dpiX / 96.0f;
+
+    D2D1_SIZE_U size = D2D1::SizeU(
+        static_cast<UINT>(rc.right * scale),
+        static_cast<UINT>(rc.bottom * scale));
+  
     ComPtr<ID2D1HwndRenderTarget> hwndRT;
     m_d2dFactory->CreateHwndRenderTarget(
-        D2D1::RenderTargetProperties(),
+        D2D1::RenderTargetProperties(/*
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            dpiX, dpiY*/),
         D2D1::HwndRenderTargetProperties(
-            m_hwnd,
-            D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top)),
+            m_hwnd, size),
         hwndRT.GetAddressOf());   // ← 关键：GetAddressOf()
     //ComPtr<ID2D1RenderTarget> g_d2dRT;
     hwndRT.As(&m_d2dRT);
+
+    //// 创建完 m_d2dRT 后立即加
+    //ComPtr<IDWriteFactory> dwf;
+    //DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+    //    __uuidof(IDWriteFactory),
+    //    reinterpret_cast<IUnknown**>(dwf.GetAddressOf()));
+    //ComPtr<IDWriteRenderingParams> rp;
+    //dwf->CreateCustomRenderingParams(1.0f, 1.0f, 1.0f,
+    //    DWRITE_PIXEL_GEOMETRY_RGB,
+    //    DWRITE_RENDERING_MODE_CLEARTYPE_GDI_CLASSIC,
+    //    &rp);
+    //m_d2dRT->SetTextRenderingParams(rp.Get());
+
     m_backend = std::make_unique<D2DBackend>(w, h, m_d2dRT);
 
 }
@@ -3218,7 +2630,7 @@ void D2DCanvas::present(HDC hdc, int x, int y)
     if (!m_d2dRT) return;
     
     m_backend->m_rt->GetBitmap(&m_bmp);
- 
+
     // 2. 开始绘制
     m_d2dRT->BeginDraw();
     //m_devCtx->Clear(D2D1::ColorF(D2D1::ColorF::White));
@@ -3317,42 +2729,14 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
         return;
     }
 
-    //layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
-    //    0,
-    //    0); // 0.8 ≈ 拉丁基线位置
 
-    //// ====== 插入 baseline 对齐 ======
-    //DWRITE_LINE_METRICS lineMetrics{};
-    //UINT32 lineCount = 0;
-    //layout->GetLineMetrics(&lineMetrics, 1, &lineCount);
-    //float baseline = lineMetrics.baseline;   // 相对于 layout 原点的 baseline 距离
-
-    // 4. 直接绘制：litehtml 已把 pos 转为相对于当前片段左上角
     rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
         static_cast<float>(pos.y)),
         layout.Get(),
         brush.Get());
 
 
-    //std::vector<DWRITE_CLUSTER_METRICS> cms;
-    //UINT32 actual = 0;
-    //layout->GetClusterMetrics(nullptr, 0, &actual);   // 先拿数量
-    //if (actual) {
-    //    cms.resize(actual);
-    //    layout->GetClusterMetrics(cms.data(), actual, &actual);
-    //}
 
-    //// 打印
-    //for (size_t i = 0; i < cms.size(); ++i) {
-    //    OutputDebugStringW(std::format(L"[{}] width={:.3f}\n",
-    //        i, cms[i].width).c_str());
-    //}
-    //DWRITE_TEXT_METRICS tm;
-    //layout->GetMetrics(&tm);
-    //for (wchar_t ch : wtxt) {
-    //    OutputDebugStringW(std::format(L"U+{:04X} ", (unsigned)ch).c_str());
-    //}
-    //OutputDebugStringW(std::format(L"text=\"{}\", width={}\n", wtxt.data(), tm.width).c_str());
 
 
 }
@@ -3491,6 +2875,8 @@ D2DBackend::split_font_list(const std::string& src) {
     }
     return out;
 };
+
+
 litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     int size,
     int weight,
@@ -3509,7 +2895,6 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     /*----------------------------------------------------------
       2. 逐个尝试创建 IDWriteTextFormat
     ----------------------------------------------------------*/
-
 
 
     ComPtr<IDWriteTextFormat> fmt;
@@ -3534,7 +2919,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                     L"en-us",
                     &fmt)))
             {
-                m_actualFamily = f;          // 保存命中的家族名
+                //m_actualFamily = f;          // 保存命中的家族名
                 //OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
                 break;
             }
@@ -3555,7 +2940,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                 L"en-us",
                 &fmt)))
         {
-            m_actualFamily = f;              // 保存命中的家族名
+            //m_actualFamily = f;              // 保存命中的家族名
             //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
             break;
         }
@@ -3570,7 +2955,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
         OutputDebugStringW(L"\n");
 
         m_dwrite->CreateTextFormat(
-            L"Segoe UI", nullptr,
+            a2w(g_cfg.default_font_name).c_str(), nullptr,
             static_cast<DWRITE_FONT_WEIGHT>(weight),
             italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
             : DWRITE_FONT_STYLE_NORMAL,
@@ -3578,6 +2963,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
             static_cast<float>(size),
             L"en-us",
             &fmt); 
+        
     }
 
     if (!fmt) {
@@ -3589,19 +2975,81 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
  
     ComPtr<IDWriteFontFamily>     family;
     ComPtr<IDWriteFont>           dwFont;
+    
+   
+    UINT32 len = fmt->GetFontFamilyNameLength();
+
+  
+    std::wstring currentFamily;
+    WCHAR buf[512];
+    //UINT32 len = fmt->GetFontFamilyNameLength();   // 可见字符数
+    if (len + 1 < std::size(buf))
+    {
+        fmt->GetFontFamilyName(buf, len + 1);      // buf[len] == '\0'
+        currentFamily.assign(buf, len);        // 19 字符 + 1 NUL = 20
+    }
 
     /* 根据命中的来源选择集合 */
     ComPtr<IDWriteFontCollection> targetCollection;
-    if (!m_actualFamily.empty())
+    if (!currentFamily.empty())
     {
+        std::wstring cleanName(currentFamily.c_str());   // 只保留可见字符
+        cleanName.erase(std::find(cleanName.begin(), cleanName.end(), L'\0'), cleanName.end());
+
+        // 2. 自定义查找函数
+        auto FindFamilyIndex = [](IDWriteFontCollection* coll,
+            const std::wstring& name,
+            UINT32& index,
+            BOOL& exists) -> bool
+            {
+                exists = FALSE;
+                if (!coll) return false;
+
+                UINT32 count = coll->GetFontFamilyCount();;
+
+                for (UINT32 i = 0; i < count; ++i)
+                {
+                    Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
+                    if (FAILED(coll->GetFontFamily(i, &fam)))
+                        continue;
+
+                    Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+                    if (FAILED(fam->GetFamilyNames(&names)))
+                        continue;
+
+                    UINT32 nameLen = 0;
+                    if (FAILED(names->GetStringLength(0, &nameLen)))
+                        continue;
+
+                    std::wstring buf(nameLen + 1, L'\0');
+                    if (FAILED(names->GetString(0, buf.data(), nameLen + 1)))
+                        continue;
+                    buf.resize(nameLen);            // 去掉末尾 NUL
+
+                    if (_wcsicmp(buf.c_str(), name.c_str()) == 0)
+                    {
+                        index = i;
+                        exists = TRUE;
+                        return true;
+                    }
+                }
+                return true;   // 遍历完但没找到
+            };
         UINT32 index = 0;
         BOOL   exists = FALSE;
-        if (m_privateFonts && m_privateFonts->FindFamilyName(m_actualFamily.c_str(), &index, &exists) && exists)
-            targetCollection = m_privateFonts;
-        else
-            targetCollection = m_sysFontColl;
 
-        targetCollection->FindFamilyName(m_actualFamily.c_str(), &index, &exists);
+        if (m_privateFonts &&
+            FindFamilyIndex(m_privateFonts.Get(), cleanName, index, exists) && exists)
+        {
+            targetCollection = m_privateFonts;
+        }
+        else
+        {   
+            FindFamilyIndex(m_sysFontColl.Get(), cleanName, index, exists);   // 只在系统集合里再查一次
+            targetCollection = m_sysFontColl;
+        }
+
+       
 
         if (exists)
         {
@@ -3620,10 +3068,16 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                 float dip = static_cast<float>(size) / fm0.designUnitsPerEm;
                 fm->ascent = static_cast<int>(fm0.ascent * dip + 0.5f);
                 fm->descent = static_cast<int>(fm0.descent * dip + 0.5f);
+
                 fm->height = static_cast<int>((fm0.ascent + fm0.descent + fm0.lineGap)
                     * dip * g_cfg.line_height_multiplier + 0.5f);
                 fm->x_height = static_cast<int>(fm0.xHeight * dip + 0.5f);
-                m_baselineY = (fm->height - (fm->ascent + fm->descent)) * 0.5f + fm->ascent;
+      
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
+                    currentFamily.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
+                OutputDebugStringA(buf);
             
         }
     }
@@ -3631,7 +3085,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
       6. 返回句柄
     ----------------------------------------------------------*/
     FontPair* fp = new FontPair{ fmt, nullptr, size };
-    SetStatus(1, m_actualFamily.c_str());
+    SetStatus(1, currentFamily.c_str());
     return reinterpret_cast<litehtml::uint_ptr>(fp);
 }
 
@@ -4343,7 +3797,7 @@ collect_epub_fonts()
     };
     std::unordered_set<std::wstring> used_names;
 
-    for (const auto& item : g_book.ocf_pkg_.manifest)
+    for (const auto& item : g_book->ocf_pkg_.manifest)
     {
         std::wstring href = item.href;
         std::wstring ext;               // 最终扩展名，带前导点
@@ -4360,7 +3814,7 @@ collect_epub_fonts()
         if (!font_exts.count(ext)) continue;
 
         std::wstring href_key = url_decode(item.href);
-        std::wstring wpath = g_zipIndex.find(href_key);
+        std::wstring wpath = g_book->m_zipIndex.find(href_key);
         if (wpath.empty()) continue;
 
         // 生成唯一文件名（不再用 index 参数）
@@ -4377,7 +3831,7 @@ collect_epub_fonts()
 
         try
         {
-            EPUBBook::MemFile mf = g_book.read_zip(wpath.c_str());
+            MemFile mf = g_book->read_zip(wpath.c_str());
             if (!mf.data.empty())
                 fonts.emplace_back(std::move(unique), std::move(mf.data));
         }
@@ -4668,6 +4122,16 @@ HRESULT MemoryFontLoader::CreateInMemoryFontFile(
 AppBootstrap::AppBootstrap() {
     //make_tooltip_backend();
     if (!g_cfg.disableJS) { enableJS(); }
+    if (!g_container) {
+        g_container = std::make_shared<SimpleContainer>(g_hView);
+    }
+    if (!g_tooltip_container) {
+        g_tooltip_container = std::make_shared<SimpleContainer>(g_hTooltip);
+    }
+    if (!g_book)
+    {
+        g_book = std::make_unique<EPUBBook>();   // 保险：用新实例
+    }
 }
 
 AppBootstrap::~AppBootstrap() {
@@ -4712,7 +4176,7 @@ void D2DCanvas::resize(int width, int height)
 
     m_w = width;
     m_h = height;
-    m_backend->resize(width, height);
+    m_backend->resize(m_w, m_h);
     if (m_d2dRT) {
         D2D1_SIZE_U size{ m_w, m_h };
         m_d2dRT->Resize(size);   // HwndRenderTarget 专用
@@ -5072,7 +4536,7 @@ void EPUBBook::show_tooltip(const std::string html, int x, int y)
     if (!g_hTooltip)
     {
 
-        SetWindowLongPtr(g_hTooltip, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        //SetWindowLongPtr(g_hTooltip, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
    
 
     }
@@ -5083,7 +4547,7 @@ void EPUBBook::show_tooltip(const std::string html, int x, int y)
 
     g_tooltip_container->m_doc = litehtml::document::createFromString(
         html.c_str(), g_tooltip_container.get(), nullptr, nullptr);
-    int width = 300;
+    int width = g_cfg.tooltip_width;
     g_tooltip_container->m_doc->render(width);
     // 3. 计算大小：让 litehtml 自己排版
 
@@ -5093,11 +4557,14 @@ void EPUBBook::show_tooltip(const std::string html, int x, int y)
     int height = g_tooltip_container->m_doc->height();
     int tip_x = pt.x - width/2;
     int tip_y = pt.y - height - 20;
+    if (tip_y < 0) { tip_y = pt.y  + 20; }
     //OutputDebugStringA(("[render size]" + std::to_string(width) + " " + std::to_string(height) + "\n").c_str());
     // ④ 最终定位
     SetWindowPos(g_hTooltip, HWND_TOPMOST,
-        tip_x, tip_y, width, height,
+        tip_x, tip_y, width+2, height+2,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+
     g_tooltip_container->m_canvas->resize(width, height);
     g_tooltip_container->m_canvas->BeginDraw();
     RECT rc;
@@ -5116,7 +4583,11 @@ void EPUBBook::hide_tooltip()
     if (g_hTooltip)
     {
         ShowWindow(g_hTooltip, SW_HIDE);
-        g_tooltip_container->m_doc.reset();
+        if(g_tooltip_container && g_tooltip_container->m_doc)
+        {
+            g_tooltip_container->m_doc.reset();
+        }
+        
     }
 }
 
@@ -5247,23 +4718,24 @@ void Paginator::load(litehtml::document* doc, int w, int h)
     m_h = h;
     g_maxScroll = 0;
     if (!m_doc) return;
-    /* 1) 需要排版才排 */
-    if (g_states.needRelayout.exchange(false)) {
-        m_doc->render(m_w, litehtml::render_all);
-    }
+
     g_maxScroll = m_doc->height();
 }
 void Paginator::render(ICanvas* canvas, int scrollY)
 {
     if (!canvas || !m_doc) return;
 
-
-
+    int render_width = g_cfg.document_width;
+    /* 1) 需要排版才排 */
+    if (g_states.needRelayout.exchange(false)) {
+        g_container->m_doc->render(render_width, litehtml::render_all);
+    }
+    g_center_offset = std::max((m_w - render_width) * 0.5, 0.0);
     canvas->BeginDraw();
     // 让 litehtml 画在左上角，clip 足够大
-    litehtml::position clip(0, 0, m_w, m_h);
+    litehtml::position clip(g_center_offset, 0, m_w, m_h);
     m_doc->draw(canvas->getContext(),
-        0, -scrollY, &clip);   // scrollY 先给 0
+        g_center_offset, -scrollY, &clip);   // scrollY 先给 0
     canvas->EndDraw();
 }
 void Paginator::clear() {
@@ -5350,7 +4822,7 @@ void EPUBBook::parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
         np.label = txt ? extract_text(txt) : L"";
         np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
         if (!np.href.empty())
-            np.href = g_zipIndex.find(np.href);
+            np.href = m_zipIndex.find(np.href);
         np.order = level;               // 层级深度
         out.emplace_back(std::move(np));
 
@@ -5373,7 +4845,7 @@ void EPUBBook::parse_nav_list(tinyxml2::XMLElement* ol, int level,
         np.label = extract_text(a);
         np.href = a2w(a->Attribute("href") ? a->Attribute("href") : "");
         if (!np.href.empty())
-            np.href = g_zipIndex.find(np.href);
+            np.href = m_zipIndex.find(np.href);
         np.order = level;               // 层级深度
         out.emplace_back(std::move(np));
 
@@ -5407,22 +4879,7 @@ std::wstring EPUBBook::extract_text(const tinyxml2::XMLElement* a)
     return a2w(plain);   // "I: The Meadow"
 }
 
-HTREEITEM EPUBBook::InsertTreeNode(HWND tv, const TreeNode& node, HTREEITEM hParent)
-{
-    TVINSERTSTRUCTW tvi{};
-    tvi.hParent = hParent;
-    tvi.hInsertAfter = TVI_LAST;
-    tvi.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
-    tvi.item.pszText = const_cast<LPWSTR>(node.data->label.c_str());
-    tvi.item.lParam = reinterpret_cast<LPARAM>(_wcsdup(node.data->href.c_str()));
-    tvi.item.cChildren = node.children.empty() ? 0 : 1;
-    HTREEITEM hItem = TreeView_InsertItem(tv, &tvi);
 
-    for (const auto& child : node.children)
-        InsertTreeNode(tv, child, hItem);
-
-    return hItem;
-}
 
 EPUBBook::~EPUBBook() {
     mz_zip_reader_end(&zip);
@@ -5460,7 +4917,7 @@ GdiBackend::~GdiBackend() {
     }
 }
 
-SimpleContainer::SimpleContainer(HWND hwnd = nullptr)
+SimpleContainer::SimpleContainer(HWND hwnd)
     : m_hwnd(hwnd) {
     if (hwnd){ makeBackend(m_hwnd); }
 }
@@ -5475,4 +4932,93 @@ void SimpleContainer::resize(int w, int h)
         m_canvas->resize(w, h);
     }
 
+}
+
+
+ZipIndexW::ZipIndexW(mz_zip_archive& zip)
+{
+    build(zip);
+} 
+
+std::wstring ZipIndexW::find(std::wstring href) const {
+    // 1. 分离锚点
+    size_t pos = href.find(L'#');
+    std::wstring pure = pos == std::wstring::npos ? href : href.substr(0, pos);
+    std::wstring anchor = pos == std::wstring::npos ? L"" : href.substr(pos);
+
+    // 2. 查索引
+    std::wstring key = normalize_key(pure);
+    auto it = map_.find(key);
+    std::wstring result = it == map_.end() ? std::wstring{} : it->second;
+
+    // 3. 把锚点拼回去
+    return result.empty() ? result : result + anchor;
+}
+
+
+std::wstring ZipIndexW::url_decode(const std::wstring& in)
+{
+    wchar_t out[INTERNET_MAX_URL_LENGTH];
+    DWORD len = INTERNET_MAX_URL_LENGTH;
+    if (SUCCEEDED(UrlCanonicalizeW(in.c_str(), out, &len, URL_UNESCAPE)))
+        return std::wstring(out, len);
+    return in;
+}
+
+std::wstring ZipIndexW::normalize_key(std::wstring href)
+ {
+     // 1. 去掉 ? 和 #
+     auto pure = href.substr(0, href.find_first_of(L"?#"));
+     // 2. URL 解码
+     pure = url_decode(pure);
+     // 3. 取文件名并转小写
+     auto filename = fs::path(pure).filename().wstring();
+     std::transform(filename.begin(), filename.end(), filename.begin(),
+         [](wchar_t c) { return towlower(static_cast<wint_t>(c)); });
+     return filename;
+ }
+
+void ZipIndexW::build(mz_zip_archive& zip) {
+    mz_uint idx = 0;
+    mz_zip_archive_file_stat st{};
+    while (mz_zip_reader_file_stat(&zip, idx++, &st)) {
+        // miniz 返回 UTF-8，转成 wstring
+        std::wstring wpath = a2w(st.m_filename);
+        std::wstring key = normalize_key(wpath);
+        map_.emplace(std::move(key), std::move(wpath));
+    }
+}
+
+void SimpleContainer::clear()
+{
+    m_img_cache.clear();
+
+    m_anchor_map.clear();
+    m_doc.reset();
+}
+
+int SimpleContainer::get_default_font_size() const
+{ 
+    return g_cfg.default_font_size; 
+}
+const char* SimpleContainer::get_default_font_name() const
+{ 
+    return g_cfg.default_font_name.c_str(); 
+}
+
+void EPUBBook::clear()
+{
+    SendMessage(g_hwndTV, WM_SETREDRAW, FALSE, 0);
+    FreeTreeData(g_hwndTV);              // ✅ 释放所有 TVData*
+    TreeView_DeleteAllItems(g_hwndTV);
+    SendMessage(g_hwndTV, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(g_hwndTV, nullptr, nullptr,
+        RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
+
+    zip = {};
+    cache.clear();
+    m_nodes.clear();
+    m_nodes.shrink_to_fit();
+    m_roots.clear();
+    ocf_pkg_ = {};
 }
