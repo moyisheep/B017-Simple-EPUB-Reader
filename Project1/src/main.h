@@ -89,7 +89,11 @@ using namespace Gdiplus;
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "3rdParty/stb_truetype.h"
-
+#include <atomic>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 using Microsoft::WRL::ComPtr;
 

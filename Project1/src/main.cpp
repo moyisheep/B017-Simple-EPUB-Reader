@@ -1366,6 +1366,36 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    case WM_LBUTTONUP:
+    {
+        int x = GET_X_LPARAM(lp);
+        int y = GET_Y_LPARAM(lp);
+        g_book->hide_tooltip();
+        if (!g_container->m_doc) { return 0; }
+
+        int doc_x = x - g_center_offset;
+        int doc_y = y + g_scrollY;
+        litehtml::position::vector redraw_boxes;
+        g_container->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxes);
+        //auto root_render = g_container->m_doc->root_render();
+        //auto hit = root_render->get_element_by_point(doc_x, doc_y, 0, 0);
+
+        //auto link = find_link_in_chain(hit);
+
+        //std::string html;
+        //if (link)
+        //{
+        //    const char* href_raw = link->get_attr("href");
+        //    if (!href_raw) {
+        //        return 0;
+        //    }
+        //    std::wstring href = g_book->m_zipIndex.find(a2w(href_raw));
+
+        //    g_book->OnTreeSelChanged(href.c_str());
+
+        //}
+
+    }
     case WM_MOUSEMOVE:
     {
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hWnd, 0 };
@@ -1377,6 +1407,8 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         int doc_y = y + g_scrollY;
 
         if (!g_container->m_doc) break;
+        litehtml::position::vector redraw_boxes;
+        g_container->m_doc->on_mouse_over(doc_x, doc_y, 0, 0, redraw_boxes);
 
         auto hit = g_container->m_doc->root_render()->get_element_by_point(doc_x, doc_y, 0, 0);
         auto link = find_link_in_chain(hit);
@@ -1505,60 +1537,6 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
         InvalidateRect(hWnd, nullptr, FALSE);
-        return 0;
-    }
-    case WM_LBUTTONUP:{
-        int x = GET_X_LPARAM(lp);
-        int y = GET_Y_LPARAM(lp);
-        g_book->hide_tooltip();
-        if (!g_container->m_doc) { return 0; }
-       
-        int doc_x = x - g_center_offset;
-        int doc_y = y + g_scrollY;
-        auto root_render = g_container->m_doc->root_render();
-        auto hit = root_render->get_element_by_point(doc_x, doc_y, 0, 0);
-
-        auto link = find_link_in_chain(hit);
-
-        std::string html;
-        if (link)
-        {
-            const char* href_raw = link->get_attr("href");
-            if (!href_raw) {
-                return 0;
-            }
-            std::wstring href = g_book->m_zipIndex.find(a2w(href_raw));
-            
-            g_book->OnTreeSelChanged(href.c_str());
-            
-        }
-
-
-        //OutputDebugStringA(std::to_string(doc_x).c_str());
-        //OutputDebugStringA(" ");
-        //OutputDebugStringA(std::to_string(doc_y).c_str());
-        //OutputDebugStringA(" ");
-        //auto root_render = g_container->m_doc->root_render();
-        //auto element = root_render->get_element_by_point(doc_x, doc_y, 0, 0);
-        //litehtml::position::vector redraw_boxed;
-        //bool  result = g_container->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxed);
-        //if (result) { OutputDebugStringA("on_lbutton_up failed"); }
-        //if (element) {
-        //    std::string txt;
-        //    auto tagname = element->get_tagName();
-        //    OutputDebugStringA("[tag name] ");
-        //    OutputDebugStringA(tagname);
-        //    OutputDebugStringA(" ");
-        //    auto ele = element->select_one(tagname);
-        //    if (!ele) {
-        //        OutputDebugStringA("\n");
-        //        return 0;
-        //    }
-        //    OutputDebugStringA("[data] ");
-        //    element->get_text(txt);
-        //    OutputDebugStringA(txt.c_str());
-        //    OutputDebugStringA("\n");
-        //}
         return 0;
     }
     case WM_PAINT:
@@ -2317,18 +2295,17 @@ void SimpleContainer::on_anchor_click(const char* url,
     // 内部 #id
     if (url[0] == '#')
     {
-        auto it = m_anchor_map.find(url + 1);
-        if (it != m_anchor_map.end())
-        {
-            // 这里只是示例：把元素 y 坐标发出去，真正滚动自己实现
-            int y = it->second->get_placement().y;
-            SendMessage(g_hView, WM_VSCROLL, MAKEWPARAM(SB_THUMBPOSITION, y), 0);
-        }
+        
+        std::wstring cssSel = a2w(url);   // 转成宽字符
+        // WM_APP + 3 约定为“跳转到锚点选择器”
+        PostMessageW(g_hView, WM_EPUB_ANCHOR,
+            reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
         return;
     }
+    g_book->OnTreeSelChanged(a2w(url).c_str());
 
     // 外部链接：交给宿主
-    ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
+    //ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 // ---------- 6. 鼠标形状 -------------------------------------------------
@@ -5398,3 +5375,4 @@ void GdiBackend::clear() {}
 void FreetypeCanvas::clear() {}
 
 void FreetypeBackend::clear() {}
+
