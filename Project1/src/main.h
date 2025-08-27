@@ -86,6 +86,11 @@ using namespace Gdiplus;
 #ifndef HR
 #define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
 #endif
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "3rdParty/stb_truetype.h"
+
+
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -97,7 +102,21 @@ struct ImageFrame
     uint32_t stride = 0;          // 每行字节数
     std::vector<uint8_t> rgba;     // 连续像素，8-bit * 4
 };
-
+struct FontKey {
+    std::wstring family;   // CSS 中声明的名字
+    int          weight;   // 400 / 700
+    bool         italic;   // true = italic
+    bool operator==(const FontKey& o) const noexcept {
+        return family == o.family && weight == o.weight && italic == o.italic;
+    }
+};
+namespace std {
+    template<> struct hash<FontKey> {
+        size_t operator()(const FontKey& k) const noexcept {
+            return hash<wstring>()(k.family) ^ (hash<int>()(k.weight) << 1) ^ (hash<bool>()(k.italic) << 2);
+        }
+    };
+}
 // -------------- 运行时策略 -----------------
 enum class Renderer { GDI, D2D, FreeType };
 // -------------- 抽象接口 -----------------
@@ -113,9 +132,10 @@ public:
     virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) = 0;
     virtual int pt_to_px(int pt) const = 0;
     virtual int text_width(const char* text, litehtml::uint_ptr hFont) = 0;
-    virtual void load_all_fonts(void) = 0;
+    virtual void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts) = 0;
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
+    virtual void clear() = 0;
 };
 
 class AppBootstrap {
@@ -155,11 +175,11 @@ public:
     void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
     int pt_to_px(int pt) const override;
     int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_all_fonts(void);
+    void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void resize(int width, int height) override;
-    HBITMAP get_bitmap();
     ~GdiBackend();
     std::set<std::wstring> getCurrentFonts() override;
+    void clear() override;
 private:
     HDC m_hdc;
     HBITMAP m_memDC;
@@ -190,19 +210,19 @@ public:
     void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
     int pt_to_px(int pt) const override;
     int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_all_fonts(void);
+    void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void unload_fonts(void);
     void resize(int width, int height) override;
     std::optional<std::wstring> mapDynamic(const std::wstring& key);
     std::wstring resolveFace(const std::wstring& raw);
     ComPtr<ID2D1BitmapRenderTarget> m_rt;
     std::set<std::wstring> getCurrentFonts() override;
+    void clear() override;
 private:
     // 自动 AddRef/Release
     ComPtr<IDWriteFactory>    m_dwrite;
     Microsoft::WRL::ComPtr<IDWriteFontCollection> m_privateFonts;  // 新增
     std::vector<std::wstring> m_tempFontFiles;
-    std::wstring m_actualFamily;   // 保存命中的字体家族名m_actualFamily
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
     ComPtr<ID2D1RenderTarget> m_devCtx;
     static std::wstring toLower(std::wstring s);
@@ -227,9 +247,10 @@ public:
     void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
     int pt_to_px(int pt) const override;
     int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_all_fonts(void);
+    void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
+    void clear() override;
     ~FreetypeBackend();
 private:
     int m_w, m_h, m_dpi;
@@ -281,6 +302,7 @@ public:
     virtual void EndDraw() = 0;
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
+    virtual void clear() = 0;
     /* 工厂：根据当前策略创建画布 */
     //static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
 };
@@ -318,6 +340,7 @@ public:
     void EndDraw() override;
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
+    void clear() override;
 
 private:
     int  m_w, m_h;
@@ -338,6 +361,7 @@ public:
     void EndDraw() override;
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
+    void clear() override;
 private:
     int  m_w, m_h;
     ComPtr<ID2D1Bitmap> m_bmp;
@@ -361,6 +385,7 @@ public:
     void EndDraw() override;
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
+    void clear() override;
 private:
     int  m_w, m_h, m_dpi;
     std::vector<uint8_t>        m_pixels;   // 4*w*h
@@ -502,6 +527,10 @@ class EPUBBook {
 
         HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
         std::wstring           m_tooltip_url;          // 缓存当前 url
+        std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
+        std::wstring get_font_family_name(const std::vector<uint8_t>& data);
+        void build_epub_font_index(const OCFPackage& pkg, EPUBBook* book);
+        std::unordered_map<FontKey, std::wstring> m_fontBin;
 
         EPUBBook() noexcept {}
         ~EPUBBook();
@@ -520,7 +549,7 @@ struct AppSettings {
     bool disableJS = true;   // 默认禁用 JS
     bool disablePreprocessHTML = false;
     Renderer fontRenderer = Renderer::D2D;
-    std::string default_font_name = "Segoe UI";
+    std::string default_font_name = "Cambria";
     int default_font_size = 16;
     float line_height_multiplier = 1.6;
     int tooltip_width = 350;
@@ -554,7 +583,7 @@ struct AppStates {
         cancelToken = std::make_shared<std::atomic_bool>(false);
     }
 };
-static const std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
+static  std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
     /* 英文字体 */
     {L"charis",               L"Charis SIL"},
     {L"charis sil",           L"Charis SIL"},
@@ -581,7 +610,9 @@ static const std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
     {L"trebuchet ms",          L"Trebuchet MS"},
     {L"franklin gothic",      L"Franklin Gothic Medium"},
     {L"tradegothicltstd",        L"Trade Gothic LT Std"},
-
+    {L"bodoniegyptian-regular", L"BodoniEgyptian"},
+    {L"nobel-regular",           L"Nobel"},
+    {L"nsannotations500-mono" , L"NSAnnotations500 Monospace500"},
     /* 思源 / 开源无衬线 */
     {L"source sans",           L"Source Sans Pro"},
     {L"source sans pro",       L"Source Sans Pro"},
@@ -729,3 +760,7 @@ struct TVData {
     const std::vector<TreeNode>* all;
     bool inserted = false;   // 新增
 };
+
+// 全局索引 ----------------------------------------------------------
+
+

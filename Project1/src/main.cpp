@@ -6,15 +6,13 @@ HWND      g_hWnd;
 HWND g_hStatus = nullptr;   // 状态栏句柄
 HWND g_hView = nullptr;
 HWND g_hTooltip = nullptr;
-HDC        g_hMemDC = nullptr;
-FT_Library g_ftLib = nullptr;
-ComPtr<ID2D1Factory1> g_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
-ComPtr<ID2D1HwndRenderTarget> g_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
+
 
 
 enum class StatusBar{INFO = 0, FONT = 1};
 static int g_scrollY = 0;   // 当前像素偏移
 static int g_maxScroll = 0;   // 总高度 - 客户区高度
+
 std::wstring g_currentHtmlDir = L"";
 std::wstring g_currentHtmlPath = L"";
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
@@ -32,19 +30,19 @@ AppSettings g_cfg;
 std::wstring g_last_html_path;
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
 static std::vector<std::wstring> g_tempFontFiles;
-static std::unordered_map<std::wstring, std::wstring> g_realFontNames;
 std::string PreprocessHTML(std::string html);
 void UpdateCache(void);
-struct GdiplusDeleter { void operator()(Gdiplus::Image* p) const { delete p; } };
-using ImagePtr = std::unique_ptr<Gdiplus::Image, GdiplusDeleter>;
 static  std::string g_globalCSS = "";
 static fs::file_time_type g_lastTime;
 std::set<std::wstring> g_activeFonts;
 
 std::unique_ptr<AppBootstrap> g_bootstrap;
-std::shared_ptr<IRenderBackend> g_backend = nullptr;
-std::unordered_map<std::string, ImageFrame> g_img_cache;
+
+
 int g_center_offset = 0;
+
+
+// 别名表：CSS 名 -> 真实字体名
 static std::unordered_map<std::wstring, std::set<std::wstring>>  g_fontAliasDynamic = {
     {L"serif", g_cfg.font_serif},
     {L"sans-serif", g_cfg.font_sans_serif},
@@ -904,7 +902,10 @@ void EPUBBook::LoadToc()
 
     // ✅ 释放旧节点数据
 
-    TreeView_DeleteAllItems(g_hwndTV);
+    HTREEITEM hRoot = TreeView_GetRoot(g_hwndTV);
+    TreeView_SelectItem(g_hwndTV, nullptr);   // 先取消选中
+    FreeTreeData(g_hwndTV);                   // 释放 TVData*
+    TreeView_DeleteAllItems(g_hwndTV);          // 此时不会再触发 TVN_SELCHANGED
 
     BuildTree(ocf_pkg_.toc, m_nodes, m_roots);
     for (size_t r : m_roots)
@@ -1361,12 +1362,14 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (g_container && g_container->m_canvas) {
             g_states.needRelayout.store(true);
-            g_container->resize(LOWORD(lp), HIWORD(lp));
+            g_container->resize(LOWORD(lp), HIWORD(lp) );
         }
         return 0;
     }
     case WM_MOUSEMOVE:
     {
+        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hWnd, 0 };
+        TrackMouseEvent(&tme);   // 只订阅一次即可，系统会在离开时发 WM_MOUSELEAVE
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
 
@@ -1416,7 +1419,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_container->m_doc) { return 0; }
         wchar_t* sel = reinterpret_cast<wchar_t*>(wp);
         if (sel) {
-            std::string cssSel = w2a(sel);
+            std::string cssSel = "[id=\"" + w2a(sel) + "\"]";
             if (auto el = g_container->m_doc->root()->select_one(cssSel.c_str())) {
                 g_scrollY = el->get_placement().y;
             }
@@ -1446,9 +1449,24 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         // 重新排版+缓存
         UpdateCache();
         InvalidateRect(hWnd, nullptr, FALSE);
+        UpdateWindow(hWnd);
         return 0;
     }
-
+    case WM_MOUSELEAVE: 
+    {
+        g_book->hide_tooltip();
+        return 0;
+    }
+    case WM_MOUSEACTIVATE:
+    {
+        g_book->hide_tooltip();
+        return 0;
+    }
+    case WM_NCMOUSEMOVE:
+    {
+        g_book->hide_tooltip();
+        return 0;
+    }
     case WM_VSCROLL:
     {
         RECT rc;
@@ -1492,35 +1510,55 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:{
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
+        g_book->hide_tooltip();
         if (!g_container->m_doc) { return 0; }
        
-        int doc_x = x;
+        int doc_x = x - g_center_offset;
         int doc_y = y + g_scrollY;
-        OutputDebugStringA(std::to_string(doc_x).c_str());
-        OutputDebugStringA(" ");
-        OutputDebugStringA(std::to_string(doc_y).c_str());
-        OutputDebugStringA(" ");
         auto root_render = g_container->m_doc->root_render();
-        auto element = root_render->get_element_by_point(doc_x, doc_y, 0, 0);
-        litehtml::position::vector redraw_boxed;
-        bool  result = g_container->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxed);
-        if (result) { OutputDebugStringA("on_lbutton_up failed"); }
-        if (element) {
-            std::string txt;
-            auto tagname = element->get_tagName();
-            OutputDebugStringA("[tag name] ");
-            OutputDebugStringA(tagname);
-            OutputDebugStringA(" ");
-            auto ele = element->select_one(tagname);
-            if (!ele) {
-                OutputDebugStringA("\n");
+        auto hit = root_render->get_element_by_point(doc_x, doc_y, 0, 0);
+
+        auto link = find_link_in_chain(hit);
+
+        std::string html;
+        if (link)
+        {
+            const char* href_raw = link->get_attr("href");
+            if (!href_raw) {
                 return 0;
             }
-            OutputDebugStringA("[data] ");
-            element->get_text(txt);
-            OutputDebugStringA(txt.c_str());
-            OutputDebugStringA("\n");
+            std::wstring href = g_book->m_zipIndex.find(a2w(href_raw));
+            
+            g_book->OnTreeSelChanged(href.c_str());
+            
         }
+
+
+        //OutputDebugStringA(std::to_string(doc_x).c_str());
+        //OutputDebugStringA(" ");
+        //OutputDebugStringA(std::to_string(doc_y).c_str());
+        //OutputDebugStringA(" ");
+        //auto root_render = g_container->m_doc->root_render();
+        //auto element = root_render->get_element_by_point(doc_x, doc_y, 0, 0);
+        //litehtml::position::vector redraw_boxed;
+        //bool  result = g_container->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxed);
+        //if (result) { OutputDebugStringA("on_lbutton_up failed"); }
+        //if (element) {
+        //    std::string txt;
+        //    auto tagname = element->get_tagName();
+        //    OutputDebugStringA("[tag name] ");
+        //    OutputDebugStringA(tagname);
+        //    OutputDebugStringA(" ");
+        //    auto ele = element->select_one(tagname);
+        //    if (!ele) {
+        //        OutputDebugStringA("\n");
+        //        return 0;
+        //    }
+        //    OutputDebugStringA("[data] ");
+        //    element->get_text(txt);
+        //    OutputDebugStringA(txt.c_str());
+        //    OutputDebugStringA("\n");
+        //}
         return 0;
     }
     case WM_PAINT:
@@ -1556,7 +1594,7 @@ void UpdateCache()
     if (!g_container || !g_container->m_doc) return;
 
     RECT rc; GetClientRect(g_hView, &rc);
-    int w = rc.right, h = rc.bottom;
+    int w = rc.right, h = rc.bottom ;
     if (w <= 0 || h <= 0) return;
 
     g_pg.load(g_container->m_doc.get(), w, h);
@@ -1585,6 +1623,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         g_pg.clear();              // 如果你 Paginator 有 clear() 就调
         g_container->clear();
+        g_container->m_canvas->clear();
         g_book->clear();
         InvalidateRect(g_hView, nullptr, true);
         InvalidateRect(g_hwndTV, nullptr, true);
@@ -1749,11 +1788,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             free((void*)tvi.lParam);
             h = TreeView_GetNextSibling(g_hwndTV, h);
         }
-        //if (g_d2dRT) { g_d2dRT->Release();   g_d2dRT = nullptr; }
-        //if (g_d2dFactory) { g_d2dFactory->Release(); g_d2dFactory = nullptr; }
-        if (g_hMemDC) { DeleteDC(g_hMemDC);  g_hMemDC = nullptr; }
-        if (g_ftLib) { FT_Done_FreeType(g_ftLib); g_ftLib = nullptr; }
-        if (g_book) { g_book->hide_tooltip(); }
+       if (g_book) { g_book->hide_tooltip(); }
         PostQuitMessage(0);
         return 0;
     }
@@ -1784,7 +1819,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (TreeView_GetItem(g_hwndTV, &tvi))
             {
                 auto* data = reinterpret_cast<const TVData*>(tvi.lParam);
-                if (data && data->node && !data->node->nav->href.empty())
+                if (data && data->node && data->node->nav && !data->node->nav->href.empty())
                 {
                     g_book->OnTreeSelChanged(data->node->nav->href.c_str());
                 }
@@ -2137,7 +2172,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     /* 3. 跳转到锚点 */
     if (!id.empty())
     {
-        std::wstring cssSel = L"#" + a2w(id);   // 转成宽字符
+        std::wstring cssSel = a2w(id);   // 转成宽字符
         // WM_APP + 3 约定为“跳转到锚点选择器”
         PostMessageW(g_hView, WM_EPUB_ANCHOR,
             reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
@@ -2871,7 +2906,8 @@ D2DBackend::split_font_list(const std::string& src) {
     if (!token.empty())
     {
         std::wstring face = a2w(token);
-        out.emplace_back(resolveFace(face));
+       // out.emplace_back(resolveFace(face));
+        out.emplace_back(face);
     }
     return out;
 };
@@ -2895,22 +2931,75 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     /*----------------------------------------------------------
       2. 逐个尝试创建 IDWriteTextFormat
     ----------------------------------------------------------*/
+    // 2. 自定义查找函数
+    auto FindFamilyIndex = [](IDWriteFontCollection* coll,
+        const std::wstring& name,
+        UINT32& index,
+        BOOL& exists) -> bool
+        {
+            exists = FALSE;
+            if (!coll) return false;
 
+            UINT32 count = coll->GetFontFamilyCount();;
+
+            for (UINT32 i = 0; i < count; ++i)
+            {
+                Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
+                if (FAILED(coll->GetFontFamily(i, &fam)))
+                    continue;
+
+                Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+                if (FAILED(fam->GetFamilyNames(&names)))
+                    continue;
+
+                UINT32 nameLen = 0;
+                if (FAILED(names->GetStringLength(0, &nameLen)))
+                    continue;
+
+                std::wstring buf(nameLen + 1, L'\0');
+                if (FAILED(names->GetString(0, buf.data(), nameLen + 1)))
+                    continue;
+                buf.resize(nameLen);            // 去掉末尾 NUL
+
+                if (_wcsicmp(buf.c_str(), name.c_str()) == 0)
+                {
+                    index = i;
+                    exists = TRUE;
+                    return true;
+                }
+            }
+            return true;   // 遍历完但没找到
+        };
 
     ComPtr<IDWriteTextFormat> fmt;
 
     for (const auto& f : faces)
     {
+        std::wstring name = f;
         UINT32 index = 0;
         BOOL   exists = FALSE;
-
+        FontKey exact{ f, weight, italic == litehtml::font_style_italic };
+        // 1) 先找完全匹配
+        auto it = g_book->m_fontBin.find(exact);
+        if (it != g_book->m_fontBin.end()) {
+            name = it->second;                 // 命中
+        }
+        else {
+            // 2) 退而求其次：只匹配 family
+            for (const auto& kv : g_book->m_fontBin) {
+                if (kv.first.family == f) {      // 忽略 weight/italic
+                    name = kv.second;
+                    break;
+                }
+            }
+        }
         /* 1. 私有集合 */
         if (m_privateFonts)
         {
-            m_privateFonts->FindFamilyName(f.c_str(), &index, &exists);
+            FindFamilyIndex(m_privateFonts.Get(), name, index, exists);
             if (exists &&
                 SUCCEEDED(m_dwrite->CreateTextFormat(
-                    f.c_str(), m_privateFonts.Get(),
+                    name.c_str(), m_privateFonts.Get(),
                     static_cast<DWRITE_FONT_WEIGHT>(weight),
                     italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
                     : DWRITE_FONT_STYLE_NORMAL,
@@ -2928,10 +3017,10 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
         /* 2. 系统集合 */
         index = 0;
         exists = FALSE;
-        m_sysFontColl->FindFamilyName(f.c_str(), &index, &exists);
+        FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
         if (exists &&
             SUCCEEDED(m_dwrite->CreateTextFormat(
-                f.c_str(), nullptr,
+                name.c_str(), nullptr,
                 static_cast<DWRITE_FONT_WEIGHT>(weight),
                 italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
                 : DWRITE_FONT_STYLE_NORMAL,
@@ -2944,7 +3033,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
             //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
             break;
         }
-        OutputDebugStringW((L"[DWrite] 未找到字体：" + f + L"\n").c_str());
+        OutputDebugStringW((L"[DWrite] 未找到字体：" + name + L"\n").c_str());
     }
 
     if (!fmt){
@@ -2995,46 +3084,22 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     {
         std::wstring cleanName(currentFamily.c_str());   // 只保留可见字符
         cleanName.erase(std::find(cleanName.begin(), cleanName.end(), L'\0'), cleanName.end());
-
-        // 2. 自定义查找函数
-        auto FindFamilyIndex = [](IDWriteFontCollection* coll,
-            const std::wstring& name,
-            UINT32& index,
-            BOOL& exists) -> bool
-            {
-                exists = FALSE;
-                if (!coll) return false;
-
-                UINT32 count = coll->GetFontFamilyCount();;
-
-                for (UINT32 i = 0; i < count; ++i)
-                {
-                    Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
-                    if (FAILED(coll->GetFontFamily(i, &fam)))
-                        continue;
-
-                    Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
-                    if (FAILED(fam->GetFamilyNames(&names)))
-                        continue;
-
-                    UINT32 nameLen = 0;
-                    if (FAILED(names->GetStringLength(0, &nameLen)))
-                        continue;
-
-                    std::wstring buf(nameLen + 1, L'\0');
-                    if (FAILED(names->GetString(0, buf.data(), nameLen + 1)))
-                        continue;
-                    buf.resize(nameLen);            // 去掉末尾 NUL
-
-                    if (_wcsicmp(buf.c_str(), name.c_str()) == 0)
-                    {
-                        index = i;
-                        exists = TRUE;
-                        return true;
-                    }
+        FontKey exact{ cleanName, weight, italic == litehtml::font_style_italic };
+        // 1) 先找完全匹配
+        auto it = g_book->m_fontBin.find(exact);
+        if (it != g_book->m_fontBin.end()) {
+            cleanName = it->second;                 // 命中
+        }
+        else {
+            // 2) 退而求其次：只匹配 family
+            for (const auto& kv : g_book->m_fontBin) {
+                if (kv.first.family == cleanName) {      // 忽略 weight/italic
+                    cleanName = kv.second;
+                    break;
                 }
-                return true;   // 遍历完但没找到
-            };
+            }
+        }
+
         UINT32 index = 0;
         BOOL   exists = FALSE;
 
@@ -3076,7 +3141,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
                 char buf[256];
                 snprintf(buf, sizeof(buf),
                     "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
-                    currentFamily.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
+                    cleanName.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
                 OutputDebugStringA(buf);
             
         }
@@ -3572,7 +3637,9 @@ int FreetypeBackend::text_width(const char* text, litehtml::uint_ptr hFont)
 void EPUBBook::load_all_fonts() {
     if (g_container && g_container->m_canvas) 
     {
-        g_container->m_canvas->backend()->load_all_fonts();
+        auto fonts = collect_epub_fonts();
+        build_epub_font_index(g_book->ocf_pkg_, g_book.get());
+        g_container->m_canvas->backend()->load_all_fonts(fonts);
     }
 }
 
@@ -3788,8 +3855,270 @@ std::wstring url_decode(const std::wstring& in)
     return out;
 }
 
-std::vector<std::pair<std::wstring, std::vector<uint8_t>>>
-collect_epub_fonts()
+std::wstring EPUBBook::get_font_family_name(const std::vector<uint8_t>& data)
+{
+    stbtt_fontinfo info;
+    if (!stbtt_InitFont(&info, data.data(), 0))
+        return L"";
+
+    struct Try {
+        int platform, encoding, language, nameID;
+    } tries[] = {
+        // 先取 Typographic Family (ID 16)
+        {STBTT_PLATFORM_ID_MICROSOFT, STBTT_MS_EID_UNICODE_BMP,
+         STBTT_MS_LANG_ENGLISH, 16},
+         // 再取 Family (ID 1)
+         {STBTT_PLATFORM_ID_MICROSOFT, STBTT_MS_EID_UNICODE_BMP,
+          STBTT_MS_LANG_ENGLISH, 1},
+          // mac 平台兜底
+          {STBTT_PLATFORM_ID_MAC, STBTT_MAC_EID_ROMAN, 0, 1},
+    };
+
+    for (const auto& t : tries) {
+        int len = 0;
+        const char* p = (const char*)stbtt_GetFontNameString(
+            &info, &len, t.platform, t.encoding, t.language, t.nameID);
+        if (p && len > 0) {
+            std::wstring name;
+            name.reserve(len / 2);
+            for (int i = 0; i < len; i += 2) {
+                wchar_t ch = (wchar_t(p[i]) << 8) | wchar_t(p[i + 1]);
+                if (ch == 0) break;          // 保险：遇到 NUL 终止
+                name.push_back(ch);
+            }
+            if (!name.empty())
+                return name;
+        }
+    }
+    return L"";
+}
+//std::wstring get_font_family_name(const std::vector<uint8_t>& data)
+//{
+//    stbtt_fontinfo info;
+//    if (!stbtt_InitFont(&info, data.data(), 0))
+//        return L"";
+//
+//    struct Try {
+//        int platform, encoding, language, nameID;
+//    } tries[] = {
+//        {STBTT_PLATFORM_ID_MICROSOFT, STBTT_MS_EID_UNICODE_BMP, STBTT_MS_LANG_ENGLISH, 1},
+//        {STBTT_PLATFORM_ID_MICROSOFT, STBTT_MS_EID_UNICODE_BMP, STBTT_MS_LANG_ENGLISH, 16},
+//        {STBTT_PLATFORM_ID_MAC,       STBTT_MAC_EID_ROMAN,      0,                     1},
+//    };
+//
+//    for (const auto& t : tries) {
+//        int len = 0;
+//        const char* p = (const char*)stbtt_GetFontNameString(
+//            &info, &len, t.platform, t.encoding, t.language, t.nameID);
+//        if (p && len > 0) {
+//            // UTF-16BE → wchar_t
+//            std::wstring name;
+//            name.reserve(len / 2);
+//            for (int i = 0; i < len; i += 2) {
+//                wchar_t ch = (wchar_t(p[i]) << 8) | wchar_t(p[i + 1]);
+//                name.push_back(ch);
+//            }
+//            return name;
+//        }
+//    }
+//    return L"";
+//}
+// 主函数 ------------------------------------------------------------
+void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
+{
+    if (!book) return;
+   
+    const std::regex rx_face(R"(@font-face\s*\{([^}]*)\})", std::regex::icase);
+    const std::regex rx_fam(R"(font-family\s*:\s*['"]?([^;'"}]+)['"]?)", std::regex::icase);
+    const std::regex rx_src(R"(src\s*:\s*url\s*\(\s*['"]?([^)'"]+)['"]?\s*\))", std::regex::icase);
+    const std::regex rx_w(R"(font-weight\s*:\s*(\d+|bold))", std::regex::icase);
+    const std::regex rx_i(R"(font-style\s*:\s*(italic|oblique))", std::regex::icase);
+
+    for (const auto& item : pkg.manifest)
+    {
+        if (item.media_type != L"text/css") continue;
+
+        // 1. 读 CSS
+        std::wstring css_path = pkg.opf_dir + item.href;
+        MemFile css_file = book->read_zip(book->m_zipIndex.find(css_path).c_str());
+        if (css_file.data.empty()) continue;
+
+        std::string css(css_file.data.begin(), css_file.data.end());
+
+        // 2. 遍历 @font-face
+        for (std::sregex_iterator it(css.begin(), css.end(), rx_face), end; it != end; ++it)
+        {
+            std::string block = it->str();
+            std::smatch m;
+
+            std::wstring family;
+            std::wstring url;
+            int weight = 400;
+            bool italic = false;
+
+            if (std::regex_search(block, m, rx_fam)) family = a2w(m[1].str().c_str());
+            if (std::regex_search(block, m, rx_src)) url = a2w(m[1].str().c_str());
+            if (std::regex_search(block, m, rx_w))   weight = (m[1] == "bold" || m[1] == "700") ? 700 : 400;
+            if (std::regex_search(block, m, rx_i)) italic = true;
+
+            if (family.empty() || url.empty()) continue;
+
+            // 3. 读字体
+            std::wstring font_path = g_book->m_zipIndex.find(url);
+       
+
+
+            MemFile font_file = book->read_zip(book->m_zipIndex.find(font_path).c_str());
+            if (font_file.data.empty()) continue;
+
+  
+            std::wstring real_name = get_font_family_name(font_file.data);
+
+            // 5. 填充索引
+            FontKey key{ family, weight, italic };
+            g_book->m_fontBin[key] = std::move(real_name);
+        }
+    }
+}
+
+
+// ---------- 主函数 ----------
+//void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
+//{
+//    if (!book) return;
+//
+//    // 正则：整块 @font-face
+//    const std::regex rx_face(R"(@font-face\s*\{([^}]*)\})", std::regex::icase);
+//
+//    // 子正则
+//    const std::regex rx_fam(R"(font-family\s*:\s*['"]?([^;'"}]+)['"]?)", std::regex::icase);
+//    const std::regex rx_src(R"(src\s*:\s*([^;]+))", std::regex::icase);
+//    const std::regex rx_url(R"(url\s*\(\s*['"]?([^)'"]+)['"]?\s*\))", std::regex::icase);
+//    const std::regex rx_loc(R"(local\s*\(\s*['"]?([^)'"]+)['"]?\s*\))", std::regex::icase);
+//    const std::regex rx_w(R"(font-weight\s*:\s*(normal|bold|\d+))", std::regex::icase);
+//    const std::regex rx_i(R"(font-style\s*:\s*(normal|italic|oblique))", std::regex::icase);
+//
+//    for (const auto& item : pkg.manifest)
+//    {
+//        if (item.media_type != L"text/css") continue;
+//
+//        // 1. 读 CSS
+//        std::wstring css_path = pkg.opf_dir + item.href;
+//        MemFile css_file = book->read_zip(book->m_zipIndex.find(css_path).c_str());
+//        if (css_file.data.empty()) continue;
+//
+//        std::string css(css_file.data.begin(), css_file.data.end());
+//
+//        // 2. 遍历 @font-face
+//        for (std::sregex_iterator it(css.begin(), css.end(), rx_face), end; it != end; ++it)
+//        {
+//            std::string block = it->str();
+//            std::smatch m;
+//
+//            std::wstring family;
+//            std::vector<std::wstring> urls;
+//            std::vector<std::wstring> locals;
+//            bool has_weight = false, has_style = false;
+//            int weight = 400;
+//            bool italic = false;
+//
+//            if (std::regex_search(block, m, rx_fam)) family = a2w(m[1].str().c_str());
+//            if (std::regex_search(block, m, rx_w)) {
+//                has_weight = true;
+//                weight = (m[1] == "bold" || m[1] == "700") ? 700 : 400;
+//            }
+//            if (std::regex_search(block, m, rx_i)) {
+//                has_style = true;
+//                italic = (m[1] == "italic" || m[1] == "oblique");
+//            }
+//
+//            // 解析 src 列表
+//            if (std::regex_search(block, m, rx_src)) {
+//                std::string src_block = m[1];
+//                for (std::sregex_iterator uit(src_block.begin(), src_block.end(), rx_url), uend; uit != uend; ++uit)
+//                    urls.push_back(a2w(uit->str(1).c_str()));
+//                for (std::sregex_iterator lit(src_block.begin(), src_block.end(), rx_loc), lend; lit != lend; ++lit)
+//                    locals.push_back(a2w(lit->str(1).c_str()));
+//            }
+//
+//            if (family.empty() || (urls.empty() && locals.empty())) continue;
+//
+//            // 3. 需要注册的所有 (weight, italic) 组合
+//            std::vector<std::pair<int, bool>> combos;
+//            if (has_weight && has_style) {
+//                combos.emplace_back(weight, italic);
+//            }
+//            else if (has_weight) {
+//                combos.emplace_back(weight, false);
+//                combos.emplace_back(weight, true);
+//            }
+//            else if (has_style) {
+//                combos.emplace_back(400, italic);
+//                combos.emplace_back(700, italic);
+//            }
+//            else {
+//                combos = { {400,false}, {400,true}, {700,false}, {700,true} };
+//            }
+//
+//            // 4. 先尝试 url(...)
+//            std::vector<uint8_t> font_bytes;
+//            std::wstring real_name;
+//            for (const auto& u : urls)
+//            {
+//                std::wstring font_path = pkg.opf_dir + u;
+//                // 去掉 "../"
+//                for (size_t pos; (pos = font_path.find(L"../")) != std::wstring::npos; ) {
+//                    size_t slash = font_path.rfind(L'/', pos - 1);
+//                    if (slash == std::wstring::npos) break;
+//                    font_path.erase(slash + 1, pos + 3 - slash);
+//                }
+//
+//                MemFile f = book->read_zip(book->m_zipIndex.find(font_path).c_str());
+//                if (!f.data.empty()) {
+//                    // 1. 长度检查
+//                    if (f.data.size() < 12) {
+//                        OutputDebugStringW(L"字体文件太小，跳过\n");
+//                        continue;
+//                    }
+//
+//                    // 2. 魔数检查
+//                    const uint32_t head = *reinterpret_cast<const uint32_t*>(f.data.data());
+//                    if (head != 0x00010000 && head != 0x4F54544F) {   // 'true' or 'OTTO'
+//                        OutputDebugStringW(L"非 TTF/OTF 文件，跳过\n");
+//                        continue;
+//                    }
+//
+//                    // 3. 拷贝一份，防止后续 std::move 后原数据失效
+//                    font_bytes = std::move(f.data);
+//                    std::wstring real_name = get_font_family_name(font_bytes);
+//                    if (real_name.empty()) {
+//                        OutputDebugStringW(L"无法解析 Family Name，跳过\n");
+//                        continue;
+//                    }
+//                
+//                    break;
+//
+//                }
+//            }
+//
+//            // 5. 若 url 失败，尝试 local(...) —— 这里仅记录别名，字节留空
+//            if (font_bytes.empty() && !locals.empty()) {
+//                real_name = locals.front();   // 先取第一个 local 名
+//            }
+//
+//            if (real_name.empty()) continue;
+//
+//            // 6. 注册所有组合
+//            for (const auto& [w, i] : combos) {
+//                FontKey key{ family, w, i };
+//                //if (!font_bytes.empty()) g_fontBin[key] = font_bytes;
+//                m_fontBin[key] = real_name;   // 覆盖即可
+//            }
+//        }
+//    }
+//}
+ std::vector<std::pair<std::wstring, std::vector<uint8_t>>>
+EPUBBook::collect_epub_fonts()
 {
     std::vector<std::pair<std::wstring, std::vector<uint8_t>>> fonts;
     const std::set<std::wstring, CaseInsensitiveLess> font_exts = {
@@ -3842,9 +4171,9 @@ collect_epub_fonts()
 //------------------------------------------
 // 3.1  GDI 实现
 //------------------------------------------
-void GdiBackend::load_all_fonts()
+void GdiBackend::load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts)
 {
-    auto fonts = collect_epub_fonts();
+
     for (auto& [path, blob] : fonts)
     {
         // 1. 写临时文件
@@ -3879,9 +4208,8 @@ void GdiBackend::load_all_fonts()
 //------------------------------------------
 // 3.2  DirectWrite 实现
 //------------------------------------------
-void D2DBackend::load_all_fonts()
+void D2DBackend::load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts)
 {
-    auto fonts = collect_epub_fonts();
     if (fonts.empty()) return;
 
     // 先清理旧字体
@@ -3922,6 +4250,31 @@ void D2DBackend::load_all_fonts()
             }
         }
     }
+    //UINT32 famCount = 0;
+    //famCount = m_privateFonts->GetFontFamilyCount();
+    //for (UINT32 i = 0; i < famCount; ++i) {
+    //    Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
+    //    m_privateFonts->GetFontFamily(i, &fam);
+    //    Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+    //    fam->GetFamilyNames(&names);
+    //    UINT32 idx = 0;
+    //    BOOL exists = FALSE;
+    //    names->FindLocaleName(L"en-us", &idx, &exists);
+    //    if (!exists) idx = 0;
+    //    UINT32 len = 0;
+    //    names->GetStringLength(idx, &len);
+    //    std::wstring name(len + 1, 0);
+    //    names->GetString(idx, name.data(), len + 1);
+    //    OutputDebugStringW((L"Family: " + name + L"\n").c_str());
+
+    //    UINT32 faceCount = 0;
+    //    faceCount = fam->GetFontCount();
+    //    for (UINT32 j = 0; j < faceCount; ++j) {
+    //        Microsoft::WRL::ComPtr<IDWriteFont> font;
+    //        fam->GetFont(j, &font);
+    //        OutputDebugStringW((L"  Face " + std::to_wstring(j) + L"\n").c_str());
+    //    }
+    //}
 }
 
 void D2DBackend::unload_fonts()
@@ -3943,10 +4296,9 @@ void D2DBackend::unload_fonts()
 
 
 
-void FreetypeBackend::load_all_fonts()
+void FreetypeBackend::load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts)
 {
     // 1. 收集字体（文件名 → 二进制数据）
-    auto fonts = collect_epub_fonts();   // 返回 vector<pair<path, blob>>
     if (fonts.empty()) return;
 
     // 2. 清理旧字体
@@ -4557,7 +4909,7 @@ void EPUBBook::show_tooltip(const std::string html, int x, int y)
     int height = g_tooltip_container->m_doc->height();
     int tip_x = pt.x - width/2;
     int tip_y = pt.y - height - 20;
-    if (tip_y < 0) { tip_y = pt.y  + 20; }
+    //if (tip_y < 0) { tip_y = pt.y  + 20; }
     //OutputDebugStringA(("[render size]" + std::to_string(width) + " " + std::to_string(height) + "\n").c_str());
     // ④ 最终定位
     SetWindowPos(g_hTooltip, HWND_TOPMOST,
@@ -4746,7 +5098,7 @@ void Paginator::clear() {
 
 std::set<std::wstring> D2DBackend::getCurrentFonts() {
     std::set<std::wstring> out;
-    out.emplace(m_actualFamily);
+
 
     if (m_privateFonts)
     {
@@ -4883,12 +5235,12 @@ std::wstring EPUBBook::extract_text(const tinyxml2::XMLElement* a)
 
 EPUBBook::~EPUBBook() {
     mz_zip_reader_end(&zip);
-    for (const auto& path : g_tempFontFiles)
-    {
-        RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
-        DeleteFileW(path.c_str());
-    }
-    g_tempFontFiles.clear();
+    //for (const auto& path : g_tempFontFiles)
+    //{
+    //    RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
+    //    DeleteFileW(path.c_str());
+    //}
+    //g_tempFontFiles.clear();
 }
 
 GdiBackend::GdiBackend(int width, int height) : m_w(width), m_h(height) {    // 创建内存 DC 与 32-bit 位图
@@ -4995,6 +5347,7 @@ void SimpleContainer::clear()
 
     m_anchor_map.clear();
     m_doc.reset();
+    //m_canvas->clear();
 }
 
 int SimpleContainer::get_default_font_size() const
@@ -5009,16 +5362,39 @@ const char* SimpleContainer::get_default_font_name() const
 void EPUBBook::clear()
 {
     SendMessage(g_hwndTV, WM_SETREDRAW, FALSE, 0);
-    FreeTreeData(g_hwndTV);              // ✅ 释放所有 TVData*
-    TreeView_DeleteAllItems(g_hwndTV);
+    HTREEITEM hRoot = TreeView_GetRoot(g_hwndTV);
+    TreeView_SelectItem(g_hwndTV, nullptr);   // 先取消选中
+    FreeTreeData(g_hwndTV);                   // 释放 TVData*
+    TreeView_DeleteAllItems(g_hwndTV);          // 此时不会再触发 TVN_SELCHANGED
     SendMessage(g_hwndTV, WM_SETREDRAW, TRUE, 0);
     RedrawWindow(g_hwndTV, nullptr, nullptr,
         RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
 
-    zip = {};
+    mz_zip_reader_end(&zip);
     cache.clear();
     m_nodes.clear();
     m_nodes.shrink_to_fit();
     m_roots.clear();
     ocf_pkg_ = {};
+    m_fontBin.clear();
 }
+
+void D2DCanvas::clear()
+{
+    m_backend->clear();
+}
+
+void D2DBackend::clear() 
+{
+    m_privateFonts.Reset();
+    m_d2dBitmapCache.clear();
+
+}
+
+void GdiCanvas::clear(){}
+
+void GdiBackend::clear() {}
+
+void FreetypeCanvas::clear() {}
+
+void FreetypeBackend::clear() {}
