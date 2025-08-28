@@ -43,11 +43,11 @@ int g_center_offset = 0;
 
 
 // 别名表：CSS 名 -> 真实字体名
-static std::unordered_map<std::wstring, std::set<std::wstring>>  g_fontAliasDynamic = {
-    {L"serif", g_cfg.font_serif},
-    {L"sans-serif", g_cfg.font_sans_serif},
-    {L"monospace", g_cfg.font_monospace}
-};
+//static std::unordered_map<std::wstring, std::set<std::wstring>>  g_fontAliasDynamic = {
+//    {L"serif", g_cfg.font_serif},
+//    {L"sans-serif", g_cfg.font_sans_serif},
+//    {L"monospace", g_cfg.font_monospace}
+//};
 
 static bool isWin10OrLater()
 {
@@ -1350,7 +1350,8 @@ std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string&
 
     std::string inner = get_html(p);
     // 包一层带 inline-block 的 <p>
- 
+
+    //return text;
     return "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>" + inner;
 }
 
@@ -1366,11 +1367,23 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    case WM_LBUTTONDOWN: 
+    {
+        int x = GET_X_LPARAM(lp);
+        int y = GET_Y_LPARAM(lp);
+   
+        if (!g_container->m_doc) { return 0; }
+
+        int doc_x = x - g_center_offset;
+        int doc_y = y + g_scrollY;
+        litehtml::position::vector redraw_boxes;
+        g_container->m_doc->on_lbutton_down(doc_x, doc_y, 0, 0, redraw_boxes);
+    }
     case WM_LBUTTONUP:
     {
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
-        g_book->hide_tooltip();
+        //g_book->hide_tooltip();
         if (!g_container->m_doc) { return 0; }
 
         int doc_x = x - g_center_offset;
@@ -1410,34 +1423,34 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         litehtml::position::vector redraw_boxes;
         g_container->m_doc->on_mouse_over(doc_x, doc_y, 0, 0, redraw_boxes);
 
-        auto hit = g_container->m_doc->root_render()->get_element_by_point(doc_x, doc_y, 0, 0);
-        auto link = find_link_in_chain(hit);
+        //auto hit = g_container->m_doc->root_render()->get_element_by_point(doc_x, doc_y, 0, 0);
+        //auto link = find_link_in_chain(hit);
 
-        std::string html;
-        if (link)
-        {
-            const char* href_raw = link->get_attr("href");
-            if (!href_raw) {
-                g_book->hide_tooltip();
-                break;
-            }
-            std::string href = href_raw;
+        //std::string html;
+        //if (link)
+        //{
+        //    const char* href_raw = link->get_attr("href");
+        //    if (!href_raw) {
+        //        g_book->hide_tooltip();
+        //        break;
+        //    }
+        //    std::string href = href_raw;
 
 
-            std::string id = extract_anchor(href.c_str());
-            if (!id.empty())
-                html = html_of_anchor_paragraph(g_container->m_doc.get(), id);
-        }
+        //    std::string id = extract_anchor(href.c_str());
+        //    if (!id.empty())
+        //        html = html_of_anchor_paragraph(g_container->m_doc.get(), id);
+        //}
 
-        if (!html.empty())
-        {
-            g_book->show_tooltip(html, x, y);
-        }
-        else
-        {
-            g_book->hide_tooltip();
-        }
-        break;
+        //if (!html.empty())
+        //{
+        //    g_book->show_tooltip(std::move(html), x, y);
+        //}
+        //else
+        //{
+        //    g_book->hide_tooltip();
+        //}
+        //break;
     }
     case WM_EPUB_CACHE_UPDATED:
     {
@@ -1486,17 +1499,19 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSELEAVE: 
     {
-        g_book->hide_tooltip();
+        litehtml::position::vector redraw_box;
+        g_container->m_doc->on_mouse_leave(redraw_box);
+        //g_book->hide_tooltip();
         return 0;
     }
     case WM_MOUSEACTIVATE:
     {
-        g_book->hide_tooltip();
+        //g_book->hide_tooltip();
         return 0;
     }
     case WM_NCMOUSEMOVE:
     {
-        g_book->hide_tooltip();
+        //g_book->hide_tooltip();
         return 0;
     }
     case WM_VSCROLL:
@@ -1645,7 +1660,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_last_html_path = g_book->ocf_pkg_.spine[0].href;
         std::string html = g_book->load_html(g_last_html_path);
        
-        g_book->init_doc(html);
+        g_book->init_doc(std::move(html));
         g_states.needRelayout.store(true, std::memory_order_release);
         // 2) 立即把第 0 页画到缓存位图
         UpdateCache();          // 复用前面给出的 UpdateCache()
@@ -1749,7 +1764,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_MOUSEWHEEL: {
-        if(g_book){ g_book->hide_tooltip(); }
+        //if(g_book){ g_book->hide_tooltip(); }
        
         //UpdateCache();              // 关键：立即排版并缓存
         //InvalidateRect(g_hView, nullptr, FALSE);
@@ -1766,7 +1781,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             free((void*)tvi.lParam);
             h = TreeView_GetNextSibling(g_hwndTV, h);
         }
-       if (g_book) { g_book->hide_tooltip(); }
+       //if (g_book) { g_book->hide_tooltip(); }
         PostQuitMessage(0);
         return 0;
     }
@@ -1833,24 +1848,47 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
         }
     }
+    case WM_VSCROLL: {  }
+    case WM_HSCROLL: {  }
     case WM_COMMAND: {
         switch (LOWORD(w)) {
         case IDM_TOGGLE_CSS: {
-            g_cfg.disableCSS = !g_cfg.disableCSS;
+            g_cfg.enableCSS = !g_cfg.enableCSS;
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
-                MF_BYCOMMAND | (g_cfg.disableCSS ? MF_CHECKED : MF_UNCHECKED));
-
-            break;
+                MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
+            //if (!g_cfg.enableCSS)
+            //{
+            //    EnableMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_GRAYED);
+            //}
+            //else
+            //{
+            //    EnableMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_ENABLED);
+            //}
+            //break;
         }
         case IDM_TOGGLE_JS: {
-            g_cfg.disableJS = !g_cfg.disableJS;          // 切换状态
+            g_cfg.enableJS = !g_cfg.enableJS;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
-                MF_BYCOMMAND | (g_cfg.disableJS ? MF_CHECKED : MF_UNCHECKED));
+                MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
 
             break;
         }
-        case WM_VSCROLL: { if (g_book) { g_book->hide_tooltip(); } break; }
-        case WM_HSCROLL: { if (g_book) { g_book->hide_tooltip(); } break; }
+        case IDM_TOGGLE_GLOBAL_CSS:
+        {
+            g_cfg.enableGlobalCSS = !g_cfg.enableGlobalCSS;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
+                MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
+
+            break;
+        }
+        case IDM_TOGGLE_PREPROCESS_HTML:
+        {
+            g_cfg.enablePreprocessHTML = !g_cfg.enablePreprocessHTML;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_PREPROCESS_HTML,
+                MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
+
+            break;
+        }
         case IDM_INFO_FONTS:{
             
             g_activeFonts = g_container->m_canvas->getCurrentFonts();
@@ -2068,18 +2106,33 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         0, 0, 300, 200,
         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
 
+    
     g_pSplashImg = LoadPngFromResource(g_hInst, IDB_PNG1);
 
     g_bootstrap = std::make_unique<AppBootstrap>();
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
-
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
-        MF_BYCOMMAND | (g_cfg.disableCSS ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
-        MF_BYCOMMAND | (g_cfg.disableJS ? MF_CHECKED : MF_UNCHECKED));
-    EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
- 
     
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
+        MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
+        MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
+        MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_PREPROCESS_HTML,
+        MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
+    //if(!g_cfg.enableCSS)
+    //{
+    //    EnableMenuItem(hMenu, IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_GRAYED);
+    //}
+    //else 
+    //{
+    //    EnableMenuItem(hMenu, IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_ENABLED);
+    //}
+    EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
+    EnableMenuItem(hMenu, IDM_TOGGLE_SCROLLBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
+    EnableMenuItem(hMenu, IDM_TOGGLE_STATUS_WINDOW, MF_BYCOMMAND | MF_GRAYED);
+    EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableClearType();
     // =====初始化隐藏=====
     ShowWindow(g_hStatus, SW_HIDE);
@@ -2106,16 +2159,22 @@ void EPUBBook::init_doc(std::string html) {
 
 
     if (html.empty()) return;
-    if (!g_cfg.disableCSS) { html = insert_global_css(html); }
-    if (!g_cfg.disablePreprocessHTML) { html = PreprocessHTML(html); }
+    if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
+    if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
     g_container->clear();
     //g_container.reset();
 
     // 完整兜底 UA 样式表（litehtml 专用）
+    // 在 EPUBBook::init_doc 里加诊断
 
-    g_container->m_doc = litehtml::document::createFromString(html.c_str(), g_container.get());
+    // 打印前 200 字符
+    //OutputDebugStringA(std::string(html.c_str(), html.size()).c_str());
+ 
+        g_container->m_doc =
+            litehtml::document::createFromString({ html.c_str() , litehtml::encoding::utf_8}, g_container.get());
+
     /* 关键：DOM 刚建好，立即回填内联脚本 */
-    if (!g_cfg.disableJS) {
+    if (g_cfg.enableJS) {
         g_bootstrap->bind_host_objects();
 
         g_bootstrap->run_pending_scripts(); // 立即执行
@@ -2136,7 +2195,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     size_t pos = whref.find(L'#');
     std::wstring file_path = (pos == std::wstring::npos) ? whref : whref.substr(0, pos);
     std::string  id = (pos == std::wstring::npos) ? "" :
-        litehtml::wchar_to_utf8(whref.substr(pos + 1));
+        w2a(whref.substr(pos + 1));
 
     if (g_last_html_path != file_path){
         std::string html = g_book->load_html(file_path.c_str());
@@ -2191,7 +2250,7 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
     }
 }
 
-int SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont) 
+litehtml::pixel_t SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont) 
 {
     return m_canvas->backend()->text_width(text, hFont);
 }
@@ -2205,9 +2264,32 @@ void SimpleContainer::get_image_size(const char* src, const char* baseurl, liteh
 
 }
 
-void SimpleContainer::get_client_rect(litehtml::position& client) const {
-    RECT rc{}; GetClientRect(g_hWnd, &rc);
-    client = { 0, 0, rc.right, rc.bottom - 30 };
+// get_client_rect -> get_viewport
+void SimpleContainer::get_viewport(litehtml::position& client) const
+{
+    // 1. 取客户区物理像素
+    RECT rc{};
+    GetClientRect(g_hView, &rc);
+
+    // 2. 计算滚动条宽度（垂直滚动条存在时）
+    int scrollW = 0;
+    if (GetWindowLongPtr(g_hView, GWL_STYLE) & WS_VSCROLL)
+        scrollW = GetSystemMetrics(SM_CXVSCROLL);
+
+    // 3. DPI 缩放因子
+    HDC hdc = GetDC(g_hView);
+    int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
+    int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
+    ReleaseDC(g_hView, hdc);
+
+    float scaleX = 96.0f / dpiX;
+    float scaleY = 96.0f / dpiY;
+
+    // 4. 逻辑像素
+    int width = static_cast<int>((rc.right - scrollW) * scaleX);
+    int height = static_cast<int>((rc.bottom) * scaleY);
+
+    client = litehtml::position(0, 0, width, height);
 }
 
 litehtml::element::ptr
@@ -2217,7 +2299,7 @@ SimpleContainer::create_element(const char* tag,
 {
     if (litehtml::t_strcasecmp(tag, "script") != 0)
         return nullptr;   // 让 litehtml 自己建别的节点
-    if (g_cfg.disableJS) { return nullptr; }
+    if (!g_cfg.enableJS) { return nullptr; }
 
     /* 1. 建节点（litehtml 会把内联文本自动收进来） */
     auto el = std::make_shared<litehtml::html_tag>(doc);
@@ -2236,8 +2318,8 @@ void SimpleContainer::import_css(litehtml::string& text,
     const litehtml::string& url,
     litehtml::string& baseurl)
 {
-    if (g_cfg.disableCSS) {
-        text.clear();           // 禁用所有外部/内部 CSS
+    if (!g_cfg.enableCSS) {
+        //text.clear();           // 禁用所有外部/内部 CSS
         return;
     }
     // url 可能是相对路径，baseurl 是当前 html 所在目录
@@ -2253,7 +2335,7 @@ void SimpleContainer::import_css(litehtml::string& text,
     {
         OutputDebugStringW((L"CSS not found: " + w_path + L"\n").c_str());
     }
-
+    
     // baseurl 保持原样即可
 }
 
@@ -2308,6 +2390,74 @@ void SimpleContainer::on_anchor_click(const char* url,
     //ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+bool SimpleContainer::on_element_click(const litehtml::element::ptr& el) 
+{
+    OutputDebugStringA(el->get_tagName());
+    OutputDebugStringA("\n");
+    return false;
+}
+void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el, litehtml::mouse_event event)
+{
+    if (event == litehtml::mouse_event::mouse_event_enter)
+    {
+        auto link = find_link_in_chain(el);
+
+        std::string html;
+        if (link)
+        {
+            const char* href_raw = link->get_attr("href");
+            if (!href_raw) {
+                g_book->hide_tooltip();
+                return;
+
+            }
+            std::string href = href_raw;
+
+
+            std::string id = extract_anchor(href.c_str());
+            if (!id.empty())
+                html = html_of_anchor_paragraph(g_container->m_doc.get(), id);
+        }
+
+        if (!html.empty())
+        {
+            POINT pt;
+            GetCursorPos(&pt);   // pt.x, pt.y 为屏幕坐标
+            ScreenToClient(g_hView, &pt);   // 现在 pt.x, pt.y 是相对于窗口客户区的坐标
+            g_book->show_tooltip(std::move(html), pt.x, pt.y);
+        }
+    }
+    else
+    {
+        g_book->hide_tooltip();
+    }
+}
+
+void SimpleContainer::split_text(const char* text,
+    const std::function<void(const char*)>& on_word,
+    const std::function<void(const char*)>& on_space)
+{
+    if (!text || !*text) return;
+
+    const char* p = text;
+    while (*p)
+    {
+        /* ---------- 空格段 ---------- */
+        if (std::isspace(static_cast<unsigned char>(*p)))
+        {
+            const char* start = p;
+            while (*p && std::isspace(static_cast<unsigned char>(*p))) ++p;
+            std::string token(start, p);
+            if (on_space) on_space(token.c_str());
+            continue;
+        }
+        /* ---------- 单词段 ---------- */
+        const char* start = p;
+        while (*p && !std::isspace(static_cast<unsigned char>(*p))) ++p;
+        std::string token(start, p);
+        if (on_word) on_word(token.c_str());
+    }
+}
 // ---------- 6. 鼠标形状 -------------------------------------------------
 void SimpleContainer::set_cursor(const char* cursor)
 {
@@ -2345,52 +2495,29 @@ void SimpleContainer::transform_text(litehtml::string& text,
 }
 
 // ---------- 8. 裁剪 ----------------------------------------------------
-void SimpleContainer::set_clip(const litehtml::position& pos,
-    const litehtml::border_radiuses& radius)
-{
-    // 取得当前绘制 HDC
-    HDC hdc = reinterpret_cast<HDC>(m_last_hdc);
-    if (!hdc) return;
 
-    // 1. 如果四个角半径都为 0，退化为矩形
-    if (radius.top_left_x == 0 && radius.top_right_x == 0 &&
-        radius.bottom_left_x == 0 && radius.bottom_right_x == 0)
-    {
-        HRGN rgn = CreateRectRgn(pos.x, pos.y,
-            pos.x + pos.width,
-            pos.y + pos.height);
-        SelectClipRgn(hdc, rgn);
-        DeleteObject(rgn);
-        return;
-    }
 
-    // 2. 否则用圆角矩形
-    //    CreateRoundRectRgn 的圆角直径 = 2 * radius
-    int rx = std::max({ radius.top_left_x, radius.top_right_x,
-                       radius.bottom_left_x, radius.bottom_right_x });
-    int ry = rx;   // 简化：保持 1:1 圆角；如需椭圆角可分别传 rx/ry
-    HRGN rgn = CreateRoundRectRgn(pos.x, pos.y,
-        pos.x + pos.width,
-        pos.y + pos.height,
-        rx * 2, ry * 2);
-    SelectClipRgn(hdc, rgn);
-    DeleteObject(rgn);
-}
-void SimpleContainer::del_clip()
-{
-    SelectClipRgn(reinterpret_cast<HDC>(m_last_hdc), nullptr);
-}
 
 // ---------- 9. 媒体查询 -----------------------------------------------
 void SimpleContainer::get_media_features(litehtml::media_features& mf) const
 {
-    RECT rc; GetClientRect(g_hWnd, &rc);
-    mf.width = rc.right - rc.left;
-    mf.height = rc.bottom - rc.top;
-    mf.device_width = GetSystemMetrics(SM_CXSCREEN);
-    mf.device_height = GetSystemMetrics(SM_CYSCREEN);
-    mf.color = 8;        // 24 位色
+    // 1. 窗口客户区（物理像素）
+    RECT rc;
+    GetClientRect(g_hWnd, &rc);
+    mf.width = MulDiv(rc.right - rc.left, GetDpiForWindow(g_hWnd), 96);
+    mf.height = MulDiv(rc.bottom - rc.top, GetDpiForWindow(g_hWnd), 96);
+
+    // 2. 屏幕物理分辨率
+    const UINT dpiX = GetDpiForWindow(g_hWnd);   // 也可用 GetDpiForSystem
+    mf.device_width = MulDiv(GetSystemMetricsForDpi(SM_CXSCREEN, dpiX), dpiX, 96);
+    mf.device_height = MulDiv(GetSystemMetricsForDpi(SM_CYSCREEN, dpiX), dpiX, 96);
+
+    // 3. 颜色深度（24 位）
+    HDC hdc = GetDC(nullptr);
+    mf.color = GetDeviceCaps(hdc, BITSPIXEL);   // 通常 24 或 32
     mf.monochrome = 0;
+
+    ReleaseDC(nullptr, hdc);
     mf.type = litehtml::media_type_screen;
 }
 
@@ -2403,26 +2530,11 @@ void SimpleContainer::get_language(litehtml::string& language,
     // 真正 EPUB 可从 OPF <dc:language> 读
 }
 
-// ---------- 11. 列表标记 ----------------------------------------------
-void SimpleContainer::draw_list_marker(litehtml::uint_ptr hdc,
-    const litehtml::list_marker& marker)
-{
-    HDC dc = reinterpret_cast<HDC>(hdc);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(0, 0, 0));
 
-    std::wstring txt;
-    if (marker.marker_type == litehtml::list_style_type_disc)
-        txt = L"•";
-    else if (marker.marker_type == litehtml::list_style_type_decimal)
-        txt = std::to_wstring(marker.index) + L".";
 
-    HFONT hOld = (HFONT)SelectObject(dc, m_hDefaultFont);
-    TextOutW(dc, marker.pos.x, marker.pos.y, txt.c_str(), (int)txt.size());
-    SelectObject(dc, hOld);
+litehtml::pixel_t SimpleContainer::pt_to_px(float pt) const {
+    return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
 }
-
-
 
 
 // --------------------------------------------------
@@ -2443,12 +2555,19 @@ std::string PreprocessHTML(std::string html)
     // 2. 自闭合 <script .../> → <script ...>code</script>
     //-------------------------------------------------
   // 2. 自闭合 <script .../> → <script ...>code</script>
-    if (g_cfg.disableCSS) {
-        // (?s) 不是 std::regex 的标准写法，这里用 [\s\S]* 代替“任意字符含换行”
-        static const std::regex killAllScript(
-            R"(<script\b[^>]*>(?:[^<]*(?:<(?!/script>)[^<]*)*)?</script>)",
-            std::regex::icase | std::regex::optimize);
-        html = std::regex_replace(html, killAllScript, "");
+    if (!g_cfg.enableJS) {
+        // 1) 删除 <script ...>...</script>
+        static const std::regex reScriptPair(
+            R"(<\s*script\b[^>]*>.*?</script>)",
+            std::regex::icase | std::regex::optimize | std::regex::nosubs);
+
+        // 2) 删除自闭合 <script ... />
+        static const std::regex reScriptSelf(
+            R"(<\s*script\b[^>]*\/>)",
+            std::regex::icase | std::regex::optimize | std::regex::nosubs);
+
+        html = std::regex_replace(html, reScriptPair, "");
+        html = std::regex_replace(html, reScriptSelf, "");
     }
     else
     {
@@ -2536,6 +2655,31 @@ void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     m_canvas->backend()->draw_text(hdc, text, hFont, color, pos);
 }
 
+void SimpleContainer::draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url)
+{
+    m_canvas->backend()->draw_image(hdc, layer, url, base_url);
+}
+
+void SimpleContainer::draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color)
+{
+    m_canvas->backend()->draw_solid_fill(hdc, layer, color);
+}
+
+void SimpleContainer::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient)
+{
+    m_canvas->backend()->draw_linear_gradient(hdc, layer, gradient);
+}
+
+void SimpleContainer::draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient)
+{
+    m_canvas->backend()->draw_radial_gradient(hdc, layer, gradient);
+}
+
+void SimpleContainer::draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient)
+{
+    m_canvas->backend()->draw_conic_gradient(hdc, layer, gradient);
+}
+
 void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
     const litehtml::borders& borders,
     const litehtml::position& pos,
@@ -2544,31 +2688,77 @@ void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
     m_canvas->backend()->draw_borders(hdc, borders, pos, root);
 }
 
-litehtml::uint_ptr SimpleContainer::create_font(const char* faceName,
-    int size,
-    int weight,
-    litehtml::font_style italic,
-    unsigned int decoration,
-    litehtml::font_metrics* fm) {
-    return m_canvas->backend()->create_font(faceName, size, weight, italic, decoration, fm);
+
+litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm)
+{
+    return m_canvas->backend()->create_font(descr, doc, fm);
 }
 
 void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 {
     m_canvas->backend()->delete_font(hFont);
 }
-void SimpleContainer::draw_background(litehtml::uint_ptr hdc,
-    const std::vector<litehtml::background_paint>& bg)
+
+
+// ---------- 11. 列表标记 ----------------------------------------------
+void SimpleContainer::draw_list_marker(litehtml::uint_ptr hdc,
+    const litehtml::list_marker& marker)
 {
-    m_canvas->backend()->draw_background(hdc, bg, m_img_cache);
+    m_canvas->backend()->draw_list_marker(hdc, marker);
+    //HDC dc = reinterpret_cast<HDC>(hdc);
+    //SetBkMode(dc, TRANSPARENT);
+    //SetTextColor(dc, RGB(0, 0, 0));
+
+    //std::wstring txt;
+    //if (marker.marker_type == litehtml::list_style_type_disc)
+    //    txt = L"•";
+    //else if (marker.marker_type == litehtml::list_style_type_decimal)
+    //    txt = std::to_wstring(marker.index) + L".";
+
+    //HFONT hOld = (HFONT)SelectObject(dc, m_hDefaultFont);
+    //TextOutW(dc, marker.pos.x, marker.pos.y, txt.c_str(), (int)txt.size());
+    //SelectObject(dc, hOld);
 }
 
-int SimpleContainer::pt_to_px(int pt) const {
-    return MulDiv(pt, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72);
+
+void SimpleContainer::set_clip(const litehtml::position& pos,
+    const litehtml::border_radiuses& radius)
+{
+    m_canvas->backend()->set_clip(pos, radius);
+    //// 取得当前绘制 HDC
+    //HDC hdc = reinterpret_cast<HDC>(m_last_hdc);
+    //if (!hdc) return;
+
+    //// 1. 如果四个角半径都为 0，退化为矩形
+    //if (radius.top_left_x == 0 && radius.top_right_x == 0 &&
+    //    radius.bottom_left_x == 0 && radius.bottom_right_x == 0)
+    //{
+    //    HRGN rgn = CreateRectRgn(pos.x, pos.y,
+    //        pos.x + pos.width,
+    //        pos.y + pos.height);
+    //    SelectClipRgn(hdc, rgn);
+    //    DeleteObject(rgn);
+    //    return;
+    //}
+
+    //// 2. 否则用圆角矩形
+    ////    CreateRoundRectRgn 的圆角直径 = 2 * radius
+    //int rx = std::max({ radius.top_left_x, radius.top_right_x,
+    //                   radius.bottom_left_x, radius.bottom_right_x });
+    //int ry = rx;   // 简化：保持 1:1 圆角；如需椭圆角可分别传 rx/ry
+    //HRGN rgn = CreateRoundRectRgn(pos.x, pos.y,
+    //    pos.x + pos.width,
+    //    pos.y + pos.height,
+    //    rx * 2, ry * 2);
+    //SelectClipRgn(hdc, rgn);
+    //DeleteObject(rgn);
 }
 
-
-
+void SimpleContainer::del_clip()
+{
+    m_canvas->backend()->del_clip();
+    /*SelectClipRgn(reinterpret_cast<HDC>(m_last_hdc), nullptr);*/
+}
 
 // DirectWrite backend
 /* ---------- 构造 ---------- */
@@ -2661,7 +2851,7 @@ void D2DCanvas::present(HDC hdc, int x, int y)
 struct FontPair {
     ComPtr<IDWriteTextFormat> format;
     ComPtr<IDWriteFontFace>   face;
-    int size;
+    float size;
 };
 
 // ---------- 实现 ----------
@@ -2748,73 +2938,667 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
         brush.Get());
 
 
-
-
-
 }
 
 
+// ----------------------------------------------------------
+// 工具：根据 box 类型返回实际矩形
+// ----------------------------------------------------------
+static litehtml::position clip_box(const litehtml::background_layer& layer,
+    litehtml::background_box box_type)
+{
+    switch (box_type)
+    {
+    case litehtml::background_box_content:
+    case litehtml::background_box_padding:
+        // 你的版本没有 content_box / padding_box，统一回退到 border_box
+        return layer.border_box;
+    default:
+        return layer.border_box;
+    }
+}
 
-void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
-    const litehtml::borders& borders,
-    const litehtml::position& draw_pos,
+// ----------------------------------------------------------
+// 工具：加载位图（WIC -> D2D）
+// ----------------------------------------------------------
+
+
+// ----------------------------------------------------------
+// 主函数：draw_image
+// ----------------------------------------------------------
+void D2DBackend::draw_image(litehtml::uint_ptr hdc,
+    const litehtml::background_layer& layer,
+    const std::string& url,
+    const std::string& base_url)
+{
+    if (url.empty()) return;
+
+    /* ---------- 1. 取缓存位图 ---------- */
+    auto it = g_container->m_img_cache.find(url);
+    if (it == g_container->m_img_cache.end()) return;
+    const ImageFrame& frame = it->second;
+    if (frame.rgba.empty()) return;
+
+    ComPtr<ID2D1Bitmap> bmp;
+    auto d2d_it = m_d2dBitmapCache.find(url);
+    if (d2d_it != m_d2dBitmapCache.end())
+    {
+        bmp = d2d_it->second;
+    }
+    else
+    {
+        D2D1_BITMAP_PROPERTIES bp =
+            D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (SUCCEEDED(m_rt->CreateBitmap(
+            D2D1::SizeU(frame.width, frame.height),
+            frame.rgba.data(),
+            frame.stride,
+            bp,
+            &bmp)))
+        {
+            m_d2dBitmapCache.emplace(url, bmp);
+        }
+    }
+    if (!bmp) return;
+
+    /* ---------- 2. 计算目标矩形 ---------- */
+    D2D1_RECT_F dst = D2D1::RectF(
+        float(layer.border_box.left()),
+        float(layer.border_box.top()),
+        float(layer.border_box.right()),
+        float(layer.border_box.bottom()));
+
+    /* ---------- 3. 计算绘制区域（cover / contain / stretch） ---------- */
+    float imgW = float(bmp->GetPixelSize().width);
+    float imgH = float(bmp->GetPixelSize().height);
+    if (imgW == 0 || imgH == 0) return;
+
+    float dstW = dst.right - dst.left;
+    float dstH = dst.bottom - dst.top;
+
+    // 这里只演示 cover（填满 + 居中）
+    float scale = std::max(dstW / imgW, dstH / imgH);
+    float bgW = imgW * scale;
+    float bgH = imgH * scale;
+    float bgX = dst.left + (dstW - bgW) * 0.5f;
+    float bgY = dst.top + (dstH - bgH) * 0.5f;
+
+    D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
+
+    /* ---------- 4. 绘制 ---------- */
+    m_rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
+        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        D2D1::RectF(0, 0, imgW, imgH));
+}
+
+inline bool D2DBackend::is_all_zero(const litehtml::border_radiuses& r)
+{
+    return r.top_left_x == 0 && r.top_left_y == 0 &&
+        r.top_right_x == 0 && r.top_right_y == 0 &&
+        r.bottom_right_x == 0 && r.bottom_right_y == 0 &&
+        r.bottom_left_x == 0 && r.bottom_left_y == 0;
+}
+void D2DBackend::draw_solid_fill(litehtml::uint_ptr hdc,
+    const litehtml::background_layer& layer,
+    const litehtml::web_color& color)
+{
+    // 1. 取出 D2D 渲染目标
+    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    if (!rt) return;
+
+    // 2. 创建/复用纯色画刷
+    ComPtr<ID2D1SolidColorBrush> brush;
+    rt->CreateSolidColorBrush(
+        D2D1::ColorF(color.red / 255.0f,
+            color.green / 255.0f,
+            color.blue / 255.0f,
+            color.alpha / 255.0f),
+        &brush);
+    if (!brush) return;
+
+    // 3. 计算要填充的矩形（border_box）
+    D2D1_RECT_F rc = D2D1::RectF(
+        static_cast<float>(layer.border_box.left()),
+        static_cast<float>(layer.border_box.top()),
+        static_cast<float>(layer.border_box.right()),
+        static_cast<float>(layer.border_box.bottom()));
+
+
+    // 4. 若存在圆角，用圆角矩形；否则直接矩形
+    if (is_all_zero(layer.border_radius))
+    {
+        rt->FillRectangle(rc, brush.Get());
+    }
+    else
+    {
+        D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+            rc,
+            static_cast<float>(layer.border_radius.top_left_x),
+            static_cast<float>(layer.border_radius.top_left_y));
+        rt->FillRoundedRectangle(rr, brush.Get());
+    }
+}
+
+
+void D2DBackend::draw_linear_gradient(
+    litehtml::uint_ptr hdc,
+    const litehtml::background_layer& layer,
+    const litehtml::background_layer::linear_gradient& g)
+{
+    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    if (!rt) return;
+
+    // 1. 把 color_points 转成 D2D 色标
+    std::vector<D2D1_GRADIENT_STOP> stops;
+    stops.reserve(g.color_points.size());
+    for (const auto& cp : g.color_points)
+    {
+        stops.push_back(D2D1::GradientStop(
+            static_cast<float>(cp.offset),
+            D2D1::ColorF(
+                cp.color.red / 255.0f,
+                cp.color.green / 255.0f,
+                cp.color.blue / 255.0f,
+                cp.color.alpha / 255.0f)));
+    }
+
+    // 2. 创建 stop collection
+    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stopColl;
+    if (FAILED(rt->CreateGradientStopCollection(
+        stops.data(),
+        static_cast<UINT>(stops.size()),
+        D2D1_GAMMA_2_2,
+        D2D1_EXTEND_MODE_CLAMP,
+        &stopColl)))
+        return;
+
+    // 3. 创建线性渐变画刷
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brush;
+    if (FAILED(rt->CreateLinearGradientBrush(
+        D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(g.start.x),
+                static_cast<float>(g.start.y)),
+            D2D1::Point2F(static_cast<float>(g.end.x),
+                static_cast<float>(g.end.y))),
+        stopColl.Get(),
+        &brush)))
+        return;
+
+    // 4. 计算要填充的矩形
+    const D2D1_RECT_F rc = D2D1::RectF(
+        static_cast<float>(layer.border_box.left()),
+        static_cast<float>(layer.border_box.top()),
+        static_cast<float>(layer.border_box.right()),
+        static_cast<float>(layer.border_box.bottom()));
+
+    // 5. 圆角判断
+    auto& r = layer.border_radius;
+    bool no_radius = r.top_left_x == 0 && r.top_left_y == 0 &&
+        r.top_right_x == 0 && r.top_right_y == 0 &&
+        r.bottom_right_x == 0 && r.bottom_right_y == 0 &&
+        r.bottom_left_x == 0 && r.bottom_left_y == 0;
+
+    if (no_radius)
+        rt->FillRectangle(rc, brush.Get());
+    else
+    {
+        D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+            rc,
+            static_cast<float>(r.top_left_x),
+            static_cast<float>(r.top_left_y));
+        rt->FillRoundedRectangle(rr, brush.Get());
+    }
+}
+
+
+void D2DBackend::draw_radial_gradient(
+    litehtml::uint_ptr hdc,
+    const litehtml::background_layer& layer,
+    const litehtml::background_layer::radial_gradient& g)
+{
+    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    if (!rt) return;
+
+    // 1. 构造 D2D 色标
+    std::vector<D2D1_GRADIENT_STOP> stops;
+    stops.reserve(g.color_points.size());
+    for (const auto& cp : g.color_points)
+    {
+        stops.push_back(D2D1::GradientStop(
+            static_cast<float>(cp.offset),
+            D2D1::ColorF(
+                cp.color.red / 255.0f,
+                cp.color.green / 255.0f,
+                cp.color.blue / 255.0f,
+                cp.color.alpha / 255.0f)));
+    }
+
+    // 2. 创建 stop collection
+    ComPtr<ID2D1GradientStopCollection> stopColl;
+    if (FAILED(rt->CreateGradientStopCollection(
+        stops.data(),
+        static_cast<UINT>(stops.size()),
+        D2D1_GAMMA_2_2,
+        D2D1_EXTEND_MODE_CLAMP,
+        &stopColl)))
+        return;
+
+    // 3. 创建径向渐变画刷
+    ComPtr<ID2D1RadialGradientBrush> brush;
+    if (FAILED(rt->CreateRadialGradientBrush(
+        D2D1::RadialGradientBrushProperties(
+            D2D1::Point2F(static_cast<float>(g.position.x),
+                static_cast<float>(g.position.y)), // 圆心
+            D2D1::Point2F(0.0f, 0.0f),                  // 偏移（0,0）即可
+            static_cast<float>(g.radius.x),                 // rx
+            static_cast<float>(g.radius.y)),                // ry（保持圆形）
+        stopColl.Get(),
+        &brush)))
+        return;
+
+    // 4. 计算填充区域
+    const D2D1_RECT_F rc = D2D1::RectF(
+        static_cast<float>(layer.border_box.left()),
+        static_cast<float>(layer.border_box.top()),
+        static_cast<float>(layer.border_box.right()),
+        static_cast<float>(layer.border_box.bottom()));
+
+    // 5. 圆角判断
+    auto& r = layer.border_radius;
+    bool no_radius = r.top_left_x == 0 && r.top_left_y == 0 &&
+        r.top_right_x == 0 && r.top_right_y == 0 &&
+        r.bottom_right_x == 0 && r.bottom_right_y == 0 &&
+        r.bottom_left_x == 0 && r.bottom_left_y == 0;
+
+    if (no_radius)
+        rt->FillRectangle(rc, brush.Get());
+    else
+    {
+        D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
+            rc,
+            static_cast<float>(r.top_left_x),
+            static_cast<float>(r.top_left_y));
+        rt->FillRoundedRectangle(rr, brush.Get());
+    }
+}
+
+
+// 角度归一化到
+static inline float normalize_angle(float a)
+{
+    a = fmodf(a, 2.0f * float(M_PI));
+    return a < 0 ? a + 2.0f * float(M_PI) : a;
+}
+
+// 在色标数组中按角度(0..1) 线性插值颜色
+static litehtml::web_color sample_color(float t,
+    const std::vector<litehtml::background_layer::color_point>& stops)
+{
+    if (stops.empty()) return {};
+    if (stops.size() == 1) return stops.front().color;
+
+    // 保证色标有序
+    auto cmp = [](const litehtml::background_layer::color_point& a,
+        const litehtml::background_layer::color_point& b)
+        { return a.offset < b.offset; };
+    if (!std::is_sorted(stops.begin(), stops.end(), cmp))
+    {
+        std::vector<litehtml::background_layer::color_point> tmp = stops;
+        std::sort(tmp.begin(), tmp.end(), cmp);
+        return sample_color(t, tmp);
+    }
+
+    // 找到区间
+    auto it = std::lower_bound(stops.begin(), stops.end(), t,
+        [](const litehtml::background_layer::color_point& s, float v)
+        { return s.offset < v; });
+
+    if (it == stops.end()) return stops.back().color;
+    if (it == stops.begin()) return stops.front().color;
+
+    const auto& prev = *(it - 1);
+    const auto& next = *it;
+    float factor = (t - prev.offset) / (next.offset - prev.offset);
+    factor = std::clamp(factor, 0.0f, 1.0f);
+
+    litehtml::web_color c;
+    c.red = static_cast<BYTE>(prev.color.red + (next.color.red - prev.color.red) * factor);
+    c.green = static_cast<BYTE>(prev.color.green + (next.color.green - prev.color.green) * factor);
+    c.blue = static_cast<BYTE>(prev.color.blue + (next.color.blue - prev.color.blue) * factor);
+    c.alpha = static_cast<BYTE>(prev.color.alpha + (next.color.alpha - prev.color.alpha) * factor);
+    return c;
+}
+
+void D2DBackend::draw_conic_gradient(
+    litehtml::uint_ptr hdc,
+    const litehtml::background_layer& layer,
+    const litehtml::background_layer::conic_gradient& g)
+{
+    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    if (!rt) return;
+
+    // 1. 计算填充矩形
+    const D2D1_RECT_F rc = D2D1::RectF(
+        static_cast<float>(layer.border_box.left()),
+        static_cast<float>(layer.border_box.top()),
+        static_cast<float>(layer.border_box.right()),
+        static_cast<float>(layer.border_box.bottom()));
+
+    const float w = rc.right - rc.left;
+    const float h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+
+    // 2. 生成位图大小（固定 512×512，可改）
+    const UINT bmpSize = 512;
+    const UINT stride = bmpSize * 4;
+    std::vector<BYTE> pixels(bmpSize * bmpSize * 4, 0); // BGRA
+
+    // 3. 逐像素填色
+    for (UINT y = 0; y < bmpSize; ++y)
+    {
+        for (UINT x = 0; x < bmpSize; ++x)
+        {
+            // 归一化到 [-1,1]
+            float nx = (x / float(bmpSize - 1)) * 2.0f - 1.0f;
+            float ny = (y / float(bmpSize - 1)) * 2.0f - 1.0f;
+
+            float angle = atan2f(ny, nx);          // -π..π
+            angle += float(M_PI);                  // 0..2π
+            angle = normalize_angle(angle + g.angle); // 支持全局旋转
+            float t = angle / (2.0f * float(M_PI));   // 0..1
+
+            litehtml::web_color c = sample_color(t, g.color_points);
+
+            UINT idx = (y * bmpSize + x) * 4;
+            pixels[idx + 0] = c.blue;
+            pixels[idx + 1] = c.green;
+            pixels[idx + 2] = c.red;
+            pixels[idx + 3] = c.alpha;
+        }
+    }
+
+    // 4. 创建 D2D 位图
+    ComPtr<ID2D1Bitmap> bmp;
+    D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    if (FAILED(rt->CreateBitmap(
+        D2D1::SizeU(bmpSize, bmpSize),
+        pixels.data(),
+        stride,
+        props,
+        &bmp)))
+        return;
+
+    // 5. 圆角判断
+    auto& r = layer.border_radius;
+    bool no_radius = r.top_left_x == 0 && r.top_left_y == 0 &&
+        r.top_right_x == 0 && r.top_right_y == 0 &&
+        r.bottom_right_x == 0 && r.bottom_right_y == 0 &&
+        r.bottom_left_x == 0 && r.bottom_left_y == 0;
+
+    // 6. 绘制
+    rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (no_radius)
+    {
+        rt->DrawBitmap(bmp.Get(), rc);
+    }
+    else
+    {
+        // 用圆角矩形裁剪
+        ComPtr<ID2D1Layer> layerPtr;
+        rt->CreateLayer(nullptr, &layerPtr);
+        rt->PushLayer(
+            D2D1::LayerParameters(
+                rc,
+                nullptr,
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                D2D1::IdentityMatrix(),
+                1.0f,
+                nullptr,
+                D2D1_LAYER_OPTIONS_NONE),
+            layerPtr.Get());
+
+        rt->DrawBitmap(bmp.Get(), rc);
+
+        rt->PopLayer();
+    }
+}
+
+void D2DBackend::draw_list_marker(
+    litehtml::uint_ptr hdc,
+    const litehtml::list_marker& marker)
+{
+    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    if (!rt) return;
+
+    // 1. 基础信息
+    const float x = static_cast<float>(marker.pos.x);
+    const float y = static_cast<float>(marker.pos.y);
+    const float sz = static_cast<float>(marker.pos.width);
+    const D2D1_COLOR_F color = D2D1::ColorF(
+        marker.color.red / 255.0f,
+        marker.color.green / 255.0f,
+        marker.color.blue / 255.0f,
+        marker.color.alpha / 255.0f);
+
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(rt->CreateSolidColorBrush(color, &brush)))
+        return;
+
+    rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    switch (marker.marker_type)
+    {
+    case litehtml::list_style_type_disc:
+    {
+        rt->FillEllipse(
+            D2D1::Ellipse(D2D1::Point2F(x + sz * 0.5f, y + sz * 0.5f), sz * 0.5f, sz * 0.5f),
+            brush.Get());
+    }
+    break;
+
+    case litehtml::list_style_type_circle:
+    {
+        rt->DrawEllipse(
+            D2D1::Ellipse(D2D1::Point2F(x + sz * 0.5f, y + sz * 0.5f), sz * 0.5f, sz * 0.5f),
+            brush.Get(),
+            sz * 0.1f); // 线宽
+    }
+    break;
+
+    case litehtml::list_style_type_square:
+    {
+        const D2D1_RECT_F rc = D2D1::RectF(x, y, x + sz, y + sz);
+        rt->FillRectangle(rc, brush.Get());
+    }
+    break;
+
+    default:
+        // 其他类型（decimal、lower-alpha 等）由文本层绘制，这里忽略
+        break;
+    }
+}
+
+
+namespace {
+
+    struct SideInfo {
+        float          width = 0;
+        litehtml::web_color color{};
+        litehtml::border_style style = litehtml::border_style_solid;
+    };
+
+    // 根据 style 计算明暗色
+    D2D1_COLOR_F AdjustColor(const litehtml::web_color& c, float factor)
+    {
+        return D2D1::ColorF(
+            std::clamp(c.red * factor / 255.0f, 0.0f, 1.0f),
+            std::clamp(c.green * factor / 255.0f, 0.0f, 1.0f),
+            std::clamp(c.blue * factor / 255.0f, 0.0f, 1.0f),
+            c.alpha / 255.0f);
+    }
+
+} // namespace
+
+void D2DBackend::draw_borders(litehtml::uint_ptr hdc, 
+    const litehtml::borders& borders, 
+    const litehtml::position& draw_pos, 
     bool root)
 {
-    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
-    ComPtr<ID2D1SolidColorBrush> brush;
-    rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &brush);
+    if (!m_rt) return;
 
-    D2D1_RECT_F rc = D2D1::RectF(
-        (float)draw_pos.left(), (float)draw_pos.top(),
-        (float)draw_pos.right(), (float)draw_pos.bottom());
+    // 1. 收集四边
+    std::array<SideInfo, 4> sides = {
+        SideInfo{ (float)borders.top.width,    borders.top.color,    borders.top.style },
+        SideInfo{ (float)borders.right.width,  borders.right.color,  borders.right.style },
+        SideInfo{ (float)borders.bottom.width, borders.bottom.color, borders.bottom.style },
+        SideInfo{ (float)borders.left.width,   borders.left.color,   borders.left.style }
+    };
 
-    if (borders.left.width > 0) {
-        brush->SetColor(D2D1::ColorF(
-            borders.left.color.red / 255.0f,
-            borders.left.color.green / 255.0f,
-            borders.left.color.blue / 255.0f,
-            borders.left.color.alpha / 255.0f));
-        rt->FillRectangle(
-            D2D1::RectF(rc.left, rc.top,
-                rc.left + borders.left.width, rc.bottom),
-            brush.Get());
-    }
-    if (borders.right.width > 0) {
-        brush->SetColor(D2D1::ColorF(
-            borders.right.color.red / 255.0f,
-            borders.right.color.green / 255.0f,
-            borders.right.color.blue / 255.0f,
-            borders.right.color.alpha / 255.0f));
-        rt->FillRectangle(
-            D2D1::RectF(rc.right - borders.right.width, rc.top,
-                rc.right, rc.bottom),
-            brush.Get());
-    }
-    if (borders.top.width > 0) {
-        brush->SetColor(D2D1::ColorF(
-            borders.top.color.red / 255.0f,
-            borders.top.color.green / 255.0f,
-            borders.top.color.blue / 255.0f,
-            borders.top.color.alpha / 255.0f));
-        rt->FillRectangle(
-            D2D1::RectF(rc.left, rc.top,
-                rc.right, rc.top + borders.top.width),
-            brush.Get());
-    }
-    if (borders.bottom.width > 0) {
-        brush->SetColor(D2D1::ColorF(
-            borders.bottom.color.red / 255.0f,
-            borders.bottom.color.green / 255.0f,
-            borders.bottom.color.blue / 255.0f,
-            borders.bottom.color.alpha / 255.0f));
-        rt->FillRectangle(
-            D2D1::RectF(rc.left, rc.bottom - borders.bottom.width,
-                rc.right, rc.bottom),
-            brush.Get());
-    }
+    if (std::all_of(sides.begin(), sides.end(),
+        [](const SideInfo& s) { return s.width <= 0; }))
+        return;
 
+    // 2. 建立工厂
+    ComPtr<ID2D1Factory> factory;
+    m_rt->GetFactory(&factory);
+
+    // 3. 构造外轮廓
+    auto build_rounded_rect = [&](float l, float t, float r, float b,
+        const litehtml::border_radiuses& rad,
+        ComPtr<ID2D1PathGeometry>& out) -> bool
+        {
+            ComPtr<ID2D1PathGeometry> geo;
+            if (FAILED(factory->CreatePathGeometry(&geo))) return false;
+            ComPtr<ID2D1GeometrySink> sink;
+            if (FAILED(geo->Open(&sink))) return false;
+
+            float rtl = (float)rad.top_left_x, rtr = (float)rad.top_right_x;
+            float rbr = (float)rad.bottom_right_x, rbl = (float)rad.bottom_left_x;
+
+            sink->BeginFigure(D2D1::Point2F(l + rtl, t), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(r - rtr, t));
+            if (rbr > 0) sink->AddArc(D2D1::ArcSegment(
+                D2D1::Point2F(r - rbr, b),
+                D2D1::SizeF(rbr, rbr),
+                0.0f,
+                D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                D2D1_ARC_SIZE_SMALL));
+
+            if (rbl > 0) sink->AddArc(D2D1::ArcSegment(
+                D2D1::Point2F(l, b - rbl),
+                D2D1::SizeF(rbl, rbl),
+                0.0f,
+                D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                D2D1_ARC_SIZE_SMALL));
+
+            if (rtl > 0) sink->AddArc(D2D1::ArcSegment(
+                D2D1::Point2F(l + rtl, t),
+                D2D1::SizeF(rtl, rtl),
+                0.0f,
+                D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                D2D1_ARC_SIZE_SMALL));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            out = std::move(geo);
+            return true;
+        };
+
+    float l = (float)draw_pos.left();
+    float t = (float)draw_pos.top();
+    float r = (float)draw_pos.right();
+    float b = (float)draw_pos.bottom();
+
+    ComPtr<ID2D1PathGeometry> outer, inner;
+    if (!build_rounded_rect(l, t, r, b, borders.radius, outer)) return;
+
+    // 4. 内轮廓（统一用最小边宽）
+    float minW = std::min({ sides[0].width, sides[1].width, sides[2].width, sides[3].width });
+    litehtml::border_radiuses innerRad = borders.radius;
+    innerRad.top_left_x = std::max(innerRad.top_left_x - minW, 0.0f);
+    innerRad.top_right_x = std::max(innerRad.top_right_x - minW, 0.0f);
+    innerRad.bottom_right_x = std::max(innerRad.bottom_right_x - minW, 0.0f);
+    innerRad.bottom_left_x = std::max(innerRad.bottom_left_x - minW, 0.0f);
+
+    if (!build_rounded_rect(l + sides[3].width, t + sides[0].width,
+        r - sides[1].width, b - sides[2].width,
+        innerRad, inner)) return;
+
+    // 5. 创建边框几何 = outer - inner
+    ComPtr<ID2D1PathGeometry> borderGeo;
+    factory->CreatePathGeometry(&borderGeo);
+    ComPtr<ID2D1GeometrySink> sink;
+    borderGeo->Open(&sink);
+    outer->CombineWithGeometry(inner.Get(), D2D1_COMBINE_MODE_EXCLUDE,
+        nullptr, sink.Get());
+    sink->Close();
+
+    // 6. 画四边（按顺序 top/right/bottom/left）
+    const std::array<const char*, 4> sideNames = { "top","right","bottom","left" };
+    const std::array<float, 4> offsets = { 0, 0, 0, 0 }; // 预留
+    (void)offsets;
+
+    // 6-a 纯色简单实现：先整体填充背景色，再描边
+    // 这里为了演示，只画四条独立路径，实际可优化
+    for (int idx = 0; idx < 4; ++idx)
+    {
+        const SideInfo& side = sides[idx];
+        if (side.width <= 0) continue;
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        D2D1_COLOR_F clr;
+        switch (side.style)
+        {
+        case litehtml::border_style_groove:
+            clr = AdjustColor(side.color, 0.75f); break;
+        case litehtml::border_style_ridge:
+            clr = AdjustColor(side.color, 1.25f); break;
+        case litehtml::border_style_inset:
+            clr = AdjustColor(side.color, 0.60f); break;
+        case litehtml::border_style_outset:
+            clr = AdjustColor(side.color, 1.40f); break;
+        default:
+            clr = D2D1::ColorF(side.color.red / 255.0f,
+                side.color.green / 255.0f,
+                side.color.blue / 255.0f,
+                side.color.alpha / 255.0f);
+        }
+        m_rt->CreateSolidColorBrush(clr, &brush);
+
+        // 为每条边单独构造路径（略繁琐，但保证独立颜色）
+        ComPtr<ID2D1PathGeometry> sidePath;
+        factory->CreatePathGeometry(&sidePath);
+        ComPtr<ID2D1GeometrySink> sideSink;
+        sidePath->Open(&sideSink);
+
+        switch (idx)
+        {
+        case 0: // top
+            sideSink->BeginFigure(D2D1::Point2F(l + borders.radius.top_left_x, t), D2D1_FIGURE_BEGIN_HOLLOW);
+            sideSink->AddLine(D2D1::Point2F(r - borders.radius.top_right_x, t));
+            break;
+        case 1: // right
+            sideSink->BeginFigure(D2D1::Point2F(r, t + borders.radius.top_right_x), D2D1_FIGURE_BEGIN_HOLLOW);
+            sideSink->AddLine(D2D1::Point2F(r, b - borders.radius.bottom_right_x));
+            break;
+        case 2: // bottom
+            sideSink->BeginFigure(D2D1::Point2F(r - borders.radius.bottom_right_x, b), D2D1_FIGURE_BEGIN_HOLLOW);
+            sideSink->AddLine(D2D1::Point2F(l + borders.radius.bottom_left_x, b));
+            break;
+        case 3: // left
+            sideSink->BeginFigure(D2D1::Point2F(l, b - borders.radius.bottom_left_x), D2D1_FIGURE_BEGIN_HOLLOW);
+            sideSink->AddLine(D2D1::Point2F(l, t + borders.radius.top_left_x));
+            break;
+        }
+        sideSink->EndFigure(D2D1_FIGURE_END_OPEN);
+        sideSink->Close();
+
+        // 描边
+        m_rt->DrawGeometry(sidePath.Get(), brush.Get(), side.width);
+    }
 }
-
 // 工具：转小写
 std::wstring  D2DBackend::toLower(std::wstring s)
 {
@@ -2822,42 +3606,42 @@ std::wstring  D2DBackend::toLower(std::wstring s)
     return s;
 }
 
-// 1. 静态表映射
-std::optional<std::wstring> D2DBackend::mapStatic(const std::wstring& key)
-{
-    auto it = g_fontAlias.find(key);
-    return (it != g_fontAlias.end()) ? std::optional{ it->second } : std::nullopt;
-}
+//// 1. 静态表映射
+//std::optional<std::wstring> D2DBackend::mapStatic(const std::wstring& key)
+//{
+//    auto it = g_fontAlias.find(key);
+//    return (it != g_fontAlias.end()) ? std::optional{ it->second } : std::nullopt;
+//}
 
 // 2. 动态表映射
 // 声明改为静态，并把系统字体集合作为参数
-std::optional<std::wstring>
-D2DBackend::mapDynamic(const std::wstring& key)
-{
-   
-    auto it = g_fontAliasDynamic.find(key);
-    if (it == g_fontAliasDynamic.end())
-        return std::nullopt;
-
-    for (const std::wstring& face : it->second)
-    {
-        UINT32 index = 0;
-        BOOL   exists = FALSE;
-        m_sysFontColl->FindFamilyName(face.c_str(), &index, &exists);
-        if (exists)
-            return face;
-    }
-    return std::nullopt;
-}
+//std::optional<std::wstring>
+//D2DBackend::mapDynamic(const std::wstring& key)
+//{
+//   
+//    auto it = g_fontAliasDynamic.find(key);
+//    if (it == g_fontAliasDynamic.end())
+//        return std::nullopt;
+//
+//    for (const std::wstring& face : it->second)
+//    {
+//        UINT32 index = 0;
+//        BOOL   exists = FALSE;
+//        m_sysFontColl->FindFamilyName(face.c_str(), &index, &exists);
+//        if (exists)
+//            return face;
+//    }
+//    return std::nullopt;
+//}
 // 3. 解析单个 token
-std::wstring D2DBackend::resolveFace(const std::wstring& raw)
-{
-    const std::wstring key = toLower(raw);
-
-    if (auto v = mapStatic(key))   return *v;
-    if (auto v = mapDynamic(key))  return *v;
-    return raw;                    // 原样返回
-}
+//std::wstring D2DBackend::resolveFace(const std::wstring& raw)
+//{
+//    const std::wstring key = toLower(raw);
+//
+//    //if (auto v = mapStatic(key))   return *v;
+//    //if (auto v = mapDynamic(key))  return *v;
+//    return key;                    // 原样返回
+//}
 
 std::vector<std::wstring>
 D2DBackend::split_font_list(const std::string& src) {
@@ -2870,7 +3654,7 @@ D2DBackend::split_font_list(const std::string& src) {
             token = trim_any(token);
             if (!token.empty()) {
                 std::wstring face = a2w(token);
-                out.emplace_back(resolveFace(face));
+                out.emplace_back(face);
                 token.clear();
             }
         }
@@ -2883,28 +3667,24 @@ D2DBackend::split_font_list(const std::string& src) {
     if (!token.empty())
     {
         std::wstring face = a2w(token);
-       // out.emplace_back(resolveFace(face));
         out.emplace_back(face);
     }
     return out;
 };
 
-
-litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
-    int size,
-    int weight,
-    litehtml::font_style italic,
-    unsigned int decoration,
+litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& descr, 
+    const litehtml::document* doc, 
     litehtml::font_metrics* fm)
 {
+
     if (!m_dwrite || !fm) return 0;
 
     /*----------------------------------------------------------
       1. 把 font-family 字符串拆成单个字体名
     ----------------------------------------------------------*/
 
-    std::vector<std::wstring> faces = split_font_list(faceName ? faceName : "Segoe UI");
-
+    std::vector<std::wstring> faces = split_font_list(
+        descr.family.empty() ? g_cfg.default_font_name : descr.family);
     /*----------------------------------------------------------
       2. 逐个尝试创建 IDWriteTextFormat
     ----------------------------------------------------------*/
@@ -2948,6 +3728,8 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
             return true;   // 遍历完但没找到
         };
 
+
+
     ComPtr<IDWriteTextFormat> fmt;
 
     for (const auto& f : faces)
@@ -2955,7 +3737,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
         std::wstring name = f;
         UINT32 index = 0;
         BOOL   exists = FALSE;
-        FontKey exact{ f, weight, italic == litehtml::font_style_italic };
+        FontKey exact{ f, descr.weight, descr.style == litehtml::font_style_italic };
         // 1) 先找完全匹配
         auto it = g_book->m_fontBin.find(exact);
         if (it != g_book->m_fontBin.end()) {
@@ -2977,14 +3759,15 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
             if (exists &&
                 SUCCEEDED(m_dwrite->CreateTextFormat(
                     name.c_str(), m_privateFonts.Get(),
-                    static_cast<DWRITE_FONT_WEIGHT>(weight),
-                    italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                    static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                    descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
                     : DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
-                    static_cast<float>(size),
+                    static_cast<float>(descr.size),
                     L"en-us",
                     &fmt)))
             {
+                //SetFontMatric(descr, m_privateFonts.Get(), name, index, fm);
                 //m_actualFamily = f;          // 保存命中的家族名
                 //OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
                 break;
@@ -2998,14 +3781,15 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
         if (exists &&
             SUCCEEDED(m_dwrite->CreateTextFormat(
                 name.c_str(), nullptr,
-                static_cast<DWRITE_FONT_WEIGHT>(weight),
-                italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
                 : DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                static_cast<float>(size),
+                static_cast<float>(descr.size),
                 L"en-us",
                 &fmt)))
         {
+            //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
             //m_actualFamily = f;              // 保存命中的家族名
             //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
             break;
@@ -3014,38 +3798,46 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     }
 
     if (!fmt){
+        std::wstring name = a2w(g_cfg.default_font_name);
         OutputDebugStringW(L"[DWrite] 未找到字体:");
-        OutputDebugStringW(a2w(faceName).c_str());
+        OutputDebugStringW(a2w(descr.family).c_str());
         OutputDebugStringW(L"  使用默认字体：");
-        OutputDebugStringW(a2w(g_cfg.default_font_name).c_str());
+        OutputDebugStringW(name.c_str());
         OutputDebugStringW(L"\n");
-
-        m_dwrite->CreateTextFormat(
-            a2w(g_cfg.default_font_name).c_str(), nullptr,
-            static_cast<DWRITE_FONT_WEIGHT>(weight),
-            italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-            : DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            static_cast<float>(size),
-            L"en-us",
-            &fmt); 
-        
+        UINT32 index = 0;
+        BOOL   exists = FALSE;
+        FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
+        if (exists &&
+            SUCCEEDED(m_dwrite->CreateTextFormat(
+                name.c_str(), nullptr,
+                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                : DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                static_cast<float>(descr.size),
+                L"en-us",
+                &fmt)))
+        {
+            //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
+        }   
     }
 
     if (!fmt) {
         OutputDebugStringW(L"[DWrite] 加载默认字体失败\n");
         return 0; }
-    /*----------------------------------------------------------
-      用命中的字体家族名去拿真正的字体并计算度量
-    ----------------------------------------------------------*/
+
  
+    /*----------------------------------------------------------
+     用命中的字体家族名去拿真正的字体并计算度量
+   ----------------------------------------------------------*/
+
     ComPtr<IDWriteFontFamily>     family;
     ComPtr<IDWriteFont>           dwFont;
-    
-   
+
+
     UINT32 len = fmt->GetFontFamilyNameLength();
 
-  
+
     std::wstring currentFamily;
     WCHAR buf[512];
     //UINT32 len = fmt->GetFontFamilyNameLength();   // 可见字符数
@@ -3061,7 +3853,7 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
     {
         std::wstring cleanName(currentFamily.c_str());   // 只保留可见字符
         cleanName.erase(std::find(cleanName.begin(), cleanName.end(), L'\0'), cleanName.end());
-        FontKey exact{ cleanName, weight, italic == litehtml::font_style_italic };
+        FontKey exact{ cleanName, descr.weight, descr.style == litehtml::font_style_italic };
         // 1) 先找完全匹配
         auto it = g_book->m_fontBin.find(exact);
         if (it != g_book->m_fontBin.end()) {
@@ -3086,48 +3878,67 @@ litehtml::uint_ptr D2DBackend::create_font(const char* faceName,
             targetCollection = m_privateFonts;
         }
         else
-        {   
+        {
             FindFamilyIndex(m_sysFontColl.Get(), cleanName, index, exists);   // 只在系统集合里再查一次
             targetCollection = m_sysFontColl;
         }
 
-       
+
 
         if (exists)
         {
             targetCollection->GetFontFamily(index, &family);
             family->GetFirstMatchingFont(
-                static_cast<DWRITE_FONT_WEIGHT>(weight),
+                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
                 DWRITE_FONT_STRETCH_NORMAL,
-                italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
                 : DWRITE_FONT_STYLE_NORMAL,
                 &dwFont);
-   
 
-                  
-                DWRITE_FONT_METRICS fm0 = {};
-                dwFont->GetMetrics(&fm0);
-                float dip = static_cast<float>(size) / fm0.designUnitsPerEm;
-                fm->ascent = static_cast<int>(fm0.ascent * dip + 0.5f);
-                fm->descent = static_cast<int>(fm0.descent * dip + 0.5f);
 
-                fm->height = static_cast<int>((fm0.ascent + fm0.descent + fm0.lineGap)
-                    * dip * g_cfg.line_height_multiplier + 0.5f);
-                fm->x_height = static_cast<int>(fm0.xHeight * dip + 0.5f);
-      
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                    "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
-                    cleanName.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
-                OutputDebugStringA(buf);
-            
+
+            DWRITE_FONT_METRICS fm0 = {};
+            dwFont->GetMetrics(&fm0);
+
+            float dip = static_cast<float>(descr.size) / fm0.designUnitsPerEm;
+
+            fm->font_size = descr.size;
+
+            fm->ascent = static_cast<int>(fm0.ascent * dip + 0.5f);
+            fm->descent = static_cast<int>(fm0.descent * dip + 0.5f);
+            fm->height = static_cast<int>((fm0.ascent + fm0.descent + fm0.lineGap)
+                * dip * g_cfg.line_height_multiplier + 0.5f);
+            fm->x_height = static_cast<int>(fm0.xHeight * dip + 0.5f);
+
+            // 1. 等宽数字 0 的宽度
+            ComPtr<IDWriteTextLayout> tmpLayout;
+            std::wstring zero = L"0";
+            m_dwrite->CreateTextLayout(zero.c_str(), 1, fmt.Get(),
+                65536.0f, 65536.0f, &tmpLayout);
+            DWRITE_TEXT_METRICS tm = {};
+            if (tmpLayout) tmpLayout->GetMetrics(&tm);
+            fm->ch_width = static_cast<int>(tm.widthIncludingTrailingWhitespace + 0.5f);
+            if (fm->ch_width <= 0) fm->ch_width = fm->font_size * 3 / 5; // 兜底
+
+            // 2. 上下标偏移：简单取 x-height 的 1/2
+            fm->sub_shift = fm->x_height / 2;
+            fm->super_shift = fm->x_height / 2;
+
+            // 3. 修正 baseline
+           
+            //char buf[256];
+            //snprintf(buf, sizeof(buf),
+            //    "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
+            //    cleanName.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
+            //OutputDebugStringA(buf);
+
         }
     }
     /*----------------------------------------------------------
       6. 返回句柄
     ----------------------------------------------------------*/
-    FontPair* fp = new FontPair{ fmt, nullptr, size };
-    SetStatus(1, currentFamily.c_str());
+    FontPair* fp = new FontPair{ fmt, nullptr, descr.size };
+    SetStatus(1, a2w(descr.family).c_str());
     return reinterpret_cast<litehtml::uint_ptr>(fp);
 }
 
@@ -3136,87 +3947,84 @@ void D2DBackend::delete_font(litehtml::uint_ptr h)
     if (h) delete reinterpret_cast<FontPair*>(h);
 }
 
-void D2DBackend::draw_background(litehtml::uint_ptr hdc,
-    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
-{
-    assert(m_rt && "render target is null");
-    if (bg.empty()) return;
+//void D2DBackend::draw_background(litehtml::uint_ptr hdc,
+//    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
+//{
+//    assert(m_rt && "render target is null");
+//    if (bg.empty()) return;
+//
+//    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
+//
+//    for (const auto& b : bg)
+//    {
+//        //--------------------------------------------------
+//        // 1. 纯色背景
+//        //--------------------------------------------------
+//        if (b.image.empty())
+//        {
+//            ComPtr<ID2D1SolidColorBrush> brush;
+//            rt->CreateSolidColorBrush(
+//                D2D1::ColorF(b.color.red / 255.0f,
+//                    b.color.green / 255.0f,
+//                    b.color.blue / 255.0f,
+//                    b.color.alpha / 255.0f),
+//                &brush);
+//
+//            D2D1_RECT_F rc = D2D1::RectF(
+//                (float)b.border_box.left(), (float)b.border_box.top(),
+//                (float)b.border_box.right(), (float)b.border_box.bottom());
+//
+//            rt->FillRectangle(rc, brush.Get());
+//            continue;
+//        }
+//
+//        //--------------------------------------------------
+//        // 2. 图片背景
+//        //--------------------------------------------------
+//        auto it = img_cache.find(b.image);
+//        if (it == img_cache.end()) continue;   // 还没加载
+//
+//        const ImageFrame& frame = it->second;
+//        if (frame.rgba.empty()) continue;
+//
+//        // 如果已经缓存过 D2D 位图，直接拿；否则创建一次再缓存
+//        ComPtr<ID2D1Bitmap> bmp;
+//        auto d2d_it = m_d2dBitmapCache.find(b.image);
+//        if (d2d_it != m_d2dBitmapCache.end())
+//        {
+//            bmp = d2d_it->second;
+//        }
+//        else
+//        {
+//            D2D1_BITMAP_PROPERTIES bp =
+//                D2D1::BitmapProperties(
+//                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+//                        D2D1_ALPHA_MODE_PREMULTIPLIED));
+//
+//            HRESULT hr = rt->CreateBitmap(
+//                D2D1::SizeU(frame.width, frame.height),
+//                frame.rgba.data(),
+//                frame.stride,
+//                bp,
+//                &bmp);
+//
+//            if (SUCCEEDED(hr))
+//                m_d2dBitmapCache.emplace(b.image, bmp);
+//        }
+//
+//        if (!bmp) continue;
+//
+//        // 简单拉伸到 border_box；需要平铺/居中的话再算源/目标矩形
+//        D2D1_RECT_F dst = D2D1::RectF(
+//            (float)b.border_box.left(), (float)b.border_box.top(),
+//            (float)b.border_box.right(), (float)b.border_box.bottom());
+//
+//        rt->DrawBitmap(bmp.Get(), dst);
+//    }
+//}
+//
 
-    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
-
-    for (const auto& b : bg)
-    {
-        //--------------------------------------------------
-        // 1. 纯色背景
-        //--------------------------------------------------
-        if (b.image.empty())
-        {
-            ComPtr<ID2D1SolidColorBrush> brush;
-            rt->CreateSolidColorBrush(
-                D2D1::ColorF(b.color.red / 255.0f,
-                    b.color.green / 255.0f,
-                    b.color.blue / 255.0f,
-                    b.color.alpha / 255.0f),
-                &brush);
-
-            D2D1_RECT_F rc = D2D1::RectF(
-                (float)b.border_box.left(), (float)b.border_box.top(),
-                (float)b.border_box.right(), (float)b.border_box.bottom());
-
-            rt->FillRectangle(rc, brush.Get());
-            continue;
-        }
-
-        //--------------------------------------------------
-        // 2. 图片背景
-        //--------------------------------------------------
-        auto it = img_cache.find(b.image);
-        if (it == img_cache.end()) continue;   // 还没加载
-
-        const ImageFrame& frame = it->second;
-        if (frame.rgba.empty()) continue;
-
-        // 如果已经缓存过 D2D 位图，直接拿；否则创建一次再缓存
-        ComPtr<ID2D1Bitmap> bmp;
-        auto d2d_it = m_d2dBitmapCache.find(b.image);
-        if (d2d_it != m_d2dBitmapCache.end())
-        {
-            bmp = d2d_it->second;
-        }
-        else
-        {
-            D2D1_BITMAP_PROPERTIES bp =
-                D2D1::BitmapProperties(
-                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                        D2D1_ALPHA_MODE_PREMULTIPLIED));
-
-            HRESULT hr = rt->CreateBitmap(
-                D2D1::SizeU(frame.width, frame.height),
-                frame.rgba.data(),
-                frame.stride,
-                bp,
-                &bmp);
-
-            if (SUCCEEDED(hr))
-                m_d2dBitmapCache.emplace(b.image, bmp);
-        }
-
-        if (!bmp) continue;
-
-        // 简单拉伸到 border_box；需要平铺/居中的话再算源/目标矩形
-        D2D1_RECT_F dst = D2D1::RectF(
-            (float)b.border_box.left(), (float)b.border_box.top(),
-            (float)b.border_box.right(), (float)b.border_box.bottom());
-
-        rt->DrawBitmap(bmp.Get(), dst);
-    }
-}
-
-int D2DBackend::pt_to_px(int pt) const
-{
-    return MulDiv(pt, 96, 72);   // 96 DPI
-}
-int D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+litehtml::pixel_t D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
 {
     if (!text || !*text || !hFont) return 0;
     FontPair* fp = reinterpret_cast<FontPair*>(hFont);
@@ -3228,7 +4036,7 @@ int D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
     if (textLen == 0) return 0;
     ComPtr<IDWriteTextLayout> layout;
     const float maxWidth = 65536.0f;
-    const float maxHeight = 0.0f;
+    const float maxHeight = 65536.0f;
     HRESULT hr = m_dwrite->CreateTextLayout(
         wtxt.data(), textLen,
         fp->format.Get(),
@@ -3254,6 +4062,95 @@ int D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
         total += cm.width;
 
     return static_cast<int>(total + 0.5f);
+}
+
+static void build_rounded_rect_path(
+    ComPtr<ID2D1GeometrySink>& sink,
+    const litehtml::position& pos,
+    const litehtml::border_radiuses& bdr)
+{
+    float l = float(pos.left()), t = float(pos.top());
+    float r = float(pos.right()), b = float(pos.bottom());
+
+    float rtl = float(bdr.top_left_x);
+    float rtr = float(bdr.top_right_x);
+    float rbr = float(bdr.bottom_right_x);
+    float rbl = float(bdr.bottom_left_x);
+
+    sink->BeginFigure(D2D1::Point2F(l + rtl, t), D2D1_FIGURE_BEGIN_FILLED);
+
+    // top edge
+    sink->AddLine(D2D1::Point2F(r - rtr, t));
+    if (rtr > 0) sink->AddArc(D2D1::ArcSegment(
+        D2D1::Point2F(r, t + rtr), D2D1::SizeF(rtr, rtr),
+        0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+
+    // right edge
+    sink->AddLine(D2D1::Point2F(r, b - rbr));
+    if (rbr > 0) sink->AddArc(D2D1::ArcSegment(
+        D2D1::Point2F(r - rbr, b), D2D1::SizeF(rbr, rbr),
+        0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+
+    // bottom edge
+    sink->AddLine(D2D1::Point2F(l + rbl, b));
+    if (rbl > 0) sink->AddArc(D2D1::ArcSegment(
+        D2D1::Point2F(l, b - rbl), D2D1::SizeF(rbl, rbl),
+        0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+
+    // left edge
+    sink->AddLine(D2D1::Point2F(l, t + rtl));
+    if (rtl > 0) sink->AddArc(D2D1::ArcSegment(
+        D2D1::Point2F(l + rtl, t), D2D1::SizeF(rtl, rtl),
+        0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+}
+
+void D2DBackend::set_clip(const litehtml::position& pos,
+    const litehtml::border_radiuses& bdr)
+{
+    if (!m_rt) return;
+
+    // 无圆角 → 矩形裁剪
+    if (is_all_zero(bdr))
+    {
+        m_rt->PushAxisAlignedClip(
+            D2D1::RectF(float(pos.left()), float(pos.top()),
+                float(pos.right()), float(pos.bottom())),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        m_clipStack.emplace_back(nullptr);          // 标记为矩形
+        return;
+    }
+
+    // 有圆角 → 用 PathGeometry + Layer
+    ComPtr<ID2D1Factory> factory;
+    m_rt->GetFactory(&factory);
+
+    ComPtr<ID2D1PathGeometry> path;
+    factory->CreatePathGeometry(&path);
+    ComPtr<ID2D1GeometrySink> sink;
+    path->Open(&sink);
+    build_rounded_rect_path(sink, pos, bdr);        // 见下
+    sink->Close();
+
+    ComPtr<ID2D1Layer> layer;
+    if (SUCCEEDED(m_rt->CreateLayer(nullptr, &layer)))
+    {
+        m_rt->PushLayer(
+            D2D1::LayerParameters(D2D1::InfiniteRect(), path.Get()),
+            layer.Get());
+        m_clipStack.emplace_back(std::move(layer));
+    }
+}
+
+void D2DBackend::del_clip()
+{
+    if (m_clipStack.empty()) return;
+    if (m_clipStack.back())
+        m_rt->PopLayer();           // 圆角
+    else
+        m_rt->PopAxisAlignedClip(); // 矩形
+    m_clipStack.pop_back();
 }
 
 // GDI backend
@@ -3314,6 +4211,26 @@ void GdiBackend::draw_text(litehtml::uint_ptr hdc,
     SelectObject(dc, old);
 }
 
+void GdiBackend::draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url)
+{
+}
+
+void GdiBackend::draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color)
+{
+}
+
+void GdiBackend::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient)
+{
+}
+
+void GdiBackend::draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient)
+{
+}
+
+void GdiBackend::draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient)
+{
+}
+
 void GdiBackend::draw_borders(litehtml::uint_ptr hdc,
     const litehtml::borders& borders,
     const litehtml::position& draw_pos,
@@ -3343,37 +4260,46 @@ void GdiBackend::draw_borders(litehtml::uint_ptr hdc,
     SelectObject(dc, oldBrush);
 }
 
-litehtml::uint_ptr GdiBackend::create_font(const char* faceName,
-    int size,
-    int weight,
-    litehtml::font_style italic,
-    unsigned int decoration,
-    litehtml::font_metrics* fm)
+void GdiBackend::draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker)
 {
-    std::wstring wface = a2w(faceName ? faceName : "Segoe UI");
-    HFONT hFont = CreateFontW(
-        -size, 0, 0, 0,
-        weight,
-        italic == litehtml::font_style_italic ? TRUE : FALSE,
-        FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-        wface.c_str());
-
-    HDC dc = m_hdc;
-    HFONT old = (HFONT)SelectObject(dc, hFont);
-    GdiFont* f = new GdiFont{ hFont };
-    GetTextMetrics(dc, &f->tm);
-    SelectObject(dc, old);
-
-    if (fm) {
-        fm->ascent = f->tm.tmAscent;
-        fm->descent = f->tm.tmDescent;
-        fm->height = f->tm.tmHeight;
-        fm->x_height = f->tm.tmHeight / 2; // 近似
-    }
-    return reinterpret_cast<litehtml::uint_ptr>(f);
 }
+
+litehtml::uint_ptr GdiBackend::create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm)
+{
+    return litehtml::uint_ptr();
+}
+
+//litehtml::uint_ptr GdiBackend::create_font(const char* faceName,
+//    int size,
+//    int weight,
+//    litehtml::font_style italic,
+//    unsigned int decoration,
+//    litehtml::font_metrics* fm)
+//{
+//    std::wstring wface = a2w(faceName ? faceName : "Segoe UI");
+//    HFONT hFont = CreateFontW(
+//        -size, 0, 0, 0,
+//        weight,
+//        italic == litehtml::font_style_italic ? TRUE : FALSE,
+//        FALSE, FALSE, DEFAULT_CHARSET,
+//        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+//        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+//        wface.c_str());
+//
+//    HDC dc = m_hdc;
+//    HFONT old = (HFONT)SelectObject(dc, hFont);
+//    GdiFont* f = new GdiFont{ hFont };
+//    GetTextMetrics(dc, &f->tm);
+//    SelectObject(dc, old);
+//
+//    if (fm) {
+//        fm->ascent = f->tm.tmAscent;
+//        fm->descent = f->tm.tmDescent;
+//        fm->height = f->tm.tmHeight;
+//        fm->x_height = f->tm.tmHeight / 2; // 近似
+//    }
+//    return reinterpret_cast<litehtml::uint_ptr>(f);
+//}
 
 void GdiBackend::delete_font(litehtml::uint_ptr h)
 {
@@ -3385,12 +4311,9 @@ void GdiBackend::delete_font(litehtml::uint_ptr h)
 }
 
 
-int GdiBackend::pt_to_px(int pt) const
-{
-    return MulDiv(pt, GetDeviceCaps(m_hdc, LOGPIXELSY), 72);
-}
 
-int GdiBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+
+litehtml::pixel_t GdiBackend::text_width(const char* text, litehtml::uint_ptr hFont)
 {
     if (!hFont || !text) return 0;
     HFONT hF = reinterpret_cast<HFONT>(hFont);
@@ -3404,6 +4327,12 @@ int GdiBackend::text_width(const char* text, litehtml::uint_ptr hFont)
     SelectObject(hdc, old);
     ReleaseDC(nullptr, hdc);
     return sz.cx;
+}
+void GdiBackend::set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius)
+{
+}
+void GdiBackend::del_clip()
+{
 }
 // freetype backend
 struct FreetypeCtx {
@@ -3481,6 +4410,26 @@ void FreetypeBackend::draw_text(litehtml::uint_ptr,
     }
 }
 
+void FreetypeBackend::draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url)
+{
+}
+
+void FreetypeBackend::draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color)
+{
+}
+
+void FreetypeBackend::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient)
+{
+}
+
+void FreetypeBackend::draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient)
+{
+}
+
+void FreetypeBackend::draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient)
+{
+}
+
 
 
 /* ---------- 边框 ---------- */
@@ -3501,31 +4450,40 @@ void FreetypeBackend::draw_borders(litehtml::uint_ptr,
     drawEdge(l, b - borders.bottom.width, r - l, borders.bottom.width, borders.bottom);
 }
 
-/* ---------- 字体 ---------- */
-litehtml::uint_ptr FreetypeBackend::create_font(const char* faceName,
-    int size,
-    int weight,
-    litehtml::font_style italic,
-    unsigned int,
-    litehtml::font_metrics* fm)
+void FreetypeBackend::draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker)
 {
-    std::string path = "C:/Windows/Fonts/"; // 可扩展
-    path += faceName ? faceName : "segoeui.ttf";
-
-    FT_Face face;
-    if (FT_New_Face(m_lib, path.c_str(), 0, &face)) return 0;
-
-    auto* font = new FreetypeFont{ face, size };
-
-    if (fm) {
-        FT_Set_Pixel_Sizes(face, 0, size);
-        fm->ascent = face->size->metrics.ascender >> 6;
-        fm->descent = -(face->size->metrics.descender >> 6);
-        fm->height = (face->size->metrics.height) >> 6;
-        fm->x_height = fm->height / 2; // 近似
-    }
-    return reinterpret_cast<litehtml::uint_ptr>(font);
 }
+
+litehtml::uint_ptr FreetypeBackend::create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm)
+{
+    return litehtml::uint_ptr();
+}
+
+/* ---------- 字体 ---------- */
+//litehtml::uint_ptr FreetypeBackend::create_font(const char* faceName,
+//    int size,
+//    int weight,
+//    litehtml::font_style italic,
+//    unsigned int,
+//    litehtml::font_metrics* fm)
+//{
+//    std::string path = "C:/Windows/Fonts/"; // 可扩展
+//    path += faceName ? faceName : "segoeui.ttf";
+//
+//    FT_Face face;
+//    if (FT_New_Face(m_lib, path.c_str(), 0, &face)) return 0;
+//
+//    auto* font = new FreetypeFont{ face, size };
+//
+//    if (fm) {
+//        FT_Set_Pixel_Sizes(face, 0, size);
+//        fm->ascent = face->size->metrics.ascender >> 6;
+//        fm->descent = -(face->size->metrics.descender >> 6);
+//        fm->height = (face->size->metrics.height) >> 6;
+//        fm->x_height = fm->height / 2; // 近似
+//    }
+//    return reinterpret_cast<litehtml::uint_ptr>(font);
+//}
 
 void FreetypeBackend::delete_font(litehtml::uint_ptr h)
 {
@@ -3536,16 +4494,13 @@ void FreetypeBackend::delete_font(litehtml::uint_ptr h)
     }
 }
 
-int FreetypeBackend::pt_to_px(int pt) const
-{
-    return MulDiv(pt, m_dpi, 72);
-}
+
 
 /* ---------- 内部工具 ---------- */
 void FreetypeBackend::fill_rect(const litehtml::position& rc,
     litehtml::web_color c)
 {
-    uint8_t* dst = m_surface + rc.y * m_stride + rc.x * 4;
+    uint8_t* dst = m_surface + std::int16_t(rc.y) * m_stride + std::int16_t(rc.x) * 4;
     for (int y = 0; y < rc.height; ++y) {
         uint8_t* p = dst;
         for (int x = 0; x < rc.width; ++x) {
@@ -3582,7 +4537,7 @@ void FreetypeBackend::blit_glyph(int x, int y,
     }
 }
 
-int FreetypeBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+litehtml::pixel_t FreetypeBackend::text_width(const char* text, litehtml::uint_ptr hFont)
 {
     if (!text || !*text || !hFont) return 0;
 
@@ -3611,11 +4566,26 @@ int FreetypeBackend::text_width(const char* text, litehtml::uint_ptr hFont)
     return (pen_x + 32) >> 6;   // 四舍五入
 }
 
+void FreetypeBackend::set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius)
+{
+}
+
+void FreetypeBackend::del_clip()
+{
+}
+
 void EPUBBook::load_all_fonts() {
     if (g_container && g_container->m_canvas) 
     {
         auto fonts = collect_epub_fonts();
+        FontKey key{ L"serif", 400, false };
+        m_fontBin[key] = g_cfg.default_serif;
+        key = { L"sans-serif", 400, false };
+        m_fontBin[key] = g_cfg.default_sans_serif;
+        key = { L"monospace", 400, false };
+        m_fontBin[key] = g_cfg.default_monospace;
         build_epub_font_index(g_book->ocf_pkg_, g_book.get());
+
         g_container->m_canvas->backend()->load_all_fonts(fonts);
     }
 }
@@ -4450,7 +5420,7 @@ HRESULT MemoryFontLoader::CreateInMemoryFontFile(
 
 AppBootstrap::AppBootstrap() {
     //make_tooltip_backend();
-    if (!g_cfg.disableJS) { enableJS(); }
+    if (g_cfg.enableJS) { enableJS(); }
     if (!g_container) {
         g_container = std::make_shared<SimpleContainer>(g_hView);
     }
@@ -4547,63 +5517,63 @@ HBITMAP GdiBackend::create_dib_from_frame(const ImageFrame& frame)
     return hBmp;
 }
 
-void GdiBackend::draw_background(litehtml::uint_ptr hdc,
-    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
-{
-    if (bg.empty()) return;
-    HDC dc = reinterpret_cast<HDC>(hdc);
-
-    for (const auto& b : bg)
-    {
-        RECT rc{ b.border_box.left(), b.border_box.top(),
-                 b.border_box.right(), b.border_box.bottom() };
-
-        //--------------------------------------------------
-        // 1. 纯色背景
-        //--------------------------------------------------
-        if (b.image.empty())
-        {
-            HBRUSH br = CreateSolidBrush(to_cr(b.color));
-            FillRect(dc, &rc, br);
-            DeleteObject(br);
-            continue;
-        }
-
-        //--------------------------------------------------
-        // 2. 图片背景
-        //--------------------------------------------------
-        auto it = img_cache.find(b.image);
-        if (it == img_cache.end()) continue;   // 未加载
-
-        const ImageFrame& frame = it->second;
-        if (frame.rgba.empty()) continue;
-
-        // 先看缓存
-        HBITMAP& hBmp = m_gdiBitmapCache[b.image];
-        if (!hBmp)
-            hBmp = create_dib_from_frame(frame);
-        if (!hBmp) continue;
-
-        // 创建内存 DC
-        HDC memDC = CreateCompatibleDC(dc);
-        HGDIOBJ oldBmp = SelectObject(memDC, hBmp);
-
-        // 拉伸到目标矩形
-        int srcW = static_cast<int>(frame.width);
-        int srcH = static_cast<int>(frame.height);
-        SetStretchBltMode(dc, HALFTONE);
-        StretchBlt(dc,
-            rc.left, rc.top,
-            rc.right - rc.left,
-            rc.bottom - rc.top,
-            memDC,
-            0, 0, srcW, srcH,
-            SRCCOPY);
-
-        SelectObject(memDC, oldBmp);
-        DeleteDC(memDC);
-    }
-}
+//void GdiBackend::draw_background(litehtml::uint_ptr hdc,
+//    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
+//{
+//    if (bg.empty()) return;
+//    HDC dc = reinterpret_cast<HDC>(hdc);
+//
+//    for (const auto& b : bg)
+//    {
+//        RECT rc{ b.border_box.left(), b.border_box.top(),
+//                 b.border_box.right(), b.border_box.bottom() };
+//
+//        //--------------------------------------------------
+//        // 1. 纯色背景
+//        //--------------------------------------------------
+//        if (b.image.empty())
+//        {
+//            HBRUSH br = CreateSolidBrush(to_cr(b.color));
+//            FillRect(dc, &rc, br);
+//            DeleteObject(br);
+//            continue;
+//        }
+//
+//        //--------------------------------------------------
+//        // 2. 图片背景
+//        //--------------------------------------------------
+//        auto it = img_cache.find(b.image);
+//        if (it == img_cache.end()) continue;   // 未加载
+//
+//        const ImageFrame& frame = it->second;
+//        if (frame.rgba.empty()) continue;
+//
+//        // 先看缓存
+//        HBITMAP& hBmp = m_gdiBitmapCache[b.image];
+//        if (!hBmp)
+//            hBmp = create_dib_from_frame(frame);
+//        if (!hBmp) continue;
+//
+//        // 创建内存 DC
+//        HDC memDC = CreateCompatibleDC(dc);
+//        HGDIOBJ oldBmp = SelectObject(memDC, hBmp);
+//
+//        // 拉伸到目标矩形
+//        int srcW = static_cast<int>(frame.width);
+//        int srcH = static_cast<int>(frame.height);
+//        SetStretchBltMode(dc, HALFTONE);
+//        StretchBlt(dc,
+//            rc.left, rc.top,
+//            rc.right - rc.left,
+//            rc.bottom - rc.top,
+//            memDC,
+//            0, 0, srcW, srcH,
+//            SRCCOPY);
+//
+//        SelectObject(memDC, oldBmp);
+//        DeleteDC(memDC);
+//    }
+//}
 
 
 void FreetypeBackend::draw_image(const ImageFrame& frame,
@@ -4630,32 +5600,32 @@ void FreetypeBackend::draw_image(const ImageFrame& frame,
     }
 }
 
-void FreetypeBackend::draw_background(litehtml::uint_ptr,
-    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
-{
-    for (const auto& b : bg)
-    {
-        //--------------------------------------------------
-        // 1. 纯色背景
-        //--------------------------------------------------
-        if (b.image.empty())
-        {
-            fill_rect(b.border_box, b.color);
-            continue;
-        }
-
-        //--------------------------------------------------
-        // 2. 图片背景
-        //--------------------------------------------------
-        auto it = img_cache.find(b.image);
-        if (it == img_cache.end()) continue;   // 未加载
-
-        const ImageFrame& frame = it->second;
-        if (frame.rgba.empty()) continue;
-
-        draw_image(frame, b.border_box);
-    }
-}
+//void FreetypeBackend::draw_background(litehtml::uint_ptr,
+//    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
+//{
+//    for (const auto& b : bg)
+//    {
+//        //--------------------------------------------------
+//        // 1. 纯色背景
+//        //--------------------------------------------------
+//        if (b.image.empty())
+//        {
+//            fill_rect(b.border_box, b.color);
+//            continue;
+//        }
+//
+//        //--------------------------------------------------
+//        // 2. 图片背景
+//        //--------------------------------------------------
+//        auto it = img_cache.find(b.image);
+//        if (it == img_cache.end()) continue;   // 未加载
+//
+//        const ImageFrame& frame = it->second;
+//        if (frame.rgba.empty()) continue;
+//
+//        draw_image(frame, b.border_box);
+//    }
+//}
 
 FreetypeBackend::~FreetypeBackend()
 {
@@ -4859,23 +5829,13 @@ RenderWorker::~RenderWorker() { stop(); }
 void EPUBBook::show_tooltip(const std::string html, int x, int y)
 {
     //OutputDebugStringA(("[show_tooltip] " + std::to_string(x) + " " + std::to_string(y) + "\n").c_str());
-    if (html.empty()) { hide_tooltip(); return; }
-
-    // 1. 创建/重用 300×200 的 WS_POPUP 窗口
-    if (!g_hTooltip)
-    {
-
-        //SetWindowLongPtr(g_hTooltip, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-   
-
-    }
-    //g_tooltip_container->m_img_cache = g_container->m_img_cache;
-    //OutputDebugStringA(("[show_tooltip] " + html+ "\n").c_str());
- 
+    if (html.empty() && !g_tooltip_container) { hide_tooltip(); return; }
 
 
+    bool empty = html.empty();
+    const char* ptr = html.c_str();
     g_tooltip_container->m_doc = litehtml::document::createFromString(
-        html.c_str(), g_tooltip_container.get(), nullptr, nullptr);
+        { html.c_str(), litehtml::encoding::utf_8 }, g_tooltip_container.get());
     int width = g_cfg.tooltip_width;
     g_tooltip_container->m_doc->render(width);
     // 3. 计算大小：让 litehtml 自己排版
@@ -4886,7 +5846,7 @@ void EPUBBook::show_tooltip(const std::string html, int x, int y)
     int height = g_tooltip_container->m_doc->height();
     int tip_x = pt.x - width/2;
     int tip_y = pt.y - height - 20;
-    //if (tip_y < 0) { tip_y = pt.y  + 20; }
+    if (tip_y < 0) { tip_y = pt.y  + 20; }
     //OutputDebugStringA(("[render size]" + std::to_string(width) + " " + std::to_string(height) + "\n").c_str());
     // ④ 最终定位
     SetWindowPos(g_hTooltip, HWND_TOPMOST,
@@ -5327,7 +6287,7 @@ void SimpleContainer::clear()
     //m_canvas->clear();
 }
 
-int SimpleContainer::get_default_font_size() const
+litehtml::pixel_t SimpleContainer::get_default_font_size() const
 { 
     return g_cfg.default_font_size; 
 }
@@ -5365,7 +6325,7 @@ void D2DBackend::clear()
 {
     m_privateFonts.Reset();
     m_d2dBitmapCache.clear();
-
+    m_clipStack.clear();
 }
 
 void GdiCanvas::clear(){}
@@ -5376,3 +6336,200 @@ void FreetypeCanvas::clear() {}
 
 void FreetypeBackend::clear() {}
 
+//
+//
+//void D2DBackend::draw_text_fragment(const text_fragment& frag)
+//{
+//    /* 1. 画文字本体 */
+//    FontHandle* fh = reinterpret_cast<FontHandle*>(frag.font);
+//    m_dc->DrawTextA(frag.text, strlen(frag.text),
+//        fh->fmt.Get(),
+//        D2D1::RectF(frag.pos.x, frag.pos.y,
+//            frag.pos.x + 10000, frag.pos.y + 10000),
+//        m_brush_text);
+//
+//    /* 2. 画装饰线 */
+//    if (frag.decoration_line == text_decoration_line_none) return;
+//
+//    float yBase = static_cast<float>(frag.pos.y + fh->ascent);
+//    float lineH = frag.decoration_thickness.is_predefined()
+//        ? 1.0f
+//        : static_cast<float>(frag.decoration_thickness.val());
+//    D2D1_COLOR_F c = to_d2d_color(frag.decoration_color);
+//
+//    m_brush_decoration->SetColor(c);
+//
+//    if (frag.decoration_line & text_decoration_line_underline)
+//        draw_decoration(make_decoration(frag, fh, text_decoration_line_underline),
+//            m_dc.Get(), m_brush_decoration.Get(), m_d2dFactory.Get());
+//
+//    if (frag.decoration_line & text_decoration_line_overline)
+//        draw_decoration(make_decoration(frag, fh, text_decoration_line_overline),
+//            m_dc.Get(), m_brush_decoration.Get(), m_d2dFactory.Get());
+//
+//    if (frag.decoration_line & text_decoration_line_line_through)
+//        draw_decoration(make_decoration(frag, fh, text_decoration_line_line_through),
+//            m_dc.Get(), m_brush_decoration.Get(), m_d2dFactory.Get());
+//
+//    /* 3. 画 emphasis（字符强调） */
+//    if (!frag.emphasis_style.empty())
+//    {
+//        draw_emphasis_marks(frag); // 见下
+//    }
+//}
+//
+//void D2DBackend::draw_emphasis_marks(const text_fragment& frag)
+//{
+//    static const std::unordered_map<std::string, wchar_t> kMark = {
+//        {"filled circle", L'●'},
+//        {"open circle",   L'○'},
+//        {"filled dot",    L'・'},
+//        {"open dot",      L'◦'},
+//    };
+//
+//    wchar_t mark = kMark.count(frag.emphasis_style) ? kMark.at(frag.emphasis_style) : L'●';
+//    std::wstring wmark(1, mark);
+//
+//    FontHandle* fh = reinterpret_cast<FontHandle*>(frag.font);
+//
+//    /* 计算垂直位置 */
+//    float y = (frag.emphasis_position == text_emphasis_position_over)
+//        ? frag.pos.y - fh->ascent * 0.8f
+//        : frag.pos.y + fh->height;
+//
+//    m_brush_emphasis->SetColor(to_d2d_color(frag.emphasis_color));
+//
+//    m_dc->DrawTextW(wmark.c_str(), 1,
+//        fh->fmt.Get(),
+//        D2D1::RectF(frag.pos.x, y,
+//            frag.pos.x + 10000, y + 10000),
+//        m_brush_emphasis.Get());
+//}
+//
+//ComPtr<ID2D1StrokeStyle> create_stroke(text_decoration_style style)
+//{
+//    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
+//    switch (style)
+//    {
+//    case text_decoration_style_dotted:
+//        props.dashStyle = D2D1_DASH_STYLE_DOT;
+//        break;
+//    case text_decoration_style_dashed:
+//        props.dashStyle = D2D1_DASH_STYLE_DASH;
+//        break;
+//    default:
+//        props.dashStyle = D2D1_DASH_STYLE_SOLID;
+//        break;
+//    }
+//    ComPtr<ID2D1StrokeStyle> stroke;
+//    m_d2dFactory->CreateStrokeStyle(props, nullptr, 0, &stroke);
+//    return stroke;
+//}
+//
+//DecorationJob make_decoration(const text_fragment& frag,
+//    FontHandle* fh,
+//    int line_type)   // underline / overline / line-through
+//{
+//    DecorationJob j{};
+//    j.color = frag.decoration_color;
+//    j.style = frag.decoration_style;
+//    j.thickness = frag.decoration_thickness.is_predefined()
+//        ? std::max(1.0f, fh->height * 0.08f)  // UA 默认 ≈ 8% font-height
+//        : static_cast<float>(frag.decoration_thickness.val());
+//
+//    /* 水平范围 */
+//    j.from.x = static_cast<float>(frag.pos.x);
+//    j.to.x = static_cast<float>(frag.pos.right());
+//
+//    /* 垂直位置：根据 line_type + 字体度量微调 */
+//    float base = static_cast<float>(frag.pos.y + fh->ascent);
+//    switch (line_type)
+//    {
+//    case text_decoration_line_underline:
+//        j.from.y = j.to.y = base + fh->descent * 0.5f + j.thickness * 0.5f;
+//        break;
+//    case text_decoration_line_overline:
+//        j.from.y = j.to.y = base - fh->ascent * 0.1f - j.thickness * 0.5f;
+//        break;
+//    case text_decoration_line_line_through:
+//        j.from.y = j.to.y = base - fh->ascent * 0.4f;
+//        break;
+//    }
+//    return j;
+//}
+//
+//ComPtr<ID2D1StrokeStyle> stroke_for(text_decoration_style style,
+//    ID2D1Factory* factory)
+//{
+//    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
+//    switch (style)
+//    {
+//    case text_decoration_style_dotted:
+//        props.dashStyle = D2D1_DASH_STYLE_DOT;
+//        break;
+//    case text_decoration_style_dashed:
+//        props.dashStyle = D2D1_DASH_STYLE_DASH;
+//        break;
+//    default:
+//        props.dashStyle = D2D1_DASH_STYLE_SOLID;
+//        break;
+//    }
+//    ComPtr<ID2D1StrokeStyle> stroke;
+//    factory->CreateStrokeStyle(props, nullptr, 0, &stroke);
+//    return stroke;
+//}
+//
+//void draw_wavy_line(ID2D1RenderTarget* rt,
+//    ID2D1Brush* brush,
+//    const DecorationJob& job)
+//{
+//    float amp = job.thickness * 1.5f;               // 波幅
+//    float step = amp * 2.0f;                        // 半波长
+//    float len = job.to.x - job.from.x;
+//    ComPtr<ID2D1PathGeometry> geo;
+//    ComPtr<ID2D1Factory> factory;
+//    rt->GetFactory(&factory);
+//    factory->CreatePathGeometry(&geo);
+//    ComPtr<ID2D1GeometrySink> sink;
+//    geo->Open(&sink);
+//
+//    sink->BeginFigure(job.from, D2D1_FIGURE_BEGIN_HOLLOW);
+//    for (float x = 0; x < len; x += step)
+//    {
+//        float x1 = job.from.x + x + step * 0.5f;
+//        float y1 = job.from.y + ((int)(x / step) & 1 ? -amp : amp);
+//        sink->AddBezier(D2D1::BezierSegment(
+//            D2D1::Point2F(job.from.x + x + step * 0.25f, job.from.y),
+//            D2D1::Point2F(job.from.x + x + step * 0.75f, y1),
+//            D2D1::Point2F(x1, y1)));
+//    }
+//    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+//    sink->Close();
+//
+//    rt->DrawGeometry(geo.Get(), brush, job.thickness);
+//}
+//
+//void draw_decoration(const DecorationJob& job, ID2D1RenderTarget* rt,
+//    ID2D1SolidColorBrush* brush, ID2D1Factory* factory)
+//{
+//    brush->SetColor(to_d2d_color(job.color));
+//
+//    if (job.style == text_decoration_style_double)
+//    {
+//        float gap = job.thickness * 1.2f;
+//        DecorationJob j1 = job, j2 = job;
+//        j1.from.y = j1.to.y = job.from.y - gap * 0.5f;
+//        j2.from.y = j2.to.y = job.from.y + gap * 0.5f;
+//        rt->DrawLine(j1.from, j1.to, brush, j1.thickness);
+//        rt->DrawLine(j2.from, j2.to, brush, j2.thickness);
+//    }
+//    else if (job.style == text_decoration_style_wavy)
+//    {
+//        draw_wavy_line(rt, brush, job);
+//    }
+//    else
+//    {
+//        auto stroke = stroke_for(job.style, factory);
+//        rt->DrawLine(job.from, job.to, brush, job.thickness, stroke.Get());
+//    }
+//}

@@ -13,6 +13,8 @@
 #include <sstream>
 #include <vector>
 #include <map>
+#define _USE_MATH_DEFINES
+#include <cmath>
 #include <memory>
 #include <string>
 #include <future>
@@ -23,12 +25,13 @@
 #include <lunasvg/lunasvg.h>    
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
-#include <litehtml/litehtml.h>
-#include <litehtml/document.h>
-#include <litehtml/element.h>
-#include <litehtml/render_item.h>
-
-#include <litehtml/html_tag.h>
+#include <litehtml.h>
+//#include <litehtml/document.h>
+//#include <litehtml/element.h>
+//#include <litehtml/types.h>
+//#include <litehtml/render_item.h>
+//
+//#include <litehtml/html_tag.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #pragma comment(lib, "freetype.lib")
@@ -47,8 +50,6 @@ using namespace Gdiplus;
 #include <wininet.h>
 #include "resource.h"
 #include <duktape.h>
-
-
 
 #include <chrono>
 #include <thread>
@@ -94,6 +95,7 @@ using namespace Gdiplus;
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <array>
 
 using Microsoft::WRL::ComPtr;
 
@@ -128,14 +130,23 @@ class IRenderBackend {
 public:
     virtual ~IRenderBackend() = default;
 
-    /* 必须实现的 7 个纯虚函数 */
     virtual void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) = 0;
-    virtual void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) = 0;
-    virtual litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) = 0;
-    virtual void delete_font(litehtml::uint_ptr h) = 0;
-    virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) = 0;
-    virtual int pt_to_px(int pt) const = 0;
-    virtual int text_width(const char* text, litehtml::uint_ptr hFont) = 0;
+    virtual void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) = 0;
+    virtual void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) = 0 ;
+    virtual void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) = 0;
+    virtual void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) = 0;
+    virtual void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) = 0;
+    virtual void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) = 0;
+    virtual void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) = 0;
+    virtual litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) = 0;
+    virtual void				delete_font(litehtml::uint_ptr hFont) = 0;
+    virtual litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) = 0;
+    virtual	void set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) = 0;
+    virtual	void del_clip() = 0;
+
+    //virtual litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) = 0;
+    //virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) = 0;
+    
     virtual void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts) = 0;
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
@@ -173,12 +184,19 @@ public:
     explicit GdiBackend(int width, int height);
     /* 下面 7 个函数在 .cpp 里用 ExtTextOut / Rectangle 等实现 */
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
-    int pt_to_px(int pt) const override;
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
+    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
+    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
+    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
+    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
+    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
+    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
+    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
+    void				delete_font(litehtml::uint_ptr hFont) override;
+    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
+    void	del_clip() override;
+
     void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void resize(int width, int height) override;
     ~GdiBackend();
@@ -205,21 +223,30 @@ class D2DBackend : public IRenderBackend {
 public:
     D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx);
     //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
-    /* 下面 6 个函数在 .cpp 里用 IDWriteTextLayout / ID2D1SolidColorBrush 实现 */
+
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    std::vector<std::wstring> split_font_list(const std::string& src);
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
-    int pt_to_px(int pt) const override;
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
+
+    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
+    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
+    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
+    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
+    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
+    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
+    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
+    void				delete_font(litehtml::uint_ptr hFont) override;
+    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
+    void	del_clip() override;
+
     void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void unload_fonts(void);
     void resize(int width, int height) override;
-    std::optional<std::wstring> mapDynamic(const std::wstring& key);
-    std::wstring resolveFace(const std::wstring& raw);
+    //std::optional<std::wstring> mapDynamic(const std::wstring& key);
+    //std::wstring resolveFace(const std::wstring& raw);
+    std::vector<std::wstring> split_font_list(const std::string& src);
     ComPtr<ID2D1BitmapRenderTarget> m_rt;
+    bool is_all_zero(const litehtml::border_radiuses& r);
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
 private:
@@ -230,9 +257,9 @@ private:
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
     ComPtr<ID2D1RenderTarget> m_devCtx;
     static std::wstring toLower(std::wstring s);
-    static std::optional<std::wstring> mapStatic(const std::wstring& key);
+    //static std::optional<std::wstring> mapStatic(const std::wstring& key);
     float m_baselineY = 0;
-
+    std::vector<ComPtr<ID2D1Layer>>  m_clipStack;  // 新增
     ComPtr<IDWriteFontCollection> m_sysFontColl;
     int  m_w, m_h;
 };
@@ -245,12 +272,19 @@ public:
         uint8_t* surface, int stride,
         FT_Library lib);
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) override;
-    int pt_to_px(int pt) const override;
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
+    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
+    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
+    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
+    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
+    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
+    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
+    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
+    void				delete_font(litehtml::uint_ptr hFont) override;
+    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
+    void	del_clip() override;
+
     void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
@@ -549,28 +583,23 @@ class EPUBBook {
 
 
 struct AppSettings {
-    bool disableCSS = false;   // 默认启用 css
-    bool disableJS = true;   // 默认禁用 JS
-    bool disablePreprocessHTML = false;
+    bool enableCSS = true;   // 默认启用 css
+    bool enableJS = false;   // 默认禁用 JS
+    bool enableGlobalCSS = false;
+    bool enablePreprocessHTML = true;
+    bool displayTOC = true;
+    bool displayStatusBar = true;
+    bool displayMenuBar = true;
+    bool displayScrollBar = true;
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Cambria";
     int default_font_size = 16;
-    float line_height_multiplier = 1.6;
+    float line_height_multiplier = 1.0;
     int tooltip_width = 350;
     int document_width = 600;
-    std::set<std::wstring> font_serif = { L"Source Han Serif SC",
-        L"Noto Serif CJK SC",
-        L"SimSun",
-        L"Times New Roman" };
-    std::set<std::wstring> font_sans_serif = { L"Source Han Sans SC",
-        L"Noto Sans CJK SC",
-        L"Microsoft YaHei",
-        L"PingFang SC",
-        L"Arial" };
-    std::set<std::wstring> font_monospace = { L"JetBrains Mono",
-        L"Sarasa Gothic SC",
-        L"Consolas",
-        L"Courier New" };
+    std::wstring default_serif = L"Source Han Serif SC";
+    std::wstring default_sans_serif = L"Source Han Sans SC";
+    std::wstring default_monospace = L"JetBrains Mono";
 };
 struct AppStates {
     // ---- 取消令牌 ----
@@ -587,97 +616,97 @@ struct AppStates {
         cancelToken = std::make_shared<std::atomic_bool>(false);
     }
 };
-static  std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
-    /* 英文字体 */
-    {L"charis",               L"Charis SIL"},
-    {L"charis sil",           L"Charis SIL"},
-    {L"times",                L"Times New Roman"},
-    {L"times new roman",      L"Times New Roman"},
-    {L"timesnewroman",        L"Times New Roman"},
-    {L"arial",                L"Arial"},
-    {L"helvetica",            L"Arial"},           // 在 Windows 上 Helvetica 映射到 Arial
-    {L"verdana",              L"Verdana"},
-    {L"tahoma",               L"Tahoma"},
-    {L"georgia",              L"Georgia"},
-    {L"garamond",             L"Garamond"},
-    {L"palatino",             L"Palatino Linotype"},
-    {L"palatino linotype",    L"Palatino Linotype"},
-    {L"courier",              L"Courier New"},
-    {L"courier new",          L"Courier New"},
-    {L"consolas",             L"Consolas"},
-    {L"lucida console",       L"Lucida Console"},
-    {L"lucida sans unicode",  L"Lucida Sans Unicode"},
-    {L"comic sans",           L"Comic Sans MS"},
-    {L"comic sans ms",        L"Comic Sans MS"},
-    {L"impact",               L"Impact"},
-    {L"trebuchet",            L"Trebuchet MS"},
-    {L"trebuchet ms",          L"Trebuchet MS"},
-    {L"franklin gothic",      L"Franklin Gothic Medium"},
-    {L"tradegothicltstd",        L"Trade Gothic LT Std"},
-    {L"bodoniegyptian-regular", L"BodoniEgyptian"},
-    {L"nobel-regular",           L"Nobel"},
-    {L"nsannotations500-mono" , L"NSAnnotations500 Monospace500"},
-    /* 思源 / 开源无衬线 */
-    {L"source sans",           L"Source Sans Pro"},
-    {L"source sans pro",       L"Source Sans Pro"},
-    {L"source serif",          L"Source Serif Pro"},
-    {L"source serif pro",      L"Source Serif Pro"},
-    {L"source code",           L"Source Code Pro"},
-    {L"source code pro",       L"Source Code Pro"},
-
-    /* 等宽 / 编程字体 */
-    {L"fira code",             L"Fira Code"},
-    {L"fira mono",             L"Fira Mono"},
-    {L"jetbrains mono",        L"JetBrains Mono"},
-    {L"cascadia code",         L"Cascadia Code"},
-    {L"cascadia mono",         L"Cascadia Mono"},
-    {L"roboto mono",           L"Roboto Mono"},
-    {L"inconsolata",           L"Inconsolata"},
-
-    /* 中文字体（简体） */
-    {L"simsun",                L"SimSun"},
-    {L"songti",                L"SimSun"},
-    {L"宋体",                  L"SimSun"},
-    {L"simhei",                L"SimHei"},
-    {L"黑体",                  L"SimHei"},
-    {L"microsoft yahei",       L"Microsoft YaHei"},
-    {L"yahei",                 L"Microsoft YaHei"},
-    {L"微软雅黑",               L"Microsoft YaHei"},
-    {L"dengxian",               L"DengXian"},
-    {L"等线",                  L"DengXian"},
-    {L"kaiti",                 L"KaiTi"},
-    {L"kaiti sc",              L"KaiTi"},
-    {L"楷体",                  L"KaiTi"},
-    {L"fangsong",              L"FangSong"},
-    {L"fangsong sc",           L"FangSong"},
-    {L"仿宋",                  L"FangSong"},
-    {L"lisu",                  L"LiSu"},
-    {L"隶书",                  L"LiSu"},
-    {L"hy-xiaolishu",          L"HYXiaoLiShu_GB18030Super"},
-
-
-    /* 中文字体（繁体） */
-    {L"mingliu",               L"MingLiU"},
-    {L"pmingliu",              L"PMingLiU"},
-    {L"mingliuhkscs",          L"MingLiU_HKSCS"},
-    {L"標楷體",                L"DFKai-SB"},
-
-    /* 日文字体 */
-    {L"ms gothic",             L"MS Gothic"},
-    {L"ms mincho",             L"MS Mincho"},
-    {L"yu gothic",             L"Yu Gothic"},
-    {L"yu mincho",             L"Yu Mincho"},
-    {L"meiryo",                L"Meiryo"},
-    {L"メイリオ",               L"Meiryo"},
-
-    /* 韩文字体 */
-    {L"malgun gothic",         L"Malgun Gothic"},
-    {L"malgun",                L"Malgun Gothic"},
-    {L"맑은 고딕",             L"Malgun Gothic"},
-    {L"batang",                L"Batang"},
-    {L"gulim",                 L"Gulim"},
-    {L"dotum",                 L"Dotum"}
-};
+//static  std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
+//    /* 英文字体 */
+//    {L"charis",               L"Charis SIL"},
+//    {L"charis sil",           L"Charis SIL"},
+//    {L"times",                L"Times New Roman"},
+//    {L"times new roman",      L"Times New Roman"},
+//    {L"timesnewroman",        L"Times New Roman"},
+//    {L"arial",                L"Arial"},
+//    {L"helvetica",            L"Arial"},           // 在 Windows 上 Helvetica 映射到 Arial
+//    {L"verdana",              L"Verdana"},
+//    {L"tahoma",               L"Tahoma"},
+//    {L"georgia",              L"Georgia"},
+//    {L"garamond",             L"Garamond"},
+//    {L"palatino",             L"Palatino Linotype"},
+//    {L"palatino linotype",    L"Palatino Linotype"},
+//    {L"courier",              L"Courier New"},
+//    {L"courier new",          L"Courier New"},
+//    {L"consolas",             L"Consolas"},
+//    {L"lucida console",       L"Lucida Console"},
+//    {L"lucida sans unicode",  L"Lucida Sans Unicode"},
+//    {L"comic sans",           L"Comic Sans MS"},
+//    {L"comic sans ms",        L"Comic Sans MS"},
+//    {L"impact",               L"Impact"},
+//    {L"trebuchet",            L"Trebuchet MS"},
+//    {L"trebuchet ms",          L"Trebuchet MS"},
+//    {L"franklin gothic",      L"Franklin Gothic Medium"},
+//    {L"tradegothicltstd",        L"Trade Gothic LT Std"},
+//    {L"bodoniegyptian-regular", L"BodoniEgyptian"},
+//    {L"nobel-regular",           L"Nobel"},
+//    {L"nsannotations500-mono" , L"NSAnnotations500 Monospace500"},
+//    /* 思源 / 开源无衬线 */
+//    {L"source sans",           L"Source Sans Pro"},
+//    {L"source sans pro",       L"Source Sans Pro"},
+//    {L"source serif",          L"Source Serif Pro"},
+//    {L"source serif pro",      L"Source Serif Pro"},
+//    {L"source code",           L"Source Code Pro"},
+//    {L"source code pro",       L"Source Code Pro"},
+//
+//    /* 等宽 / 编程字体 */
+//    {L"fira code",             L"Fira Code"},
+//    {L"fira mono",             L"Fira Mono"},
+//    {L"jetbrains mono",        L"JetBrains Mono"},
+//    {L"cascadia code",         L"Cascadia Code"},
+//    {L"cascadia mono",         L"Cascadia Mono"},
+//    {L"roboto mono",           L"Roboto Mono"},
+//    {L"inconsolata",           L"Inconsolata"},
+//
+//    /* 中文字体（简体） */
+//    {L"simsun",                L"SimSun"},
+//    {L"songti",                L"SimSun"},
+//    {L"宋体",                  L"SimSun"},
+//    {L"simhei",                L"SimHei"},
+//    {L"黑体",                  L"SimHei"},
+//    {L"microsoft yahei",       L"Microsoft YaHei"},
+//    {L"yahei",                 L"Microsoft YaHei"},
+//    {L"微软雅黑",               L"Microsoft YaHei"},
+//    {L"dengxian",               L"DengXian"},
+//    {L"等线",                  L"DengXian"},
+//    {L"kaiti",                 L"KaiTi"},
+//    {L"kaiti sc",              L"KaiTi"},
+//    {L"楷体",                  L"KaiTi"},
+//    {L"fangsong",              L"FangSong"},
+//    {L"fangsong sc",           L"FangSong"},
+//    {L"仿宋",                  L"FangSong"},
+//    {L"lisu",                  L"LiSu"},
+//    {L"隶书",                  L"LiSu"},
+//    {L"hy-xiaolishu",          L"HYXiaoLiShu_GB18030Super"},
+//
+//
+//    /* 中文字体（繁体） */
+//    {L"mingliu",               L"MingLiU"},
+//    {L"pmingliu",              L"PMingLiU"},
+//    {L"mingliuhkscs",          L"MingLiU_HKSCS"},
+//    {L"標楷體",                L"DFKai-SB"},
+//
+//    /* 日文字体 */
+//    {L"ms gothic",             L"MS Gothic"},
+//    {L"ms mincho",             L"MS Mincho"},
+//    {L"yu gothic",             L"Yu Gothic"},
+//    {L"yu mincho",             L"Yu Mincho"},
+//    {L"meiryo",                L"Meiryo"},
+//    {L"メイリオ",               L"Meiryo"},
+//
+//    /* 韩文字体 */
+//    {L"malgun gothic",         L"Malgun Gothic"},
+//    {L"malgun",                L"Malgun Gothic"},
+//    {L"맑은 고딕",             L"Malgun Gothic"},
+//    {L"batang",                L"Batang"},
+//    {L"gulim",                 L"Gulim"},
+//    {L"dotum",                 L"Dotum"}
+//};
 
 
 
@@ -689,49 +718,58 @@ public:
     explicit SimpleContainer(HWND hwnd);
     ~SimpleContainer();
     void clear();
-    int text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void load_image(const char* src, const char* /*baseurl*/, bool) override;
 
-    void get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
-    void get_client_rect(litehtml::position& client) const override;
-    litehtml::element::ptr create_element(const char*, const litehtml::string_map&, const std::shared_ptr<litehtml::document>&) override;
+     litehtml::pixel_t	get_default_font_size() const override;
+     const char*        get_default_font_name() const override;
 
-    int get_default_font_size() const override;
-    const char* get_default_font_name() const override;
-    void import_css(litehtml::string&, const litehtml::string&, litehtml::string&) override;
+     void	load_image(const char* src, const char* baseurl, bool redraw_on_ready) override;
+     void	get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
+     void	get_viewport(litehtml::position& viewport) const override;
+     void	import_css(litehtml::string& text, const litehtml::string& url, litehtml::string& baseurl) override;
 
-    void set_caption(const char*) override;
-    void set_base_url(const char*) override;
-    void link(const std::shared_ptr<litehtml::document>&, const litehtml::element::ptr&) override;
-    void on_anchor_click(const char*, const litehtml::element::ptr&) override;
-    void set_cursor(const char*) override;
-    void transform_text(litehtml::string&, litehtml::text_transform) override;
+     void	set_caption(const char* caption) override;
+     void	set_base_url(const char* base_url) override;
+     void	link(const std::shared_ptr<litehtml::document>& doc, const litehtml::element::ptr& el) override;
 
-    void set_clip(const litehtml::position&, const litehtml::border_radiuses&) override;
-    void del_clip() override;
+     void	set_cursor(const char* cursor) override;
+     void	transform_text(litehtml::string& text, litehtml::text_transform tt) override;
 
-    void get_media_features(litehtml::media_features&) const override;
-    void get_language(litehtml::string&, litehtml::string&) const override;
+     litehtml::element::ptr	create_element(const char* tag_name, const litehtml::string_map& attributes, const std::shared_ptr<litehtml::document>& doc) override;
 
-    void draw_list_marker(litehtml::uint_ptr, const litehtml::list_marker&) override;
+    void	get_media_features(litehtml::media_features& media) const override;
+    void	get_language(litehtml::string& language, litehtml::string& culture) const override;
 
+    // 事件
+    void	on_anchor_click(const char* url, const litehtml::element::ptr& el) override;
+    bool	on_element_click(const litehtml::element::ptr& /*el*/) override;
+    void	on_mouse_event(const litehtml::element::ptr& el, litehtml::mouse_event event) override;
 
+    // litehtml 新增
+    void	split_text(const char* text, const std::function<void(const char*)>& on_word, const std::function<void(const char*)>& on_space) override;
+    litehtml::string resolve_color(const litehtml::string& /*color*/) const { return litehtml::string(); }
+
+    litehtml::pixel_t	pt_to_px(float pt) const override;
 
 
     // 渲染后端需要实现的
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_borders(litehtml::uint_ptr, const litehtml::borders&, const litehtml::position&, bool) override;
-    litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) override;
-    void delete_font(litehtml::uint_ptr h) override;
-    void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&) override;
-    int pt_to_px(int pt) const override;
+    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
+    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
+    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
+    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
+    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
+    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
+    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
+    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
+    void				delete_font(litehtml::uint_ptr hFont) override;
+    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
+    void	del_clip() override;
 
-
-
-    void makeBackend(HWND hwnd);
-    void resize(int w, int y);
 
     //自定义函数
+    void makeBackend(HWND hwnd);
+    void resize(int w, int y);
 
     std::unordered_map<std::string, ImageFrame> m_img_cache;
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
@@ -768,3 +806,26 @@ struct TVData {
 // 全局索引 ----------------------------------------------------------
 
 
+//struct text_fragment {
+//    const char* text;
+//    litehtml::uint_ptr font;
+//    litehtml::web_color color;
+//    litehtml::position  pos;
+//    // 下面就是装饰信息
+//    int                 decoration_line;      // bitset
+//    css_length          decoration_thickness;
+//    text_decoration_style decoration_style;
+//    web_color           decoration_color;
+//    std::string         emphasis_style;
+//    web_color           emphasis_color;
+//    int                 emphasis_position;
+//};
+//
+//struct DecorationJob
+//{
+//    D2D1_POINT2F        from;          // 线起点
+//    D2D1_POINT2F        to;            // 线终点
+//    float               thickness;     // 已换算为 px
+//    web_color           color;
+//    text_decoration_style style;
+//};
