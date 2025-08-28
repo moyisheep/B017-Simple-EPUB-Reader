@@ -1551,7 +1551,8 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         RECT rc;
         GetClientRect(hWnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
-        g_scrollY = std::clamp<int>(g_scrollY - zDelta, 0, std::max<int>(g_maxScroll - rc.bottom, 0));
+        //g_scrollY = std::clamp<int>(g_scrollY - zDelta, 0, std::max<int>(g_maxScroll - rc.bottom, 0));
+        g_scrollY = g_scrollY - zDelta;
         SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
         InvalidateRect(hWnd, nullptr, FALSE);
@@ -6184,7 +6185,26 @@ std::string EPUBBook::get_anchor_html(litehtml::document* doc,
 //}
 
 // ---------- 分页 ----------
-
+std::wstring get_href_by_id(int id)
+{
+    auto spine = g_book->ocf_pkg_.spine;
+    if (id < spine.size() && id >= 0  ) 
+    { 
+        return spine[id].href;
+    }
+    return L"";
+}
+int get_id_by_href(std::wstring& href)
+{
+    auto spine = g_book->ocf_pkg_.spine;
+    for (int i = 0; i < spine.size(); i++)
+    {
+        if (spine[i].href == href) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 void Paginator::load(litehtml::document* doc, int w, int h)
 {
@@ -6200,7 +6220,32 @@ void Paginator::load(litehtml::document* doc, int w, int h)
 void Paginator::render(ICanvas* canvas, int scrollY)
 {
     if (!canvas || !m_doc) return;
-
+    if (g_scrollY > g_maxScroll)
+    {
+        int id = get_id_by_href(g_currentHtmlPath);
+        if (id >= 0) {
+            id += 1;
+            std::wstring html = get_href_by_id(id);
+            if (!html.empty())
+            {
+                g_book->OnTreeSelChanged(html.c_str());
+            }
+        }
+        return;
+    }
+    if (g_scrollY < 0)
+    {
+        int id = get_id_by_href(g_currentHtmlPath);
+        if (id >= 0) {
+            id -= 1;
+            std::wstring html = get_href_by_id(id);
+            if (!html.empty())
+            {
+                g_book->OnTreeSelChanged(html.c_str());
+            }
+        }
+        return;
+    }
     int render_width = g_cfg.document_width;
     /* 1) 需要排版才排 */
     if (g_states.needRelayout.exchange(false)) {
@@ -6553,3 +6598,66 @@ D2DBackend::D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
 
     m_dwrite->GetSystemFontCollection(&m_sysFontColl, FALSE);
 }
+
+
+//struct VirtualDoc {
+//    int m_client_w, m_client_h;
+//    int m_doc_w;
+//    std::string html;
+//    std::unique_ptr<SimpleContainer> m_container;
+//    std::vector<OCFRef> spine;
+//    litehtml::document::ptr render()
+//    {
+//        auto doc = litehtml::document::createFromString(html, m_container.get());
+//        doc->render(m_doc_w);
+//        return doc;
+//    }
+//    void load(EPUBBook& book)
+//    {
+//        spine = book.ocf_pkg_.spine;
+//    }
+//    int get_id_by_href(std::wstring& href)
+//    {
+//        for (int i = 0; i < spine.size(); i++ )
+//        {
+//            if (spine[i].href == href) 
+//            {
+//                return i;
+//            }
+//        }
+//        return -1;
+//    }
+//    std::wstring get_href_by_id(int id) 
+//    { 
+//        return spine[id].href; 
+//    }
+//    void set_doc_width(int width)
+//    {
+//        m_doc_w = width;
+//    }
+//    void resize(int width, int height)
+//    {
+//        m_client_w = width;
+//        m_client_h = height;
+//    }
+//    litehtml::document::ptr get_doc()
+//    {
+//        auto doc = render();
+//        while (doc->height() < m_client_h * 2)
+//        {
+//            needMore();
+//            render();
+//        }
+//        return doc;
+//    }
+//    void getBitmap()
+//    {
+//        //从get_doc获取到doc后，开始draw，然后将离屏渲染的位图拿出来返回
+//    }
+//    void needMore()
+//    {
+//        // 从当前加载的html中找出下一块拼到变量html中，若当前html拼完了就根据id加载下一个html文件继续拼接
+//    }
+//};
+
+
