@@ -1499,8 +1499,11 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSELEAVE: 
     {
-        litehtml::position::vector redraw_box;
-        g_container->m_doc->on_mouse_leave(redraw_box);
+        if (g_container && g_container->m_doc) 
+        {
+            litehtml::position::vector redraw_box;
+            g_container->m_doc->on_mouse_leave(redraw_box);
+        }
         //g_book->hide_tooltip();
         return 0;
     }
@@ -2121,6 +2124,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_PREPROCESS_HTML,
         MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
     EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
+    EnableMenuItem(hMenu, IDM_TOGGLE_PREPROCESS_HTML, MF_BYCOMMAND | MF_GRAYED);
     //if(!g_cfg.enableCSS)
     //{
     //    EnableMenuItem(hMenu, IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_GRAYED);
@@ -2160,7 +2164,7 @@ void EPUBBook::init_doc(std::string html) {
 
     if (html.empty()) return;
     if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
-    if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
+    if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html);}
     g_container->clear();
     //g_container.reset();
 
@@ -2318,6 +2322,7 @@ void SimpleContainer::import_css(litehtml::string& text,
     const litehtml::string& url,
     litehtml::string& baseurl)
 {
+    
     if (!g_cfg.enableCSS) {
         //text.clear();           // 禁用所有外部/内部 CSS
         return;
@@ -2537,24 +2542,8 @@ litehtml::pixel_t SimpleContainer::pt_to_px(float pt) const {
 }
 
 
-// --------------------------------------------------
-// 通用 HTML 预处理
-// --------------------------------------------------
-std::string PreprocessHTML(std::string html)
+std::string preprocess_js(std::string html)
 {
-    //-------------------------------------------------
-    // 1. Adobe Adept <meta name="..." value="..."/>
-    //-------------------------------------------------
-// 把 <title/> 或 <title /> 改成成对标签 <title></title>
-    html = std::regex_replace(html,
-        std::regex(R"(<title\b[^>]*?/\s*>)", std::regex::icase),
-        "<title></title>");
-
-
-    //-------------------------------------------------
-    // 2. 自闭合 <script .../> → <script ...>code</script>
-    //-------------------------------------------------
-  // 2. 自闭合 <script .../> → <script ...>code</script>
     if (!g_cfg.enableJS) {
         // 1) 删除 <script ...>...</script>
         static const std::regex reScriptPair(
@@ -2606,6 +2595,169 @@ std::string PreprocessHTML(std::string html)
         out.append(html, last, std::string::npos);
         html.swap(out);
     }
+}
+
+
+// ---------- 工具 ----------
+
+static std::vector<std::string> split_ws(const std::string& s)
+{
+    std::vector<std::string> v;
+    std::string cur;
+    for (char c : s)
+    {
+        if (std::isspace(static_cast<unsigned char>(c)))
+        {
+            if (!cur.empty()) { v.push_back(cur); cur.clear(); }
+        }
+        else cur += c;
+    }
+    if (!cur.empty()) v.push_back(cur);
+    return v;
+}
+static inline bool gumbo_tag_is_void(GumboTag tag)
+{
+    switch (tag)
+    {
+    case GUMBO_TAG_AREA:
+    case GUMBO_TAG_BASE:
+    case GUMBO_TAG_BR:
+    case GUMBO_TAG_COL:
+    case GUMBO_TAG_EMBED:
+    case GUMBO_TAG_HR:
+    case GUMBO_TAG_IMG:
+    case GUMBO_TAG_INPUT:
+    case GUMBO_TAG_LINK:
+    case GUMBO_TAG_META:
+    case GUMBO_TAG_PARAM:
+    case GUMBO_TAG_SOURCE:
+    case GUMBO_TAG_TRACK:
+    case GUMBO_TAG_WBR:
+        return true;
+    default:
+        return false;
+    }
+}
+// ---------- 递归处理 DOM ----------
+static void walk(GumboNode* node, std::ostringstream& out, bool& inside_style)
+{
+    if (node->type == GUMBO_NODE_TEXT)
+    {
+        if (inside_style)
+        {
+            // 对 <style> 里的文本做 CSS 替换
+            static std::regex re(R"rx(\[epub\|type\s*~\s*=\s*"([^"]+)"])rx",
+                std::regex::icase);
+            std::string txt = std::regex_replace(node->v.text.text, re, ".epub-$1");
+            out << txt;
+        }
+        else
+            out << node->v.text.text;
+        return;
+    }
+    if (node->type != GUMBO_NODE_ELEMENT) return;
+
+    GumboElement& el = node->v.element;
+    const char* tag = gumbo_normalized_tagname(el.tag);
+    out << '<' << tag;
+
+    // 处理属性
+    std::string new_class;
+    for (unsigned i = 0; i < el.attributes.length; ++i)
+    {
+        GumboAttribute* a = static_cast<GumboAttribute*>(el.attributes.data[i]);
+        std::string name = to_lower(a->name);
+
+        if (name.rfind("epub:", 0) == 0)
+        {
+            if (name == "epub:type")
+            {
+                for (const auto& v : split_ws(a->value))
+                    new_class += "epub-" + v + " ";
+            }
+            continue; // 丢弃 epub:*
+        }
+
+        // style 属性内也可能出现 CSS，简单替换
+        if (name == "style")
+        {
+            static std::regex re(R"re(\[epub\|type\s*~\s*=\s*"([^"]+)"\])re",
+                std::regex::icase);
+                std::string fixed = std::regex_replace(a->value, re, ".epub-$1");
+                out << " style=\"" << fixed << "\"";
+                continue;
+        }
+
+        out << ' ' << a->name << "=\"" << a->value << "\"";
+    }
+
+    if (!new_class.empty())
+    {
+        new_class.pop_back(); // 去尾空格
+        bool has_class = false;
+        for (unsigned i = 0; i < el.attributes.length; ++i)
+        {
+            GumboAttribute* a = static_cast<GumboAttribute*>(el.attributes.data[i]);
+            if (to_lower(a->name) == "class")
+            {
+                out << " class=\"" << a->value << " " << new_class << "\"";
+                has_class = true;
+                break;
+            }
+        }
+        if (!has_class)
+            out << " class=\"" << new_class << "\"";
+    }
+
+    if (gumbo_tag_is_void(el.tag))
+    {
+        out << " />";
+        return;
+    }
+
+    out << '>';
+    bool was_inside_style = inside_style;
+    if (std::string(tag) == "style") inside_style = true;
+    for (unsigned i = 0; i < el.children.length; ++i)
+        walk(static_cast<GumboNode*>(el.children.data[i]), out, inside_style);
+    inside_style = was_inside_style;
+    out << "</" << tag << '>';
+}
+
+// ---------- 对外单一接口 ----------
+std::string sanitize_epub_attr(const std::string html)
+{
+    GumboOutput* out = gumbo_parse(html.c_str());
+    std::ostringstream oss;
+    bool inside_style = false;
+    walk(out->root, oss, inside_style);
+    gumbo_destroy_output(&kGumboDefaultOptions, out);
+    return oss.str();
+}
+
+// --------------------------------------------------
+// 通用 HTML 预处理
+// --------------------------------------------------
+std::string PreprocessHTML(std::string html)
+{
+    //-------------------------------------------------
+    // 1. Adobe Adept <meta name="..." value="..."/>
+    //-------------------------------------------------
+// 把 <title/> 或 <title /> 改成成对标签 <title></title>
+    //html = std::regex_replace(html,
+    //    std::regex(R"(<title\b[^>]*?/\s*>)", std::regex::icase),
+    //    "<title></title>");
+
+    html = std::regex_replace(
+        html,
+        std::regex(R"(<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?)/\s*>)", std::regex::icase),
+        "<$1$2></$1>");
+    //-------------------------------------------------
+    // 2. 自闭合 <script .../> → <script ...>code</script>
+    //-------------------------------------------------
+  // 2. 自闭合 <script .../> → <script ...>code</script>
+    html = preprocess_js(html);
+    //html = sanitize_epub_attr(html);
     //-------------------------------------------------
     // 2. EPUB 3 的 <meta property="..." content="..."/>
     //     litehtml 只认识 name/content，不认识 property
@@ -2847,100 +2999,135 @@ void D2DCanvas::present(HDC hdc, int x, int y)
 // ---------- 辅助：UTF-8 ↔ UTF-16 ----------
 
 
-// ---------- 字体缓存 ----------
-struct FontPair {
-    ComPtr<IDWriteTextFormat> format;
-    ComPtr<IDWriteFontFace>   face;
-    float size;
-};
 
 // ---------- 实现 ----------
+ComPtr<ID2D1SolidColorBrush> D2DBackend::getBrush(const litehtml::web_color& c)
+{
+    uint32_t key = (c.alpha << 24) | (c.red << 16) | (c.green << 8) | c.blue;
+    auto it = m_brushPool.find(key);
+    if (it != m_brushPool.end()) return it->second;
 
-D2DBackend::D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
-    : m_w(w), m_h(h), m_devCtx(devCtx){
-  
-    // 2. 创建 DWrite 工厂
-    HRESULT hr = DWriteCreateFactory(
-        DWRITE_FACTORY_TYPE_SHARED,
-        __uuidof(IDWriteFactory),
-        reinterpret_cast<IUnknown**>(m_dwrite.GetAddressOf()));
-    if (FAILED(hr))
-    {
-        OutputDebugStringA("DWriteCreateFactory failed\n");
-        __debugbreak();
-    }
-
-    ComPtr<ID2D1BitmapRenderTarget> bmpRT;
-    hr = m_devCtx->CreateCompatibleRenderTarget(
-        D2D1::SizeF(static_cast<float>(m_w), static_cast<float>(m_h)), // 逻辑尺寸
-        &bmpRT);
-     if (FAILED(hr))
-        throw std::runtime_error("CreateCompatibleRenderTarget failed");
-
-    m_rt = std::move(bmpRT);            // 保存到成员变量（可选）
-
-    /* 提前拿到系统字体集合（只需一次即可） */
- 
-    m_dwrite->GetSystemFontCollection(&m_sysFontColl, FALSE);
+    ComPtr<ID2D1SolidColorBrush> brush;
+    m_rt->CreateSolidColorBrush(
+        D2D1::ColorF(c.red / 255.f, c.green / 255.f, c.blue / 255.f, c.alpha / 255.f),
+        &brush);
+    m_brushPool[key] = brush;
+    return brush;
 }
+
+ComPtr<IDWriteTextLayout> D2DBackend::getLayout(const std::wstring& txt,
+    const FontPair* fp,
+    float maxW)
+{
+    LayoutKey k{ txt, fp->descr.hash(), maxW};
+    auto it = m_layoutCache.find(k);
+    if (it != m_layoutCache.end()) return it->second;
+
+    ComPtr<IDWriteTextLayout> layout;
+    m_dwrite->CreateTextLayout(txt.c_str(), (UINT32)txt.size(),
+        fp->format.Get(), maxW, 512.f, &layout);
+    if (!layout) return nullptr;
+
+    // 换行/截断
+    bool nowrap = false;
+    //layout->SetWordWrapping(nowrap ? DWRITE_WORD_WRAPPING_NO_WRAP
+    //    : DWRITE_WORD_WRAPPING_WRAP);
+    if (nowrap) {
+        DWRITE_TRIMMING trim{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+        layout->SetTrimming(&trim, nullptr);
+    }
+    m_layoutCache[k] = layout;
+    return layout;
+}
+
 void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     const char* text,
     litehtml::uint_ptr hFont,
     litehtml::web_color color,
     const litehtml::position& pos)
 {
-    assert(rt && SUCCEEDED(rt->GetFactory(nullptr)));
     if (!text || !*text || !hFont) return;
-
-    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
     FontPair* fp = reinterpret_cast<FontPair*>(hFont);
-    if (!rt) {
-        OutputDebugStringA("rt == nullptr\n");
-        return;
-    }
+    if (!fp) return;
 
+    // 1. 画刷
+    auto brush = getBrush(color);
+    if (!brush) return;
 
-    ComPtr<ID2D1SolidColorBrush> brush;
-    rt->CreateSolidColorBrush(
-        D2D1::ColorF(color.red / 255.0f,
-            color.green / 255.0f,
-            color.blue / 255.0f,
-            color.alpha / 255.0f),
-        &brush);
-    // 3. 文本
+    // 2. 文本
     std::wstring wtxt = a2w(text);
-    UINT32 textLen = static_cast<UINT32>(wtxt.size());
-    if (textLen == 0) return;
     if (wtxt.empty()) return;
-    // 4. 用足够大的布局宽度，避免文字被截断
-    const float maxWidth = 8192.0f;   // 足够大
-    const float maxHeight = 512.0f;
 
+    float maxW =  8192.0f;
+    auto layout = getLayout(wtxt, fp, maxW);
+    if (!layout) return;
 
+    // 3. 绘制文本
+    m_rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
+        static_cast<float>(pos.y)),
+        layout.Get(), brush.Get());
 
-    ComPtr<IDWriteTextLayout> layout;
-    m_dwrite->CreateTextLayout(
-        wtxt.c_str(), textLen,
-        fp->format.Get(),
-        maxWidth,
-        maxHeight,
-        &layout);
-
-    if (!layout) {
-        OutputDebugStringA("layout == nullptr\n");
+    // 4. 绘制装饰线（下划线 / 删除线 / 上划线）
+    draw_decoration(fp, color, pos, layout.Get());
+}
+void D2DBackend::draw_decoration(const FontPair* fp,
+    litehtml::web_color color,
+    const litehtml::position& pos,
+    IDWriteTextLayout* layout)
+{
+    if (fp->descr.decoration_line == litehtml::text_decoration_line_none)
         return;
+
+    /* 1. 文本整体尺寸 */
+    DWRITE_TEXT_METRICS tm{};
+    layout->GetMetrics(&tm);
+    if (tm.width <= 0) return;
+
+    /* 2. 取第一行的 baseline */
+    std::vector<DWRITE_LINE_METRICS> lineMetrics;
+    UINT32 lineCount = 0;
+    layout->GetLineMetrics(nullptr, 0, &lineCount);
+    if (lineCount == 0) return;
+    lineMetrics.resize(lineCount);
+    layout->GetLineMetrics(lineMetrics.data(), lineCount, &lineCount);
+
+    const float baseline = lineMetrics[0].baseline;
+    const float yBase = static_cast<float>(pos.y) + baseline;
+
+    /* 3. 画刷 */
+    auto brush = getBrush(fp->descr.decoration_color.is_current_color
+        ? color
+        : fp->descr.decoration_color);
+    if (!brush) return;
+
+    /* 4. 线粗：先用 1 px，后续可按 decoration_thickness 计算 */
+    const float thick = fp->descr.decoration_thickness.val();
+    
+    /* 5. 绘制三种装饰线 */
+    const float x0 = static_cast<float>(pos.x);
+    const float x1 = x0 + tm.width;
+
+    /* 下划线 */
+    if (fp->descr.decoration_line & litehtml::text_decoration_line_underline)
+    {
+        const float y = yBase + 1.0f;   // 可根据字体度量再微调
+        m_rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
     }
 
+    /* 删除线 */
+    if (fp->descr.decoration_line & litehtml::text_decoration_line_line_through)
+    {
+        const float y = yBase - lineMetrics[0].height * 0.35f;
+        m_rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
+    }
 
-    rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
-        static_cast<float>(pos.y)),
-        layout.Get(),
-        brush.Get());
-
-
+    /* 上划线 */
+    if (fp->descr.decoration_line & litehtml::text_decoration_line_overline)
+    {
+        const float y = yBase - lineMetrics[0].height;
+        m_rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
+    }
 }
-
-
 // ----------------------------------------------------------
 // 工具：根据 box 类型返回实际矩形
 // ----------------------------------------------------------
@@ -3925,7 +4112,7 @@ litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& des
             fm->super_shift = fm->x_height / 2;
 
             // 3. 修正 baseline
-           
+            SetStatus(1, cleanName.c_str());
             //char buf[256];
             //snprintf(buf, sizeof(buf),
             //    "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
@@ -3937,8 +4124,8 @@ litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& des
     /*----------------------------------------------------------
       6. 返回句柄
     ----------------------------------------------------------*/
-    FontPair* fp = new FontPair{ fmt, nullptr, descr.size };
-    SetStatus(1, a2w(descr.family).c_str());
+    FontPair* fp = new FontPair{ fmt, descr };
+
     return reinterpret_cast<litehtml::uint_ptr>(fp);
 }
 
@@ -6336,200 +6523,33 @@ void FreetypeCanvas::clear() {}
 
 void FreetypeBackend::clear() {}
 
-//
-//
-//void D2DBackend::draw_text_fragment(const text_fragment& frag)
-//{
-//    /* 1. 画文字本体 */
-//    FontHandle* fh = reinterpret_cast<FontHandle*>(frag.font);
-//    m_dc->DrawTextA(frag.text, strlen(frag.text),
-//        fh->fmt.Get(),
-//        D2D1::RectF(frag.pos.x, frag.pos.y,
-//            frag.pos.x + 10000, frag.pos.y + 10000),
-//        m_brush_text);
-//
-//    /* 2. 画装饰线 */
-//    if (frag.decoration_line == text_decoration_line_none) return;
-//
-//    float yBase = static_cast<float>(frag.pos.y + fh->ascent);
-//    float lineH = frag.decoration_thickness.is_predefined()
-//        ? 1.0f
-//        : static_cast<float>(frag.decoration_thickness.val());
-//    D2D1_COLOR_F c = to_d2d_color(frag.decoration_color);
-//
-//    m_brush_decoration->SetColor(c);
-//
-//    if (frag.decoration_line & text_decoration_line_underline)
-//        draw_decoration(make_decoration(frag, fh, text_decoration_line_underline),
-//            m_dc.Get(), m_brush_decoration.Get(), m_d2dFactory.Get());
-//
-//    if (frag.decoration_line & text_decoration_line_overline)
-//        draw_decoration(make_decoration(frag, fh, text_decoration_line_overline),
-//            m_dc.Get(), m_brush_decoration.Get(), m_d2dFactory.Get());
-//
-//    if (frag.decoration_line & text_decoration_line_line_through)
-//        draw_decoration(make_decoration(frag, fh, text_decoration_line_line_through),
-//            m_dc.Get(), m_brush_decoration.Get(), m_d2dFactory.Get());
-//
-//    /* 3. 画 emphasis（字符强调） */
-//    if (!frag.emphasis_style.empty())
-//    {
-//        draw_emphasis_marks(frag); // 见下
-//    }
-//}
-//
-//void D2DBackend::draw_emphasis_marks(const text_fragment& frag)
-//{
-//    static const std::unordered_map<std::string, wchar_t> kMark = {
-//        {"filled circle", L'●'},
-//        {"open circle",   L'○'},
-//        {"filled dot",    L'・'},
-//        {"open dot",      L'◦'},
-//    };
-//
-//    wchar_t mark = kMark.count(frag.emphasis_style) ? kMark.at(frag.emphasis_style) : L'●';
-//    std::wstring wmark(1, mark);
-//
-//    FontHandle* fh = reinterpret_cast<FontHandle*>(frag.font);
-//
-//    /* 计算垂直位置 */
-//    float y = (frag.emphasis_position == text_emphasis_position_over)
-//        ? frag.pos.y - fh->ascent * 0.8f
-//        : frag.pos.y + fh->height;
-//
-//    m_brush_emphasis->SetColor(to_d2d_color(frag.emphasis_color));
-//
-//    m_dc->DrawTextW(wmark.c_str(), 1,
-//        fh->fmt.Get(),
-//        D2D1::RectF(frag.pos.x, y,
-//            frag.pos.x + 10000, y + 10000),
-//        m_brush_emphasis.Get());
-//}
-//
-//ComPtr<ID2D1StrokeStyle> create_stroke(text_decoration_style style)
-//{
-//    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
-//    switch (style)
-//    {
-//    case text_decoration_style_dotted:
-//        props.dashStyle = D2D1_DASH_STYLE_DOT;
-//        break;
-//    case text_decoration_style_dashed:
-//        props.dashStyle = D2D1_DASH_STYLE_DASH;
-//        break;
-//    default:
-//        props.dashStyle = D2D1_DASH_STYLE_SOLID;
-//        break;
-//    }
-//    ComPtr<ID2D1StrokeStyle> stroke;
-//    m_d2dFactory->CreateStrokeStyle(props, nullptr, 0, &stroke);
-//    return stroke;
-//}
-//
-//DecorationJob make_decoration(const text_fragment& frag,
-//    FontHandle* fh,
-//    int line_type)   // underline / overline / line-through
-//{
-//    DecorationJob j{};
-//    j.color = frag.decoration_color;
-//    j.style = frag.decoration_style;
-//    j.thickness = frag.decoration_thickness.is_predefined()
-//        ? std::max(1.0f, fh->height * 0.08f)  // UA 默认 ≈ 8% font-height
-//        : static_cast<float>(frag.decoration_thickness.val());
-//
-//    /* 水平范围 */
-//    j.from.x = static_cast<float>(frag.pos.x);
-//    j.to.x = static_cast<float>(frag.pos.right());
-//
-//    /* 垂直位置：根据 line_type + 字体度量微调 */
-//    float base = static_cast<float>(frag.pos.y + fh->ascent);
-//    switch (line_type)
-//    {
-//    case text_decoration_line_underline:
-//        j.from.y = j.to.y = base + fh->descent * 0.5f + j.thickness * 0.5f;
-//        break;
-//    case text_decoration_line_overline:
-//        j.from.y = j.to.y = base - fh->ascent * 0.1f - j.thickness * 0.5f;
-//        break;
-//    case text_decoration_line_line_through:
-//        j.from.y = j.to.y = base - fh->ascent * 0.4f;
-//        break;
-//    }
-//    return j;
-//}
-//
-//ComPtr<ID2D1StrokeStyle> stroke_for(text_decoration_style style,
-//    ID2D1Factory* factory)
-//{
-//    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
-//    switch (style)
-//    {
-//    case text_decoration_style_dotted:
-//        props.dashStyle = D2D1_DASH_STYLE_DOT;
-//        break;
-//    case text_decoration_style_dashed:
-//        props.dashStyle = D2D1_DASH_STYLE_DASH;
-//        break;
-//    default:
-//        props.dashStyle = D2D1_DASH_STYLE_SOLID;
-//        break;
-//    }
-//    ComPtr<ID2D1StrokeStyle> stroke;
-//    factory->CreateStrokeStyle(props, nullptr, 0, &stroke);
-//    return stroke;
-//}
-//
-//void draw_wavy_line(ID2D1RenderTarget* rt,
-//    ID2D1Brush* brush,
-//    const DecorationJob& job)
-//{
-//    float amp = job.thickness * 1.5f;               // 波幅
-//    float step = amp * 2.0f;                        // 半波长
-//    float len = job.to.x - job.from.x;
-//    ComPtr<ID2D1PathGeometry> geo;
-//    ComPtr<ID2D1Factory> factory;
-//    rt->GetFactory(&factory);
-//    factory->CreatePathGeometry(&geo);
-//    ComPtr<ID2D1GeometrySink> sink;
-//    geo->Open(&sink);
-//
-//    sink->BeginFigure(job.from, D2D1_FIGURE_BEGIN_HOLLOW);
-//    for (float x = 0; x < len; x += step)
-//    {
-//        float x1 = job.from.x + x + step * 0.5f;
-//        float y1 = job.from.y + ((int)(x / step) & 1 ? -amp : amp);
-//        sink->AddBezier(D2D1::BezierSegment(
-//            D2D1::Point2F(job.from.x + x + step * 0.25f, job.from.y),
-//            D2D1::Point2F(job.from.x + x + step * 0.75f, y1),
-//            D2D1::Point2F(x1, y1)));
-//    }
-//    sink->EndFigure(D2D1_FIGURE_END_OPEN);
-//    sink->Close();
-//
-//    rt->DrawGeometry(geo.Get(), brush, job.thickness);
-//}
-//
-//void draw_decoration(const DecorationJob& job, ID2D1RenderTarget* rt,
-//    ID2D1SolidColorBrush* brush, ID2D1Factory* factory)
-//{
-//    brush->SetColor(to_d2d_color(job.color));
-//
-//    if (job.style == text_decoration_style_double)
-//    {
-//        float gap = job.thickness * 1.2f;
-//        DecorationJob j1 = job, j2 = job;
-//        j1.from.y = j1.to.y = job.from.y - gap * 0.5f;
-//        j2.from.y = j2.to.y = job.from.y + gap * 0.5f;
-//        rt->DrawLine(j1.from, j1.to, brush, j1.thickness);
-//        rt->DrawLine(j2.from, j2.to, brush, j2.thickness);
-//    }
-//    else if (job.style == text_decoration_style_wavy)
-//    {
-//        draw_wavy_line(rt, brush, job);
-//    }
-//    else
-//    {
-//        auto stroke = stroke_for(job.style, factory);
-//        rt->DrawLine(job.from, job.to, brush, job.thickness, stroke.Get());
-//    }
-//}
+
+// ---------- 实现 ----------
+
+D2DBackend::D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
+    : m_w(w), m_h(h), m_devCtx(devCtx) {
+
+    // 2. 创建 DWrite 工厂
+    HRESULT hr = DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(m_dwrite.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        OutputDebugStringA("DWriteCreateFactory failed\n");
+        __debugbreak();
+    }
+
+    ComPtr<ID2D1BitmapRenderTarget> bmpRT;
+    hr = m_devCtx->CreateCompatibleRenderTarget(
+        D2D1::SizeF(static_cast<float>(m_w), static_cast<float>(m_h)), // 逻辑尺寸
+        &bmpRT);
+    if (FAILED(hr))
+        throw std::runtime_error("CreateCompatibleRenderTarget failed");
+
+    m_rt = std::move(bmpRT);            // 保存到成员变量（可选）
+
+    /* 提前拿到系统字体集合（只需一次即可） */
+
+    m_dwrite->GetSystemFontCollection(&m_sysFontColl, FALSE);
+}

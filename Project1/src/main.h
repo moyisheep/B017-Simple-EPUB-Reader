@@ -50,7 +50,12 @@ using namespace Gdiplus;
 #include <wininet.h>
 #include "resource.h"
 #include <duktape.h>
-
+#include <gumbo.h>
+#include <string>
+#include <sstream>
+#include <vector>
+#include <unordered_set>
+#include <regex>
 #include <chrono>
 #include <thread>
 #include <set>
@@ -96,7 +101,8 @@ using namespace Gdiplus;
 #include <mutex>
 #include <condition_variable>
 #include <array>
-
+#include <d2d1.h>
+#include <d2d1helper.h>   // 保险起见，再带一次
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -123,6 +129,13 @@ namespace std {
         }
     };
 }
+
+// ---------- 字体缓存 ----------
+struct FontPair {
+    ComPtr<IDWriteTextFormat> format;
+    litehtml::font_description descr;
+};
+
 // -------------- 运行时策略 -----------------
 enum class Renderer { GDI, D2D, FreeType };
 // -------------- 抽象接口 -----------------
@@ -218,13 +231,33 @@ private:
     HBITMAP create_dib_from_frame(const ImageFrame& frame);
 };
 
+// 全局缓存（也可放 D2DBackend 内）
+struct LayoutKey {
+    std::wstring txt;
+    std::string  fontKey;
+    float        maxW;
+    bool operator==(const LayoutKey& o) const {
+        return txt == o.txt && fontKey == o.fontKey && maxW == o.maxW;
+    }
+};
+namespace std {
+    template<> struct hash<LayoutKey> {
+        size_t operator()(const LayoutKey& k) const noexcept {
+            return hash<std::wstring>()(k.txt) ^
+                hash<std::string>()(k.fontKey) ^
+                hash<float>()(k.maxW);
+        }
+    };
+}
 // -------------- DirectWrite-D2D 后端 -----------------
 class D2DBackend : public IRenderBackend {
 public:
     D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx);
     //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
 
+
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+  
     void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
 
     void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
@@ -249,6 +282,7 @@ public:
     bool is_all_zero(const litehtml::border_radiuses& r);
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
+    
 private:
     // 自动 AddRef/Release
     ComPtr<IDWriteFactory>    m_dwrite;
@@ -262,6 +296,13 @@ private:
     std::vector<ComPtr<ID2D1Layer>>  m_clipStack;  // 新增
     ComPtr<IDWriteFontCollection> m_sysFontColl;
     int  m_w, m_h;
+    ComPtr<ID2D1SolidColorBrush> getBrush(const litehtml::web_color& c);
+
+    ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
+    void draw_decoration(const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
+
+    std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
+    std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
 };
 
 // -------------- FreeType 后端 -----------------
@@ -594,12 +635,12 @@ struct AppSettings {
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Cambria";
     int default_font_size = 16;
-    float line_height_multiplier = 1.0;
+    float line_height_multiplier = 1.5;
     int tooltip_width = 350;
     int document_width = 600;
-    std::wstring default_serif = L"Source Han Serif SC";
-    std::wstring default_sans_serif = L"Source Han Sans SC";
-    std::wstring default_monospace = L"JetBrains Mono";
+    std::wstring default_serif = L"Georgia";
+    std::wstring default_sans_serif = L"Verdana";
+    std::wstring default_monospace = L"Consolas";
 };
 struct AppStates {
     // ---- 取消令牌 ----
@@ -806,26 +847,4 @@ struct TVData {
 // 全局索引 ----------------------------------------------------------
 
 
-//struct text_fragment {
-//    const char* text;
-//    litehtml::uint_ptr font;
-//    litehtml::web_color color;
-//    litehtml::position  pos;
-//    // 下面就是装饰信息
-//    int                 decoration_line;      // bitset
-//    css_length          decoration_thickness;
-//    text_decoration_style decoration_style;
-//    web_color           decoration_color;
-//    std::string         emphasis_style;
-//    web_color           emphasis_color;
-//    int                 emphasis_position;
-//};
-//
-//struct DecorationJob
-//{
-//    D2D1_POINT2F        from;          // 线起点
-//    D2D1_POINT2F        to;            // 线终点
-//    float               thickness;     // 已换算为 px
-//    web_color           color;
-//    text_decoration_style style;
-//};
+
