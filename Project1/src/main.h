@@ -103,6 +103,17 @@ using namespace Gdiplus;
 #include <array>
 #include <d2d1.h>
 #include <d2d1helper.h>   // 保险起见，再带一次
+#include <shared_mutex>
+#include <cstdint>
+#include <cwctype>
+#include <locale>
+#include <unicode/unistr.h>
+#include <unicode/brkiter.h>
+#include <unicode/utypes.h>
+#include <unicode/uchar.h>
+#include <unicode/utf8.h>
+#include <string>
+#include <functional>
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -115,20 +126,39 @@ struct ImageFrame
     std::vector<uint8_t> rgba;     // 连续像素，8-bit * 4
 };
 struct FontKey {
-    std::wstring family;   // CSS 中声明的名字
-    int          weight;   // 400 / 700
-    bool         italic;   // true = italic
-    bool operator==(const FontKey& o) const noexcept {
-        return family == o.family && weight == o.weight && italic == o.italic;
-    }
+    std::wstring family;
+    int          weight;
+    bool         italic;
+    int          size;          // px
+    bool operator==(const FontKey& o) const noexcept = default;
 };
 namespace std {
-    template<> struct hash<FontKey> {
+    template<>
+    struct hash<FontKey> {
         size_t operator()(const FontKey& k) const noexcept {
-            return hash<wstring>()(k.family) ^ (hash<int>()(k.weight) << 1) ^ (hash<bool>()(k.italic) << 2);
+            size_t h = std::hash<std::wstring>()(k.family);
+            h ^= (k.weight << 1) | (k.italic ? 1 : 0);
+            h ^= k.size;
+            return h;
         }
     };
 }
+
+//struct FontKey {
+//    std::wstring family;   // CSS 中声明的名字
+//    int          weight;   // 400 / 700
+//    bool         italic;   // true = italic
+//    bool operator==(const FontKey& o) const noexcept {
+//        return family == o.family && weight == o.weight && italic == o.italic;
+//    }
+//};
+//namespace std {
+//    template<> struct hash<FontKey> {
+//        size_t operator()(const FontKey& k) const noexcept {
+//            return hash<wstring>()(k.family) ^ (hash<int>()(k.weight) << 1) ^ (hash<bool>()(k.italic) << 2);
+//        }
+//    };
+//}
 
 // ---------- 字体缓存 ----------
 struct FontPair {
@@ -249,6 +279,33 @@ namespace std {
         }
     };
 }
+class FontCache {
+public:
+    FontCache();
+    ~FontCache() = default;
+    // 主入口：根据 litehtml 描述 + 可选私有集合，返回 TextFormat
+    Microsoft::WRL::ComPtr<IDWriteTextFormat>
+        get(std::wstring& familyName, const litehtml::font_description& descr,
+            IDWriteFontCollection* privateColl = nullptr, IDWriteFontCollection* sysColl = nullptr);
+    void clear();
+private:
+
+
+    // 内部：真正创建
+    Microsoft::WRL::ComPtr<IDWriteTextFormat>
+        create(const FontKey& key, IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl);
+
+    // 工具：在指定集合里找家族
+    bool findFamily(IDWriteFontCollection* coll,
+        const std::wstring& name,
+        UINT32& index);
+
+    std::unordered_map<FontKey, Microsoft::WRL::ComPtr<IDWriteTextFormat>> m_map;
+    mutable std::shared_mutex                                            m_mtx;
+    Microsoft::WRL::ComPtr<IDWriteFactory>                             m_dw;
+    std::wstring                                                         m_defaultFamily;
+
+};
 // -------------- DirectWrite-D2D 后端 -----------------
 class D2DBackend : public IRenderBackend {
 public:
@@ -303,6 +360,7 @@ private:
 
     std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
     std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
+    FontCache m_fontCache;
 };
 
 // -------------- FreeType 后端 -----------------
@@ -830,12 +888,7 @@ private:
 
 };
 
-class IFileProvider {
-public:
-    virtual ~IFileProvider() = default;
-    // 按路径返回原始二进制
-    virtual std::vector<uint8_t> get_data(const std::wstring& path) const = 0;
-};
+
 
 // 把整棵树存到 LPARAM 里
 struct TVData {
@@ -846,3 +899,18 @@ struct TVData {
 
 // 全局索引 ----------------------------------------------------------
 
+
+
+struct Task {
+    int width;
+    int height;
+    int scrollY;
+};
+
+class IFileProvider {
+public:
+    virtual ~IFileProvider() = default;
+    virtual bool load(const std::wstring& file_path) = 0;
+    // 按路径返回原始二进制
+    virtual std::vector<uint8_t> get_data(const std::wstring& path) const = 0;
+};

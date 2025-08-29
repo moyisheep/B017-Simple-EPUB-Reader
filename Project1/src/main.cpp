@@ -12,7 +12,7 @@ HWND g_hTooltip = nullptr;
 enum class StatusBar{INFO = 0, FONT = 1};
 static int g_scrollY = 0;   // 当前像素偏移
 static int g_maxScroll = 0;   // 总高度 - 客户区高度
-
+static int g_line_height = 1;
 std::wstring g_currentHtmlDir = L"";
 std::wstring g_currentHtmlPath = L"";
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
@@ -1454,7 +1454,16 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_EPUB_CACHE_UPDATED:
     {
-
+        RECT rc; GetClientRect(g_hView, &rc);
+        int height = rc.bottom - rc.top;
+        g_container->m_canvas->BeginDraw();
+        
+        litehtml::position clip(g_center_offset, 0, g_cfg.document_width, height);
+        g_container->m_doc->draw(g_container->m_canvas->getContext(),
+            g_center_offset, -g_scrollY, &clip);   
+        g_container->m_canvas->EndDraw();
+        g_states.isCaching.exchange(false);
+     
         UpdateWindow(g_hView);
   
         return 0;
@@ -1552,7 +1561,9 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         GetClientRect(hWnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         //g_scrollY = std::clamp<int>(g_scrollY - zDelta, 0, std::max<int>(g_maxScroll - rc.bottom, 0));
-        g_scrollY = g_scrollY - zDelta;
+        int scroll_step = zDelta / 120 * g_line_height;
+        if (zDelta >= 0) { g_scrollY -= g_line_height; }
+        else { g_scrollY += g_line_height; }
         SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
         InvalidateRect(hWnd, nullptr, FALSE);
@@ -1560,11 +1571,16 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_PAINT:
     {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(g_hWnd, &ps);
-        if (g_container->m_canvas )
-            g_container->m_canvas->present(hdc, 0, 0);
-        EndPaint(g_hWnd, &ps);
+        if (!g_states.isCaching)
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(g_hWnd, &ps);
+            if (g_container->m_canvas)
+                g_container->m_canvas->present(hdc, 0, 0);
+            EndPaint(g_hWnd, &ps);
+
+        }
+
         return 0;
     }
 
@@ -1584,20 +1600,67 @@ ATOM RegisterViewClass(HINSTANCE hInst)
     wc.lpszClassName = L"EPUBView";
     return RegisterClassW(&wc);
 }
-
-//// 4. UI 线程：只管发任务
+std::queue<Task> g_taskQ;
+std::mutex g_qMtx;
+std::condition_variable g_qCV;
+std::thread g_worker;
+bool g_stop = false;
+void WorkerLoop()
+{
+    while (true) {
+        Task t;
+        {
+            std::unique_lock<std::mutex> lk(g_qMtx);
+            g_qCV.wait(lk, [] { return g_stop || !g_taskQ.empty(); });
+            if (g_stop && g_taskQ.empty()) break;
+            t = g_taskQ.front();
+            g_taskQ.pop();
+        }
+        // 真正耗时的工作
+        g_pg.load(g_container->m_doc.get(), t.width, t.height);
+        g_pg.render(g_container->m_canvas.get(), t.scrollY);
+        PostMessage(g_hView, WM_EPUB_CACHE_UPDATED, 0, 0);
+    }
+}
+void ShutdownWorker()
+{
+    {
+        std::lock_guard<std::mutex> lk(g_qMtx);
+        g_stop = true;
+    }
+    g_qCV.notify_all();
+    if (g_worker.joinable()) g_worker.join();
+}
 void UpdateCache()
 {
     if (!g_container || !g_container->m_doc) return;
 
-    RECT rc; GetClientRect(g_hView, &rc);
-    int w = rc.right, h = rc.bottom ;
+    RECT rc;
+    GetClientRect(g_hView, &rc);
+    int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
 
-    g_pg.load(g_container->m_doc.get(), w, h);
-    /* 3) 渲染整页 */
-    g_pg.render(g_container->m_canvas.get(), g_scrollY);
+    {
+        g_states.isCaching.store(true);
+        std::lock_guard<std::mutex> lk(g_qMtx);
+        g_taskQ = {}; // 清空旧任务
+        g_taskQ.push({ w, h, g_scrollY });
+    }
+    g_qCV.notify_one(); // 唤醒后台线程
 }
+//// 4. UI 线程：只管发任务
+//void UpdateCache()
+//{
+//    if (!g_container || !g_container->m_doc) return;
+//
+//    RECT rc; GetClientRect(g_hView, &rc);
+//    int w = rc.right, h = rc.bottom ;
+//    if (w <= 0 || h <= 0) return;
+//
+//    g_pg.load(g_container->m_doc.get(), w, h);
+//    /* 3) 渲染整页 */
+//    g_pg.render(g_container->m_canvas.get(), g_scrollY);
+//}
 
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -1613,7 +1676,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DragQueryFileW(reinterpret_cast<HDROP>(w), 0, file, MAX_PATH);
         DragFinish(reinterpret_cast<HDROP>(w));
 
-
+        // 只接受 .epub / .EPUB
+        const wchar_t* ext = wcsrchr(file, L'.');
+        if (!ext || _wcsicmp(ext, L".epub") != 0) {
+            MessageBoxW(g_hWnd, L"请拖入 EPUB 文件", L"格式错误", MB_ICONWARNING);
+            return 0;
+        }
         // 1. 等待上一次任务结束（简单做法：阻塞等待）
         if (g_parse_task.valid()) {
             g_parse_task.wait();
@@ -2226,6 +2294,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 // SimpleContainer.cpp
 void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
+  
     if (m_img_cache.contains(src)) return;
 
     std::wstring wpath = g_book->m_zipIndex.find(a2w(src));
@@ -2439,31 +2508,85 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el, litehtml:
     }
 }
 
+// 返回 p 指向的 UTF-8 字符所占字节数（1~4）
+inline size_t utf8_char_len(const char* p)
+{
+    unsigned char c = static_cast<unsigned char>(*p);
+    if (c < 0x80) return 1;
+    if ((c >> 5) == 0x06) return 2;
+    if ((c >> 4) == 0x0E) return 3;
+    if ((c >> 3) == 0x1E) return 4;
+    return 1; // 容错
+}
+
+//void SimpleContainer::split_text(const char* text,
+//    const std::function<void(const char*)>& on_word,
+//    const std::function<void(const char*)>& on_space)
+//{
+//    if (!text || !*text) return;
+//
+//    const char* p = text;
+//    while (*p)
+//    {
+//        /* ---------- 空格段 ---------- */
+//        if (std::isspace(static_cast<unsigned char>(*p)))
+//        {
+//            const char* start = p;
+//            while (*p && std::isspace(static_cast<unsigned char>(*p))) ++p;
+//            std::string token(start, p);
+//            if (on_space) on_space(token.c_str());
+//            continue;
+//        }
+//        /* ---------- 单词段 ---------- */
+//        const char* start = p;
+//        while (*p && !std::isspace(static_cast<unsigned char>(*p))) ++p;
+//        std::string token(start, p);
+//        if (on_word) on_word(token.c_str());
+//    }
+//}
+
+
 void SimpleContainer::split_text(const char* text,
     const std::function<void(const char*)>& on_word,
     const std::function<void(const char*)>& on_space)
 {
     if (!text || !*text) return;
 
-    const char* p = text;
-    while (*p)
+    // UTF-8 → ICU UnicodeString
+    icu::UnicodeString ustr = icu::UnicodeString::fromUTF8(text);
+
+    // 创建行断行迭代器（UAX #14）
+    UErrorCode status = U_ZERO_ERROR;
+    std::unique_ptr<icu::BreakIterator> brk(
+        icu::BreakIterator::createLineInstance(icu::Locale::getDefault(), status));
+    if (U_FAILURE(status)) return;
+
+    brk->setText(ustr);
+
+    int32_t prev = brk->first();
+    for (int32_t curr = brk->next(); curr != icu::BreakIterator::DONE;
+        prev = curr, curr = brk->next())
     {
-        /* ---------- 空格段 ---------- */
-        if (std::isspace(static_cast<unsigned char>(*p)))
-        {
-            const char* start = p;
-            while (*p && std::isspace(static_cast<unsigned char>(*p))) ++p;
-            std::string token(start, p);
-            if (on_space) on_space(token.c_str());
-            continue;
+        icu::UnicodeString seg(ustr, prev, curr - prev);
+
+        // 判断这一段是不是纯空格
+        bool all_space = true;
+        for (int32_t i = 0; i < seg.length(); ++i) {
+            if (!u_isspace(seg.char32At(i))) { all_space = false; break; }
         }
-        /* ---------- 单词段 ---------- */
-        const char* start = p;
-        while (*p && !std::isspace(static_cast<unsigned char>(*p))) ++p;
-        std::string token(start, p);
-        if (on_word) on_word(token.c_str());
+
+        std::string out;
+        seg.toUTF8String(out);
+
+        if (all_space) {
+            if (on_space) on_space(out.c_str());
+        }
+        else {
+            if (on_word) on_word(out.c_str());
+        }
     }
 }
+//✅ 使用
 // ---------- 6. 鼠标形状 -------------------------------------------------
 void SimpleContainer::set_cursor(const char* cursor)
 {
@@ -2849,7 +2972,10 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
 
 void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 {
-    m_canvas->backend()->delete_font(hFont);
+    if (m_canvas && m_canvas->backend() && hFont)
+    {
+        m_canvas->backend()->delete_font(hFont);
+    }
 }
 
 
@@ -3919,96 +4045,100 @@ litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& des
 
 
     ComPtr<IDWriteTextFormat> fmt;
-
-    for (const auto& f : faces)
+    for (auto f : faces)
     {
-        std::wstring name = f;
-        UINT32 index = 0;
-        BOOL   exists = FALSE;
-        FontKey exact{ f, descr.weight, descr.style == litehtml::font_style_italic };
-        // 1) 先找完全匹配
-        auto it = g_book->m_fontBin.find(exact);
-        if (it != g_book->m_fontBin.end()) {
-            name = it->second;                 // 命中
-        }
-        else {
-            // 2) 退而求其次：只匹配 family
-            for (const auto& kv : g_book->m_fontBin) {
-                if (kv.first.family == f) {      // 忽略 weight/italic
-                    name = kv.second;
-                    break;
-                }
-            }
-        }
-        /* 1. 私有集合 */
-        if (m_privateFonts)
-        {
-            FindFamilyIndex(m_privateFonts.Get(), name, index, exists);
-            if (exists &&
-                SUCCEEDED(m_dwrite->CreateTextFormat(
-                    name.c_str(), m_privateFonts.Get(),
-                    static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-                    descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-                    : DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    static_cast<float>(descr.size),
-                    L"en-us",
-                    &fmt)))
-            {
-                //SetFontMatric(descr, m_privateFonts.Get(), name, index, fm);
-                //m_actualFamily = f;          // 保存命中的家族名
-                //OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
-                break;
-            }
-        }
-
-        /* 2. 系统集合 */
-        index = 0;
-        exists = FALSE;
-        FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
-        if (exists &&
-            SUCCEEDED(m_dwrite->CreateTextFormat(
-                name.c_str(), nullptr,
-                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-                : DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                static_cast<float>(descr.size),
-                L"en-us",
-                &fmt)))
-        {
-            //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
-            //m_actualFamily = f;              // 保存命中的家族名
-            //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
-            break;
-        }
-        OutputDebugStringW((L"[DWrite] 未找到字体：" + name + L"\n").c_str());
+        fmt = m_fontCache.get(f, descr, m_privateFonts.Get(), m_sysFontColl.Get());
+        if (fmt) break;
     }
+    //for (const auto& f : faces)
+    //{
+    //    std::wstring name = f;
+    //    UINT32 index = 0;
+    //    BOOL   exists = FALSE;
+    //    FontKey exact{ f, descr.weight, descr.style == litehtml::font_style_italic };
+    //    // 1) 先找完全匹配
+    //    auto it = g_book->m_fontBin.find(exact);
+    //    if (it != g_book->m_fontBin.end()) {
+    //        name = it->second;                 // 命中
+    //    }
+    //    else {
+    //        // 2) 退而求其次：只匹配 family
+    //        for (const auto& kv : g_book->m_fontBin) {
+    //            if (kv.first.family == f) {      // 忽略 weight/italic
+    //                name = kv.second;
+    //                break;
+    //            }
+    //        }
+    //    }
+    //    /* 1. 私有集合 */
+    //    if (m_privateFonts)
+    //    {
+    //        FindFamilyIndex(m_privateFonts.Get(), name, index, exists);
+    //        if (exists &&
+    //            SUCCEEDED(m_dwrite->CreateTextFormat(
+    //                name.c_str(), m_privateFonts.Get(),
+    //                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+    //                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+    //                : DWRITE_FONT_STYLE_NORMAL,
+    //                DWRITE_FONT_STRETCH_NORMAL,
+    //                static_cast<float>(descr.size),
+    //                L"en-us",
+    //                &fmt)))
+    //        {
+    //            //SetFontMatric(descr, m_privateFonts.Get(), name, index, fm);
+    //            //m_actualFamily = f;          // 保存命中的家族名
+    //            //OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
+    //            break;
+    //        }
+    //    }
 
-    if (!fmt){
-        std::wstring name = a2w(g_cfg.default_font_name);
-        OutputDebugStringW(L"[DWrite] 未找到字体:");
-        OutputDebugStringW(a2w(descr.family).c_str());
-        OutputDebugStringW(L"  使用默认字体：");
-        OutputDebugStringW(name.c_str());
-        OutputDebugStringW(L"\n");
-        UINT32 index = 0;
-        BOOL   exists = FALSE;
-        FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
-        if (exists &&
-            SUCCEEDED(m_dwrite->CreateTextFormat(
-                name.c_str(), nullptr,
-                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-                : DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                static_cast<float>(descr.size),
-                L"en-us",
-                &fmt)))
-        {
-            //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
-        }   
-    }
+    //    /* 2. 系统集合 */
+    //    index = 0;
+    //    exists = FALSE;
+    //    FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
+    //    if (exists &&
+    //        SUCCEEDED(m_dwrite->CreateTextFormat(
+    //            name.c_str(), nullptr,
+    //            static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+    //            descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+    //            : DWRITE_FONT_STYLE_NORMAL,
+    //            DWRITE_FONT_STRETCH_NORMAL,
+    //            static_cast<float>(descr.size),
+    //            L"en-us",
+    //            &fmt)))
+    //    {
+    //        //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
+    //        //m_actualFamily = f;              // 保存命中的家族名
+    //        //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
+    //        break;
+    //    }
+    //    OutputDebugStringW((L"[DWrite] 未找到字体：" + name + L"\n").c_str());
+    //}
+
+    //if (!fmt){
+    //    std::wstring name = a2w(g_cfg.default_font_name);
+    //    OutputDebugStringW(L"[DWrite] 未找到字体:");
+    //    OutputDebugStringW(a2w(descr.family).c_str());
+    //    OutputDebugStringW(L"  使用默认字体：");
+    //    OutputDebugStringW(name.c_str());
+    //    OutputDebugStringW(L"\n");
+    //    UINT32 index = 0;
+    //    BOOL   exists = FALSE;
+    //    FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
+    //    if (exists &&
+    //        SUCCEEDED(m_dwrite->CreateTextFormat(
+    //            name.c_str(), nullptr,
+    //            static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+    //            descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+    //            : DWRITE_FONT_STYLE_NORMAL,
+    //            DWRITE_FONT_STRETCH_NORMAL,
+    //            static_cast<float>(descr.size),
+    //            L"en-us",
+    //            &fmt)))
+    //    {
+    //        //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
+    //    }   
+    //}
 
     if (!fmt) {
         OutputDebugStringW(L"[DWrite] 加载默认字体失败\n");
@@ -4097,7 +4227,7 @@ litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& des
             fm->height = static_cast<int>((fm0.ascent + fm0.descent + fm0.lineGap)
                 * dip * g_cfg.line_height_multiplier + 0.5f);
             fm->x_height = static_cast<int>(fm0.xHeight * dip + 0.5f);
-
+            
             // 1. 等宽数字 0 的宽度
             ComPtr<IDWriteTextLayout> tmpLayout;
             std::wstring zero = L"0";
@@ -4119,7 +4249,7 @@ litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& des
             //    "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
             //    cleanName.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
             //OutputDebugStringA(buf);
-
+            g_line_height = fm->height;
         }
     }
     /*----------------------------------------------------------
@@ -4766,11 +4896,11 @@ void EPUBBook::load_all_fonts() {
     if (g_container && g_container->m_canvas) 
     {
         auto fonts = collect_epub_fonts();
-        FontKey key{ L"serif", 400, false };
+        FontKey key{ L"serif", 400, false, 0 };
         m_fontBin[key] = g_cfg.default_serif;
-        key = { L"sans-serif", 400, false };
+        key = { L"sans-serif", 400, false, 0 };
         m_fontBin[key] = g_cfg.default_sans_serif;
-        key = { L"monospace", 400, false };
+        key = { L"monospace", 400, false, 0 };
         m_fontBin[key] = g_cfg.default_monospace;
         build_epub_font_index(g_book->ocf_pkg_, g_book.get());
 
@@ -5110,7 +5240,7 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
             std::wstring real_name = get_font_family_name(font_file.data);
 
             // 5. 填充索引
-            FontKey key{ family, weight, italic };
+            FontKey key{ family, weight, italic , 0};
             g_book->m_fontBin[key] = std::move(real_name);
         }
     }
@@ -5619,6 +5749,8 @@ AppBootstrap::AppBootstrap() {
     {
         g_book = std::make_unique<EPUBBook>();   // 保险：用新实例
     }
+    g_worker = std::thread(WorkerLoop);
+
 }
 
 AppBootstrap::~AppBootstrap() {
@@ -5924,10 +6056,8 @@ void RenderWorker::loop()
      
         g_pg.load(g_container->m_doc.get(), task.w, task.h);
 
-        g_states.isCaching.store(true);
         g_pg.render(g_container->m_canvas.get(), task.sy);
 
-        g_states.isCaching.store(false);
         PostMessage(g_hView, WM_EPUB_CACHE_UPDATED, 0, 0);
     }
 }
@@ -6252,12 +6382,7 @@ void Paginator::render(ICanvas* canvas, int scrollY)
         g_container->m_doc->render(render_width, litehtml::render_all);
     }
     g_center_offset = std::max((m_w - render_width) * 0.5, 0.0);
-    canvas->BeginDraw();
-    // 让 litehtml 画在左上角，clip 足够大
-    litehtml::position clip(g_center_offset, 0, m_w, m_h);
-    m_doc->draw(canvas->getContext(),
-        g_center_offset, -scrollY, &clip);   // scrollY 先给 0
-    canvas->EndDraw();
+
 }
 void Paginator::clear() {
     m_doc = nullptr;
@@ -6558,6 +6683,9 @@ void D2DBackend::clear()
     m_privateFonts.Reset();
     m_d2dBitmapCache.clear();
     m_clipStack.clear();
+    m_fontCache.clear();
+    m_layoutCache.clear();
+    m_brushPool.clear();
 }
 
 void GdiCanvas::clear(){}
@@ -6661,3 +6789,141 @@ D2DBackend::D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx)
 //};
 
 
+FontCache::FontCache() {
+    DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(m_dw.GetAddressOf()));   // ✅
+    m_defaultFamily = std::wstring(g_cfg.default_font_name.begin(),
+        g_cfg.default_font_name.end());
+}
+
+/* ---------------------------------------------------------- */
+Microsoft::WRL::ComPtr<IDWriteTextFormat>
+FontCache::get(std::wstring& familyName, const litehtml::font_description& descr,
+    IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl) {
+    // 1. 构造键
+    FontKey key{
+        familyName.empty() ? m_defaultFamily
+                             : std::wstring(familyName.begin(), familyName.end()),
+        descr.weight,
+        descr.style == litehtml::font_style_italic,
+        descr.size
+    };
+
+    // 2. 读缓存
+    {
+        std::shared_lock sl(m_mtx);
+        if (auto it = m_map.find(key); it != m_map.end())
+            return it->second;
+    }
+
+    // 3. 未命中，创建并写入
+    auto fmt = create(key, privateColl, sysColl);
+    {
+        std::unique_lock ul(m_mtx);
+        m_map[key] = fmt;          // 若并发重复，后写覆盖，无妨
+    }
+    return fmt;
+}
+
+/* ---------------------------------------------------------- */
+Microsoft::WRL::ComPtr<IDWriteTextFormat>
+FontCache::create(const FontKey& key, IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl) {
+    // 候选家族列表：精确 → 仅 family → 默认
+    std::wstring tryName;
+    tryName = key.family;
+
+    // 若 g_book->m_fontBin 有映射，追加真实文件名
+    if (g_book) {
+        FontKey exact{ key.family, key.weight, key.italic, 0 }; // size 忽略
+        if (auto it = g_book->m_fontBin.find(exact); it != g_book->m_fontBin.end())
+            tryName = it->second;
+
+        // 退而求其次：仅 family
+        for (const auto& kv : g_book->m_fontBin)
+            if (kv.first.family == key.family) { tryName = kv.second; break; }
+    }
+    
+
+    // 逐个尝试
+    
+    for (auto coll : { privateColl, sysColl }) {   // 先私有，再系统
+        if (!coll) continue;
+        UINT32 index = 0;
+        if (!findFamily(coll, tryName, index)) continue;
+
+        Microsoft::WRL::ComPtr<IDWriteTextFormat> fmt;
+        if (SUCCEEDED(m_dw->CreateTextFormat(
+            tryName.c_str(), coll,
+            static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+            key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            static_cast<float>(key.size),
+            L"en-us",
+            &fmt))) {
+            return fmt;   // 成功
+        }
+    }
+
+    //使用默认字体
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> fmt;
+    if (SUCCEEDED(m_dw->CreateTextFormat(
+        m_defaultFamily.c_str(), sysColl,
+        static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+        key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        static_cast<float>(key.size),
+        L"en-us",
+        &fmt))) {
+        return fmt;   // 成功
+    }
+    
+    // 理论上不会走到这里，除非默认字体也失败
+    return nullptr;
+}
+
+/* ---------------------------------------------------------- */
+bool FontCache::findFamily(IDWriteFontCollection* coll,
+                           const std::wstring&    target,
+                           UINT32&                index)
+{
+    // 1) 快路径：DWrite 自带
+    BOOL exists = FALSE;
+    if (SUCCEEDED(coll->FindFamilyName(target.c_str(), &index, &exists)) && exists)
+        return true;
+
+    // 2) 慢路径：逐 family 遍历
+    UINT32 count = coll->GetFontFamilyCount();
+    for (UINT32 i = 0; i < count; ++i)
+    {
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
+        if (FAILED(coll->GetFontFamily(i, &fam)))
+            continue;
+
+        Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+        if (FAILED(fam->GetFamilyNames(&names)))
+            continue;
+
+        UINT32 len = 0;
+        if (FAILED(names->GetStringLength(0, &len)))
+            continue;
+
+        std::wstring buf(len + 1, L'\0');
+        if (FAILED(names->GetString(0, buf.data(), len + 1)))
+            continue;
+        buf.resize(len);
+
+        if (_wcsicmp(buf.c_str(), target.c_str()) == 0)
+        {
+            index = i;
+            return true;
+        }
+    }
+    return false;   // 真没找到
+}
+
+void FontCache::clear() {
+    std::unique_lock ul(m_mtx);
+    m_map.clear();          // ComPtr 归零，DWrite 对象随之释放
+}
