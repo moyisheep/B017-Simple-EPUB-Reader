@@ -114,6 +114,10 @@ using namespace Gdiplus;
 #include <unicode/utf8.h>
 #include <string>
 #include <functional>
+#include <gumbo.h>
+#include <cstring>
+#include <stack>
+#include <sstream>
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -194,6 +198,7 @@ public:
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
     virtual void clear() = 0;
+    virtual HBITMAP get_bitmap() = 0;
 };
 
 class AppBootstrap {
@@ -245,6 +250,7 @@ public:
     ~GdiBackend();
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
+    HBITMAP  get_bitmap() override { return nullptr; }
 private:
     HDC m_hdc;
     HBITMAP m_memDC;
@@ -309,7 +315,7 @@ private:
 // -------------- DirectWrite-D2D 后端 -----------------
 class D2DBackend : public IRenderBackend {
 public:
-    D2DBackend(int w, int h, ComPtr<ID2D1RenderTarget> devCtx);
+    D2DBackend(int w, int h, HWND hwnd);
     //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
 
 
@@ -335,18 +341,19 @@ public:
     //std::optional<std::wstring> mapDynamic(const std::wstring& key);
     //std::wstring resolveFace(const std::wstring& raw);
     std::vector<std::wstring> split_font_list(const std::string& src);
-    ComPtr<ID2D1BitmapRenderTarget> m_rt;
+    ComPtr<ID2D1HwndRenderTarget> m_rt;
     bool is_all_zero(const litehtml::border_radiuses& r);
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
-    
+    HBITMAP  get_bitmap() override;
+    ComPtr<ID2D1HwndRenderTarget> m_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
 private:
     // 自动 AddRef/Release
-    ComPtr<IDWriteFactory>    m_dwrite;
+
     Microsoft::WRL::ComPtr<IDWriteFontCollection> m_privateFonts;  // 新增
     std::vector<std::wstring> m_tempFontFiles;
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
-    ComPtr<ID2D1RenderTarget> m_devCtx;
+
     static std::wstring toLower(std::wstring s);
     //static std::optional<std::wstring> mapStatic(const std::wstring& key);
     float m_baselineY = 0;
@@ -361,6 +368,12 @@ private:
     std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
     std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
     FontCache m_fontCache;
+
+
+    ComPtr<IDWriteFactory>    m_dwrite;
+    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
+
+    HWND m_hwnd = nullptr;
 };
 
 // -------------- FreeType 后端 -----------------
@@ -388,6 +401,7 @@ public:
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
+    HBITMAP  get_bitmap() override { return nullptr; }
     ~FreetypeBackend();
 private:
     int m_w, m_h, m_dpi;
@@ -440,29 +454,13 @@ public:
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
     virtual void clear() = 0;
+    virtual HBITMAP  get_bitmap() = 0;
     /* 工厂：根据当前策略创建画布 */
     //static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
 };
 
 
 
-class RenderWorker {
-public:
-    static RenderWorker& instance();
-    void push(int w, int h, int sy);
-    void stop();
-    ~RenderWorker();
-private:
-    RenderWorker() : worker_(&RenderWorker::loop, this) {}
-    void loop();
-    struct Task { int w, h, sy; };
-
-    std::mutex              m_;
-    std::condition_variable cv_;
-    std::optional<Task>     latest_;   // 只保留最新
-    std::atomic<bool>       stop_{ false };
-    std::thread             worker_;
-};
 
 class GdiCanvas : public ICanvas {
 public:
@@ -478,7 +476,7 @@ public:
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
-
+    HBITMAP  get_bitmap() override { return nullptr; }
 private:
     int  m_w, m_h;
     HDC  m_memDC;
@@ -499,12 +497,12 @@ public:
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
+    HBITMAP  get_bitmap() override;
 private:
     int  m_w, m_h;
     ComPtr<ID2D1Bitmap> m_bmp;
     std::unique_ptr<D2DBackend> m_backend;
-    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
-    ComPtr<ID2D1HwndRenderTarget> m_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
+
     HWND m_hwnd = nullptr;
 
 };
@@ -523,6 +521,7 @@ public:
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
+    HBITMAP  get_bitmap() override { return nullptr; }
 private:
     int  m_w, m_h, m_dpi;
     std::vector<uint8_t>        m_pixels;   // 4*w*h
@@ -696,6 +695,7 @@ struct AppSettings {
     float line_height_multiplier = 1.5;
     int tooltip_width = 350;
     int document_width = 600;
+    int split_space_height = 300; // 单位:px
     std::wstring default_serif = L"Georgia";
     std::wstring default_sans_serif = L"Verdana";
     std::wstring default_monospace = L"Consolas";
@@ -811,6 +811,54 @@ struct AppStates {
 
 
 
+
+
+// 把整棵树存到 LPARAM 里
+struct TVData {
+    const TreeNode* node;
+    const std::vector<TreeNode>* all;
+    bool inserted = false;   // 新增
+};
+
+// 全局索引 ----------------------------------------------------------
+
+
+
+
+
+class IFileProvider {
+public:
+    virtual ~IFileProvider() = default;
+    virtual bool load(const std::wstring& file_path) = 0;
+    // 按路径返回原始二进制
+    virtual std::vector<uint8_t> get_data(const std::wstring& path) const = 0;
+};
+
+
+
+class RenderWorker {
+public:
+    RenderWorker();
+    void push(int w, int h, int scrollY);
+    void stop();
+    ~RenderWorker();
+private:
+
+    void loop();
+    struct Task { int w, h, scrollY; };
+
+    std::queue<Task> m_taskQ;
+    std::mutex m_qMtx;
+    std::condition_variable m_qCV;
+    std::thread m_worker;
+    bool m_stop = false;
+};
+
+
+
+
+
+
 // ---------- LiteHtml 容器 ----------
 class SimpleContainer : public litehtml::document_container {
 public:
@@ -818,22 +866,22 @@ public:
     ~SimpleContainer();
     void clear();
 
-     litehtml::pixel_t	get_default_font_size() const override;
-     const char*        get_default_font_name() const override;
+    litehtml::pixel_t	get_default_font_size() const override;
+    const char* get_default_font_name() const override;
 
-     void	load_image(const char* src, const char* baseurl, bool redraw_on_ready) override;
-     void	get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
-     void	get_viewport(litehtml::position& viewport) const override;
-     void	import_css(litehtml::string& text, const litehtml::string& url, litehtml::string& baseurl) override;
+    void	load_image(const char* src, const char* baseurl, bool redraw_on_ready) override;
+    void	get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
+    void	get_viewport(litehtml::position& viewport) const override;
+    void	import_css(litehtml::string& text, const litehtml::string& url, litehtml::string& baseurl) override;
 
-     void	set_caption(const char* caption) override;
-     void	set_base_url(const char* base_url) override;
-     void	link(const std::shared_ptr<litehtml::document>& doc, const litehtml::element::ptr& el) override;
+    void	set_caption(const char* caption) override;
+    void	set_base_url(const char* base_url) override;
+    void	link(const std::shared_ptr<litehtml::document>& doc, const litehtml::element::ptr& el) override;
 
-     void	set_cursor(const char* cursor) override;
-     void	transform_text(litehtml::string& text, litehtml::text_transform tt) override;
+    void	set_cursor(const char* cursor) override;
+    void	transform_text(litehtml::string& text, litehtml::text_transform tt) override;
 
-     litehtml::element::ptr	create_element(const char* tag_name, const litehtml::string_map& attributes, const std::shared_ptr<litehtml::document>& doc) override;
+    litehtml::element::ptr	create_element(const char* tag_name, const litehtml::string_map& attributes, const std::shared_ptr<litehtml::document>& doc) override;
 
     void	get_media_features(litehtml::media_features& media) const override;
     void	get_language(litehtml::string& language, litehtml::string& culture) const override;
@@ -874,6 +922,7 @@ public:
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     std::shared_ptr<litehtml::document> m_doc;
     std::unique_ptr<ICanvas> m_canvas;
+    std::unique_ptr<RenderWorker> m_render_worker;
 
 private:
     std::wstring m_root;
@@ -886,31 +935,67 @@ private:
     HFONT m_hDefaultFont = nullptr;
 
 
+
 };
 
 
 
-// 把整棵树存到 LPARAM 里
-struct TVData {
-    const TreeNode* node;
-    const std::vector<TreeNode>* all;
-    bool inserted = false;   // 新增
+
+
+struct BodyBlock {
+    int spine_id = 0;
+    int block_id = 0;
+    std::string html;
+    int height = 0; // 未渲染前默认 -1
+    bool is_render = false;
 };
 
-// 全局索引 ----------------------------------------------------------
-
-
-
-struct Task {
-    int width;
-    int height;
-    int scrollY;
+struct HtmlBlock {
+    int height = 0;
+    std::string head;
+    std::vector<BodyBlock> body_blocks;
+    void clear() { height = 0; head = ""; body_blocks.clear(); }
 };
 
-class IFileProvider {
+
+
+
+class VirtualDoc {
 public:
-    virtual ~IFileProvider() = default;
-    virtual bool load(const std::wstring& file_path) = 0;
-    // 按路径返回原始二进制
-    virtual std::vector<uint8_t> get_data(const std::wstring& path) const = 0;
+    void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
+    void set_render_width(int width);
+    litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
+    void load_html(std::wstring& href);
+    void clear();
+private:
+
+    void calculate_height(HtmlBlock& block);
+
+    HtmlBlock get_html_block(std::string html, int spine_id);
+    void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom=true);
+    std::string get_head(std::string& html);
+    std::vector<BodyBlock> get_body_blocks(std::string& html, int spine_id = 0, size_t max_chunk_bytes = 1024);
+    void serialize_node(const GumboNode* node, std::ostream& out);
+    bool gumbo_tag_is_void(GumboTag tag);
+    void serialize_element(const GumboElement& el, std::ostream& out);
+    int get_id_by_href(std::wstring& href);
+    std::wstring get_href_by_id(int spine_id);
+
+    void add_top(int& y_offset);
+    void add_bottom();
+    void remove_top( int& y_offset);
+    void remove_bottom();
+    void load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom);
+
+
+    litehtml::document::ptr m_doc;
+    std::vector<OCFRef> m_spine;
+    std::shared_ptr<EPUBBook> m_book;
+    std::shared_ptr<SimpleContainer> m_container;
+    int m_render_width;
+
+    HtmlBlock m_render_block;
+    HtmlBlock m_top_block;
+    HtmlBlock m_bottom_block;
+
 };
