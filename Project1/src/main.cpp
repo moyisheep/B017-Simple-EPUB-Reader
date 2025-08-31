@@ -40,7 +40,7 @@ std::set<std::wstring> g_activeFonts;
 
 std::unique_ptr<AppBootstrap> g_bootstrap;
 
-
+litehtml::document::ptr g_doc = nullptr;
 int g_center_offset = 0;
 
 
@@ -1456,12 +1456,9 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_EPUB_CACHE_UPDATED:
     {
-        RECT rc; GetClientRect(g_hView, &rc);
-       
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
 
-        g_states.isCaching.exchange(false);
+
+        g_states.isCaching.store(false);
      
         InvalidateRect(g_hView, nullptr, false);
   
@@ -1572,7 +1569,10 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (g_container && g_container->m_doc && g_container->m_canvas)
         {
-
+            
+            //g_container->m_doc.reset();
+            //g_container->m_doc = g_doc;
+         
             RECT rc;
             GetClientRect(g_hView, &rc);
             g_container->m_canvas->BeginDraw();
@@ -1610,12 +1610,12 @@ ATOM RegisterViewClass(HINSTANCE hInst)
 RenderWorker::RenderWorker() : m_worker(&RenderWorker::loop, this)
 {
 }
-void RenderWorker::push(int w, int h, int scrollY)
+void RenderWorker::push(int w, int h)
 {
     {
         std::lock_guard<std::mutex> lk(m_qMtx);
         //m_taskQ = {}; // 清空旧任务
-        m_taskQ.push({ w, h, scrollY });
+        m_taskQ.push({ w, h});
     }
     m_qCV.notify_one(); // 唤醒后台线程
 }
@@ -1634,7 +1634,8 @@ void RenderWorker::loop()
         }
 
         /* 1) 需要排版才排 */
-
+        g_doc.reset();
+        g_doc = std::move(g_vd->get_doc(t.h, g_scrollY, g_offsetY));
         
         // 2. 字段名改成 w / h
 
@@ -1662,8 +1663,9 @@ void UpdateCache()
     GetClientRect(g_hView, &rc);
     int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
-
-    g_vd->get_doc(h, g_scrollY, g_offsetY);
+    //g_states.isCaching.store(true);
+    //g_container->m_render_worker->push(w, h);
+    g_container->m_doc = std::move(g_vd->get_doc(h, g_scrollY, g_offsetY));
     
     g_center_offset = std::max((w - g_cfg.document_width) * 0.5, 0.0);
 }
@@ -1765,6 +1767,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         g_last_html_path = g_book->ocf_pkg_.spine[0].href;
         //std::string html = g_book->load_html(g_last_html_path);
+        g_offsetY = 0;
         g_vd->clear();
         g_vd->load_book(g_book, g_container, g_cfg.document_width);
         g_vd->load_html(g_last_html_path);
@@ -2310,10 +2313,12 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
         //g_vd->load_book(g_book, g_container, g_cfg.document_width);
     g_vd->clear();
     g_vd->load_html(file_path);
-        //std::string html = g_book->load_html(file_path.c_str());
+    g_offsetY = 0;
+    //std::string html = g_book->load_html(file_path.c_str());
         //g_book->init_doc(html);
         //g_states.needRelayout.store(true, std::memory_order_release);
     g_last_html_path = file_path;
+    
         UpdateCache();
         //SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
 
@@ -5735,6 +5740,7 @@ AppBootstrap::AppBootstrap() {
     if (g_cfg.enableJS) { enableJS(); }
     if (!g_container) {
         g_container = std::make_shared<SimpleContainer>(g_hView);
+       // g_container->m_render_worker = std::make_unique<RenderWorker>();
     }
     if (!g_tooltip_container) {
         g_tooltip_container = std::make_shared<SimpleContainer>(g_hTooltip);
@@ -7017,7 +7023,10 @@ HBITMAP D2DBackend::get_bitmap()
     return nullptr;
 }
 
-
+VirtualDoc::VirtualDoc()
+{
+ 
+}
 
 void VirtualDoc::load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width)
 {
@@ -7100,6 +7109,14 @@ void VirtualDoc::calculate_height(HtmlBlock& block)
         block.height += m_doc->height();
     }
 }
+
+void VirtualDoc::calculate_block_height(std::string& head, BodyBlock& block)
+{
+    std::string text = "<html>" + head + "<body>" + block.html + "</body></html>";
+    m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+    m_doc->render(m_render_width);
+    block.height = m_doc->height();
+}
 HtmlBlock VirtualDoc::get_html_block(std::string html, int spine_id)
 {
     HtmlBlock block;
@@ -7109,7 +7126,7 @@ HtmlBlock VirtualDoc::get_html_block(std::string html, int spine_id)
     BodyBlock bi;
     bi.spine_id = spine_id;
     bi.height = 0;
-    bi.html = "<div style = \"height:" + std::to_string(g_cfg.split_space_height) + "px; \"></div>";
+    bi.html = "<div style =\"height:" + std::to_string(g_cfg.split_space_height) + "px; \"></div>";
     bi.block_id = block.body_blocks.back().block_id + 1;
     block.body_blocks.push_back(std::move(bi));
     return block;
@@ -7262,7 +7279,7 @@ void VirtualDoc::load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom)
     if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
     if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
     auto block = get_html_block(html, spine_id);
-    calculate_height(block);
+    //calculate_height(block);
     merge_block(dst, block, isAddToBottom);
 }
 
@@ -7298,12 +7315,12 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
         text += b.html; 
     }
     text += "</body></html>";
-    g_container->m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-    g_container->m_doc->render(m_render_width);
+    m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+    m_doc->render(m_render_width);
 
 
     scrollY = 0;
-    return nullptr;
+    return std::move(m_doc);
 }
 
 
@@ -7318,10 +7335,12 @@ void VirtualDoc::add_bottom()
     if (!m_bottom_block.body_blocks.empty())
     {
         auto block = m_bottom_block.body_blocks.front();
+        calculate_block_height(m_render_block.head, block);
         m_bottom_block.body_blocks.erase(m_bottom_block.body_blocks.begin());
 
+
         m_render_block.height += block.height;
-        m_bottom_block.height -= block.height;
+    
         m_render_block.body_blocks.push_back(std::move(block));
     }
 }
@@ -7330,11 +7349,12 @@ void VirtualDoc::remove_top(int& y_offset)
     if (!m_render_block.body_blocks.empty())
     {
         auto block = m_render_block.body_blocks.front();
+
         m_render_block.body_blocks.erase(m_render_block.body_blocks.begin());
 
-        m_top_block.height += block.height;
+
         m_render_block.height -= block.height;
-        y_offset -= block.height;
+        y_offset =std::max(y_offset - block.height, 0);
         m_top_block.body_blocks.push_back(std::move(block));
     }
 }
@@ -7348,10 +7368,11 @@ void VirtualDoc::add_top(int& y_offset)
     }
     if (!m_top_block.body_blocks.empty()) {
         auto block = m_top_block.body_blocks.back();
+        calculate_block_height(m_render_block.head, block);
         m_top_block.body_blocks.pop_back();
 
         m_render_block.height += block.height;
-        m_top_block.height -= block.height;
+ 
         y_offset += block.height;
         m_render_block.body_blocks.insert(m_render_block.body_blocks.begin(), std::move(block));
     }
@@ -7363,7 +7384,7 @@ void VirtualDoc::remove_bottom()
         auto block = m_render_block.body_blocks.back();
         m_render_block.body_blocks.pop_back();
 
-        m_bottom_block.height += block.height;
+
         m_render_block.height -= block.height;
 
         m_bottom_block.body_blocks.insert(m_bottom_block.body_blocks.begin(), std::move(block));

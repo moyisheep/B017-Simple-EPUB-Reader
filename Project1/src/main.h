@@ -839,13 +839,13 @@ public:
 class RenderWorker {
 public:
     RenderWorker();
-    void push(int w, int h, int scrollY);
+    void push(int w, int h);
     void stop();
     ~RenderWorker();
 private:
 
     void loop();
-    struct Task { int w, h, scrollY; };
+    struct Task { int w, h; };
 
     std::queue<Task> m_taskQ;
     std::mutex m_qMtx;
@@ -922,7 +922,7 @@ public:
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     std::shared_ptr<litehtml::document> m_doc;
     std::unique_ptr<ICanvas> m_canvas;
-    std::unique_ptr<RenderWorker> m_render_worker;
+    //std::unique_ptr<RenderWorker> m_render_worker;
 
 private:
     std::wstring m_root;
@@ -962,6 +962,7 @@ struct HtmlBlock {
 
 class VirtualDoc {
 public:
+    VirtualDoc();
     void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
     void set_render_width(int width);
     litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
@@ -970,6 +971,8 @@ public:
 private:
 
     void calculate_height(HtmlBlock& block);
+
+    void calculate_block_height(std::string& head, BodyBlock& block);
 
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom=true);
