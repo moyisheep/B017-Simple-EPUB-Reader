@@ -179,7 +179,7 @@ public:
 
     virtual void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) = 0;
     virtual void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) = 0;
-    virtual void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) = 0 ;
+    virtual void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) = 0;
     virtual void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) = 0;
     virtual void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) = 0;
     virtual void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) = 0;
@@ -193,7 +193,7 @@ public:
 
     //virtual litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) = 0;
     //virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) = 0;
-    
+
     virtual void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts) = 0;
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
@@ -320,7 +320,7 @@ public:
 
 
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-  
+
     void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
 
     void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
@@ -622,61 +622,61 @@ struct MemFile {
 };
 // ---------- EPUB 零解压 ----------
 class EPUBBook {
-    public:
-        mz_zip_archive zip = {};
-        std::map<std::wstring, MemFile> cache;
-        OCFPackage ocf_pkg_;                     // 解析结果
-        ZipIndexW m_zipIndex;
-        // -------------- EPUBBook 内部新增成员 --------------
+public:
+    mz_zip_archive zip = {};
+    std::map<std::wstring, MemFile> cache;
+    OCFPackage ocf_pkg_;                     // 解析结果
+    ZipIndexW m_zipIndex;
+    // -------------- EPUBBook 内部新增成员 --------------
 
-        void parse_ocf_(void);                       // 主解析入口
-        void parse_opf_(void);   // 解析 OPF
-        void parse_toc_(void);                        // 解析 TOC
-
-
-        void OnTreeSelChanged(const wchar_t* href);
-        bool load(const wchar_t* epub_path);
-        MemFile read_zip(const wchar_t* file_name) const;
-        std::string load_html(const std::wstring& path) const;
-
-        void load_all_fonts(void);
-        void init_doc(std::string html);
- 
-
-        static std::wstring extract_text(const tinyxml2::XMLElement* a);
-
-        // 递归解析 EPUB3-Nav <ol>
-        void parse_nav_list(tinyxml2::XMLElement* ol, int level,
-            const std::string& opf_dir,
-            std::vector<OCFNavPoint>& out);
+    void parse_ocf_(void);                       // 主解析入口
+    void parse_opf_(void);   // 解析 OPF
+    void parse_toc_(void);                        // 解析 TOC
 
 
-        // 递归解析 NCX <navPoint>
-        void parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
-            const std::string& opf_dir,
-            std::vector<OCFNavPoint>& out);
+    void OnTreeSelChanged(const wchar_t* href);
+    bool load(const wchar_t* epub_path);
+    MemFile read_zip(const wchar_t* file_name) const;
+    std::string load_html(const std::wstring& path) const;
 
-        void show_tooltip(const std::string html, int x, int y);
-        void hide_tooltip();
-        static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
-        void clear();
+    void load_all_fonts(void);
+    void init_doc(std::string html);
 
-        HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
-        std::wstring           m_tooltip_url;          // 缓存当前 url
-        std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
-        std::wstring get_font_family_name(const std::vector<uint8_t>& data);
-        void build_epub_font_index(const OCFPackage& pkg, EPUBBook* book);
-        std::unordered_map<FontKey, std::wstring> m_fontBin;
 
-        EPUBBook() noexcept {}
-        ~EPUBBook();
-    private:
-        static HTREEITEM InsertTreeNodeLazy(HWND, const TreeNode&, const std::vector<TreeNode>&, HTREEITEM);
-        void BuildTree(const std::vector<OCFNavPoint>&, std::vector<TreeNode>&, std::vector<size_t>&);
-        void FreeTreeData(HWND tv);
-        void LoadToc();
-        std::vector<TreeNode> m_nodes;
-        std::vector<size_t>   m_roots;
+    static std::wstring extract_text(const tinyxml2::XMLElement* a);
+
+    // 递归解析 EPUB3-Nav <ol>
+    void parse_nav_list(tinyxml2::XMLElement* ol, int level,
+        const std::string& opf_dir,
+        std::vector<OCFNavPoint>& out);
+
+
+    // 递归解析 NCX <navPoint>
+    void parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
+        const std::string& opf_dir,
+        std::vector<OCFNavPoint>& out);
+
+    void show_tooltip(const std::string html, int x, int y);
+    void hide_tooltip();
+    static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
+    void clear();
+
+    HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
+    std::wstring           m_tooltip_url;          // 缓存当前 url
+    std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
+    std::wstring get_font_family_name(const std::vector<uint8_t>& data);
+    void build_epub_font_index(const OCFPackage& pkg, EPUBBook* book);
+    std::unordered_map<FontKey, std::wstring> m_fontBin;
+
+    EPUBBook() noexcept {}
+    ~EPUBBook();
+private:
+    static HTREEITEM InsertTreeNodeLazy(HWND, const TreeNode&, const std::vector<TreeNode>&, HTREEITEM);
+    void BuildTree(const std::vector<OCFNavPoint>&, std::vector<TreeNode>&, std::vector<size_t>&);
+    void FreeTreeData(HWND tv);
+    void LoadToc();
+    std::vector<TreeNode> m_nodes;
+    std::vector<size_t>   m_roots;
 };
 
 
@@ -707,7 +707,7 @@ struct AppStates {
     // ---- 状态机 ----
     std::atomic_bool needRelayout{ true };   // 是否需要重新排版
     std::atomic_bool isCaching{ false };   // 后台是否正在渲染
-
+    std::atomic_bool isUpdate{ false };   // 后台是否正在渲染
     bool isLoaded = false;
     // 工具：生成新令牌，旧令牌立即失效
     void newCancelToken() {
@@ -839,13 +839,13 @@ public:
 class RenderWorker {
 public:
     RenderWorker();
-    void push(int w, int h);
+    void push(int w, int h, int scrollY);
     void stop();
     ~RenderWorker();
 private:
 
     void loop();
-    struct Task { int w, h; };
+    struct Task { int w, h, scrollY; };
 
     std::queue<Task> m_taskQ;
     std::mutex m_qMtx;
@@ -922,7 +922,7 @@ public:
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     std::shared_ptr<litehtml::document> m_doc;
     std::unique_ptr<ICanvas> m_canvas;
-    //std::unique_ptr<RenderWorker> m_render_worker;
+    std::unique_ptr<RenderWorker> m_render_worker;
 
 private:
     std::wstring m_root;
@@ -946,12 +946,12 @@ struct BodyBlock {
     int spine_id = 0;
     int block_id = 0;
     std::string html;
-    int height = 0; // 未渲染前默认 -1
-    bool is_render = false;
+    float height = 0; // 未渲染前默认 -1
+
 };
 
 struct HtmlBlock {
-    int height = 0;
+    float height = 0;
     std::string head;
     std::vector<BodyBlock> body_blocks;
     void clear() { height = 0; head = ""; body_blocks.clear(); }
@@ -962,7 +962,6 @@ struct HtmlBlock {
 
 class VirtualDoc {
 public:
-    VirtualDoc();
     void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
     void set_render_width(int width);
     litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
@@ -972,12 +971,10 @@ private:
 
     void calculate_height(HtmlBlock& block);
 
-    void calculate_block_height(std::string& head, BodyBlock& block);
-
     HtmlBlock get_html_block(std::string html, int spine_id);
-    void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom=true);
+    void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
     std::string get_head(std::string& html);
-    std::vector<BodyBlock> get_body_blocks(std::string& html, int spine_id = 0, size_t max_chunk_bytes = 1024);
+    std::vector<BodyBlock> get_body_blocks(std::string& html, int spine_id = 0, size_t max_chunk_bytes = 4*1024);
     void serialize_node(const GumboNode* node, std::ostream& out);
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
@@ -986,7 +983,7 @@ private:
 
     void add_top(int& y_offset);
     void add_bottom();
-    void remove_top( int& y_offset);
+    void remove_top(int& y_offset);
     void remove_bottom();
     void load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom);
 
