@@ -46,7 +46,7 @@ using namespace Gdiplus;
 #include <shlwapi.h>
 #include <regex>
 #pragma comment(lib, "shlwapi.lib")
-
+#include <sqlite3.h>
 #include <wininet.h>
 #include "resource.h"
 #include <duktape.h>
@@ -285,12 +285,17 @@ namespace std {
         }
     };
 }
+struct FontCachePair 
+{
+    ComPtr<IDWriteTextFormat> fmt;
+    ComPtr<IDWriteFont> dwFont;
+};
 class FontCache {
 public:
     FontCache();
     ~FontCache() = default;
     // 主入口：根据 litehtml 描述 + 可选私有集合，返回 TextFormat
-    Microsoft::WRL::ComPtr<IDWriteTextFormat>
+    FontCachePair
         get(std::wstring& familyName, const litehtml::font_description& descr,
             IDWriteFontCollection* privateColl = nullptr, IDWriteFontCollection* sysColl = nullptr);
     void clear();
@@ -298,18 +303,19 @@ private:
 
 
     // 内部：真正创建
-    Microsoft::WRL::ComPtr<IDWriteTextFormat>
+    FontCachePair
         create(const FontKey& key, IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl);
 
     // 工具：在指定集合里找家族
     bool findFamily(IDWriteFontCollection* coll,
         const std::wstring& name,
+        Microsoft::WRL::ComPtr<IDWriteFontFamily>& family,
         UINT32& index);
 
-    std::unordered_map<FontKey, Microsoft::WRL::ComPtr<IDWriteTextFormat>> m_map;
-    mutable std::shared_mutex                                            m_mtx;
-    Microsoft::WRL::ComPtr<IDWriteFactory>                             m_dw;
-    std::wstring                                                         m_defaultFamily;
+    std::unordered_map<FontKey, FontCachePair> m_map;
+    mutable std::shared_mutex              m_mtx;
+    Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
+    std::wstring           m_defaultFamily;
 
 };
 // -------------- DirectWrite-D2D 后端 -----------------
@@ -329,9 +335,11 @@ public:
     void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
     void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
     void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
+
     litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
     void				delete_font(litehtml::uint_ptr hFont) override;
     litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
+    static void build_rounded_rect_path(ComPtr<ID2D1GeometrySink>& sink, const litehtml::position& pos, const litehtml::border_radiuses& bdr);
     void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
     void	del_clip() override;
 
@@ -345,6 +353,7 @@ public:
     bool is_all_zero(const litehtml::border_radiuses& r);
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
+    void make_font_metrics(const ComPtr<IDWriteFont>& dwFont, const litehtml::font_description& descr, litehtml::font_metrics* fm);
     HBITMAP  get_bitmap() override;
     ComPtr<ID2D1HwndRenderTarget> m_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
 private:
@@ -374,6 +383,7 @@ private:
     ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
 
     HWND m_hwnd = nullptr;
+    ComPtr<IDWriteTextAnalyzer> m_analyzer;
 };
 
 // -------------- FreeType 后端 -----------------
@@ -627,6 +637,7 @@ public:
     std::map<std::wstring, MemFile> cache;
     OCFPackage ocf_pkg_;                     // 解析结果
     ZipIndexW m_zipIndex;
+    std::wstring m_file_path = L"";
     // -------------- EPUBBook 内部新增成员 --------------
 
     void parse_ocf_(void);                       // 主解析入口
@@ -940,6 +951,11 @@ private:
 
 
 
+struct ScrollPosition
+{
+    int spine_id;
+    int offset;
+};
 
 
 struct BodyBlock {
@@ -967,12 +983,18 @@ public:
     litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
     void load_html(std::wstring& href);
     void clear();
+    ScrollPosition get_scroll_position();
 private:
+
+    static int estimate_height(const std::string& html_fragment, int doc_width, int line_height);
 
     void calculate_height(HtmlBlock& block);
 
+    void calculate_block_height(std::string head, BodyBlock& block);
+
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
+    static float tag_line_weight(std::string_view tag);
     std::string get_head(std::string& html);
     std::vector<BodyBlock> get_body_blocks(std::string& html, int spine_id = 0, size_t max_chunk_bytes = 4*1024);
     void serialize_node(const GumboNode* node, std::ostream& out);
@@ -983,6 +1005,7 @@ private:
 
     void add_top(int& y_offset);
     void add_bottom();
+
     void remove_top(int& y_offset);
     void remove_bottom();
     void load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom);
@@ -998,4 +1021,113 @@ private:
     HtmlBlock m_top_block;
     HtmlBlock m_bottom_block;
 
+};
+
+//struct BookRecord
+//{
+//    int book_id;
+//    std::wstring book_path;
+//    std::string title;
+//    
+//    int last_spine_id;
+//    int last_scrollY;
+//    int doc_width;
+//    int font_size;
+//    float line_height_multiplier;
+//
+//    int open_count = 0;
+//    int total_time = 0; // 单位：秒
+//    float last_open;
+//    bool enableCSS = true;   // 默认启用 css
+//    bool enableJS = false;   // 默认禁用 JS
+//    bool enableGlobalCSS = false;
+//    bool enablePreprocessHTML = true;
+//    bool displayTOC = true;
+//    bool displayStatusBar = true;
+//    bool displayMenuBar = true;
+//    bool displayScrollBar = true;
+//
+//
+//
+//};
+//class ReadingRecorder {
+//public:
+//    ReadingRecorder();
+//    ~ReadingRecorder();
+//    void open();                     // 初始化数据库、建表、开 WAL
+//    void close(); // 关闭数据库，
+//
+//   //会在wm_mousemove, wm_mousewheel等的消息中调用 
+//    void tik(); 
+//    // 书籍状态
+//
+//
+//    // 统计示例
+//
+//private:
+//    /*记录的内容：
+//    * 
+//    *int id, std::wstring book_path, std::wstring title, std::wstring authors, std::wstring current_chapter, float start_time(时间戳）, float end_time（时间戳）, int duration(单位：s)
+//    * 
+//    */
+//
+//    sqlite3* m_dbRecords = nullptr;      // Records.db
+//    /*记录的内容：
+//    * int id, std::wstring book_path, std::string title, std::string author, int open_count, 
+//    * int total_words, int last_spine_id, int last_scrollY, int font_size, float line_height_multiplier, int total_time(总阅读时长s), 
+//    * float last_open_time(时间戳),     bool enableCSS = true; 
+//    *bool enableJS = false;
+//    *bool enableGlobalCSS = false;
+//    *bool enablePreprocessHTML = true;
+//    *bool displayTOC = true;
+//    *bool displayStatusBar = true;
+//    *bool displayMenuBar = true;
+//    *bool displayScrollBar = true;
+//    *
+//    *    打开新书时读取配置，关闭书时更新数据
+//    * 调用tik时更新总阅读时长
+//    */
+//    sqlite3* m_dbBooks = nullptr;      // Books.db
+//    
+//};
+
+
+
+struct BookRecord {
+    int64_t id = -1;                       // 数据库主键；-1 表示未找到
+    std::string path;
+    std::string title;
+    std::string author;
+    int         openCount = 0;
+    int         totalWords = 0;
+    int         lastSpineId = 0;
+    int         lastScrollY = 0;
+    int         fontSize = 0;
+    float       lineHeightMul = 0.0f;
+    int         docWidth = 0;
+    int         totalTime = 0;        // 累计阅读秒数
+    int64_t     lastOpenTimestamp = 0;        // 微秒
+    bool        enableCSS = true;
+    bool        enableJS = false;
+    bool        enableGlobalCSS = false;
+    bool        enablePreHTML = true;
+    bool        displayTOC = true;
+    bool        displayStatus = true;
+    bool        displayMenu = true;
+    bool        displayScroll = true;
+};
+
+class ReadingRecorder {
+public:
+    ReadingRecorder();
+    ~ReadingRecorder();
+
+    BookRecord openBook(const std::string& absolutePath); // 返回记录（读或建）
+    void       closeBook(const BookRecord& rec);            // 一次性写回
+
+    void updateRecord(BookRecord& record);
+
+private:
+    void initDB();
+    sqlite3* m_db = nullptr;
 };

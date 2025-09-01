@@ -39,7 +39,8 @@ static fs::file_time_type g_lastTime;
 std::set<std::wstring> g_activeFonts;
 
 std::unique_ptr<AppBootstrap> g_bootstrap;
-
+std::unique_ptr<ReadingRecorder> g_recorder;
+BookRecord g_record;
 
 int g_center_offset = 0;
 
@@ -1011,7 +1012,7 @@ bool EPUBBook::load(const wchar_t* epub_path) {
     namespace fs = std::filesystem;
     if (!fs::exists(epub_path))
         throw std::runtime_error("文件不存在");
-
+    m_file_path = epub_path;
     mz_zip_reader_end(&zip);           // 1. 先关闭旧 zip
     memset(&zip, 0, sizeof(zip));
 
@@ -1371,15 +1372,17 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_LBUTTONDOWN:
     {
+        if (!g_container || !g_container->m_doc) { break; }
+
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
 
-        if (!g_container->m_doc) { return 0; }
-
+  
         int doc_x = x - g_center_offset;
         int doc_y = y + g_scrollY;
         litehtml::position::vector redraw_boxes;
         g_container->m_doc->on_lbutton_down(doc_x, doc_y, 0, 0, redraw_boxes);
+        break;
     }
     case WM_LBUTTONUP:
     {
@@ -1409,7 +1412,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         //    g_book->OnTreeSelChanged(href.c_str());
 
         //}
-
+        break;
     }
     case WM_MOUSEMOVE:
     {
@@ -1453,6 +1456,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         //    g_book->hide_tooltip();
         //}
         //break;
+        break;
     }
     case WM_EPUB_CACHE_UPDATED:
     {
@@ -1663,7 +1667,8 @@ void UpdateCache()
     int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
     
-    g_vd->get_doc(h, g_scrollY, g_offsetY);
+    auto doc = g_vd->get_doc(h, g_scrollY, g_offsetY);
+    g_container->m_doc = doc;
     g_states.isUpdate.store(true);
     g_center_offset = std::max((w - g_cfg.document_width) * 0.5, 0.0);
 }
@@ -1695,7 +1700,36 @@ void UpdateCache()
 //    /* 3) 渲染整页 */
 //    g_pg.render(g_container->m_canvas.get(), g_scrollY);
 //}
+inline void DumpBookRecord(const BookRecord& r)
+{
+    std::ostringstream oss;
+    oss << std::boolalpha;   // 让 bool 打印成 true/false
+    oss << "===== BookRecord Dump =====\n";
+    oss << "id                 = " << r.id << '\n';
+    oss << "path               = " << r.path << '\n';
+    oss << "title              = " << r.title << '\n';
+    oss << "author             = " << r.author << '\n';
+    oss << "openCount          = " << r.openCount << '\n';
+    oss << "totalWords         = " << r.totalWords << '\n';
+    oss << "lastSpineId        = " << r.lastSpineId << '\n';
+    oss << "lastScrollY        = " << r.lastScrollY << '\n';
+    oss << "fontSize           = " << r.fontSize << '\n';
+    oss << "lineHeightMul      = " << std::fixed << std::setprecision(2) << r.lineHeightMul << '\n';
+    oss << "docWidth           = " << r.docWidth << '\n';
+    oss << "totalTime          = " << r.totalTime << " (s)\n";
+    oss << "lastOpenTimestamp  = " << r.lastOpenTimestamp << " (us)\n";
+    oss << "enableCSS          = " << r.enableCSS << '\n';
+    oss << "enableJS           = " << r.enableJS << '\n';
+    oss << "enableGlobalCSS    = " << r.enableGlobalCSS << '\n';
+    oss << "enablePreHTML      = " << r.enablePreHTML << '\n';
+    oss << "displayTOC         = " << r.displayTOC << '\n';
+    oss << "displayStatus      = " << r.displayStatus << '\n';
+    oss << "displayMenu        = " << r.displayMenu << '\n';
+    oss << "displayScroll      = " << r.displayScroll << '\n';
+    oss << "============================\n";
 
+    OutputDebugStringA(oss.str().c_str());
+}
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -1720,6 +1754,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_parse_task.valid()) {
             g_parse_task.wait();
         }
+        g_recorder->updateRecord(g_record);
+  
         g_pg.clear();              // 如果你 Paginator 有 clear() 就调
         g_container->clear();
         g_container->m_canvas->clear();
@@ -1733,9 +1769,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         // 3. 启动新任务
         SetStatus(0, L"正在加载...");
+
         g_parse_task = std::async(std::launch::async, [file] {
             try {
                 g_book->load(file);
+
                 PostMessage(g_hWnd, WM_EPUB_PARSED, 0, 0);
             }
             catch (const std::exception& e) {
@@ -1762,16 +1800,17 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             ShowWindow(g_hwndTV, SW_SHOW);
         }
 
+        g_record = g_recorder->openBook(w2a(g_book->m_file_path));
+        DumpBookRecord(g_record);
+        auto spine_id = g_record.lastSpineId;
 
-        g_last_html_path = g_book->ocf_pkg_.spine[0].href;
-        //std::string html = g_book->load_html(g_last_html_path);
+        g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
+   
         g_states.needRelayout.store(true);
         g_vd->clear();
         g_vd->load_book(g_book, g_container, g_cfg.document_width);
         g_vd->load_html(g_last_html_path);
-        //g_book->init_doc(std::move(html));
-        //g_states.needRelayout.store(true, std::memory_order_release);
-        // 2) 立即把第 0 页画到缓存位图
+
         UpdateCache();          // 复用前面给出的 UpdateCache()
 
         // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
@@ -1974,6 +2013,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             //    EnableMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_ENABLED);
             //}
             //break;
+            break;
         }
         case IDM_TOGGLE_JS: {
             g_cfg.enableJS = !g_cfg.enableJS;          // 切换状态
@@ -2308,7 +2348,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
         w2a(whref.substr(pos + 1));
 
 
-    //g_vd->load_book(g_book, g_container, g_cfg.document_width);
+    g_vd->load_book(g_book, g_container, g_cfg.document_width);
     g_states.needRelayout.store(true);
     g_vd->clear();
     g_vd->load_html(file_path);
@@ -2335,7 +2375,6 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 // SimpleContainer.cpp
 void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
-
     if (m_img_cache.contains(src)) return;
 
     std::wstring wpath = g_book->m_zipIndex.find(a2w(src));
@@ -2425,6 +2464,9 @@ SimpleContainer::create_element(const char* tag,
     si.el = el;
     g_bootstrap->m_pending_scripts.emplace_back(std::move(si));
     return el;
+    // TODO: 处理 <math> 标签
+    // TODO: 处理 <script> 标签
+    // TODO: 处理 <svg> 标签
 }
 
 
@@ -3013,10 +3055,7 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
 
 void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 {
-    if (m_canvas && m_canvas->backend() && hFont)
-    {
-        m_canvas->backend()->delete_font(hFont);
-    }
+    m_canvas->backend()->delete_font(hFont);
 }
 
 
@@ -3982,6 +4021,47 @@ D2DBackend::split_font_list(const std::string& src) {
     return out;
 };
 
+void D2DBackend::make_font_metrics(const ComPtr<IDWriteFont>& dwFont,
+    const litehtml::font_description& descr,
+    litehtml::font_metrics* fm)
+{
+  
+    DWRITE_FONT_METRICS fm0 = {};
+    dwFont->GetMetrics(&fm0);
+
+    float dip = static_cast<float>(descr.size) / fm0.designUnitsPerEm;
+
+    fm->font_size = descr.size;
+
+    
+    fm->ascent = fm0.ascent * dip;
+    fm->descent = fm0.descent * dip;
+
+    fm->height = (fm0.ascent + fm0.descent + fm0.lineGap) * dip;
+    fm->x_height = fm0.xHeight * dip ;
+
+    //float contentHeight = (fm0.ascent + fm0.descent) * dip;
+    //float leading = fm->height - contentHeight;
+    //fm->ascent = fm0.ascent * dip + leading * 0.5f;
+    //fm->descent = fm->height - fm->ascent;   // 关键！
+    // 1. 等宽数字 0 的宽度
+    //ComPtr<IDWriteTextLayout> tmpLayout;
+    //std::wstring zero = L"0";
+    //m_dwrite->CreateTextLayout(zero.c_str(), 1, fmt.Get(),
+    //    65536.0f, 65536.0f, &tmpLayout);
+    //DWRITE_TEXT_METRICS tm = {};
+    //if (tmpLayout) tmpLayout->GetMetrics(&tm);
+    //fm->ch_width = static_cast<int>(tm.widthIncludingTrailingWhitespace + 0.5f);
+    //if (fm->ch_width <= 0) fm->ch_width = fm->font_size * 3 / 5; // 兜底
+
+    // 2. 上下标偏移：简单取 x-height 的 1/2
+    fm->draw_spaces = descr.style == litehtml::font_style_italic || descr.decoration_line != litehtml::text_decoration_line_none;
+    fm->sub_shift = fm->x_height / 2;
+    fm->super_shift = fm->x_height / 2;
+ 
+    // 3. 修正 baseline
+    g_line_height = fm->height;
+}
 litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& descr,
     const litehtml::document* doc,
     litehtml::font_metrics* fm)
@@ -3995,391 +4075,108 @@ litehtml::uint_ptr D2DBackend::create_font(const litehtml::font_description& des
 
     std::vector<std::wstring> faces = split_font_list(
         descr.family.empty() ? g_cfg.default_font_name : descr.family);
-    /*----------------------------------------------------------
-      2. 逐个尝试创建 IDWriteTextFormat
-    ----------------------------------------------------------*/
-    // 2. 自定义查找函数
-    auto FindFamilyIndex = [](IDWriteFontCollection* coll,
-        const std::wstring& name,
-        UINT32& index,
-        BOOL& exists) -> bool
-        {
-            exists = FALSE;
-            if (!coll) return false;
 
-            UINT32 count = coll->GetFontFamilyCount();;
+    // 默认字体兜底
+    faces.push_back(a2w(g_cfg.default_font_name));
 
-            for (UINT32 i = 0; i < count; ++i)
-            {
-                Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
-                if (FAILED(coll->GetFontFamily(i, &fam)))
-                    continue;
-
-                Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
-                if (FAILED(fam->GetFamilyNames(&names)))
-                    continue;
-
-                UINT32 nameLen = 0;
-                if (FAILED(names->GetStringLength(0, &nameLen)))
-                    continue;
-
-                std::wstring buf(nameLen + 1, L'\0');
-                if (FAILED(names->GetString(0, buf.data(), nameLen + 1)))
-                    continue;
-                buf.resize(nameLen);            // 去掉末尾 NUL
-
-                if (_wcsicmp(buf.c_str(), name.c_str()) == 0)
-                {
-                    index = i;
-                    exists = TRUE;
-                    return true;
-                }
-            }
-            return true;   // 遍历完但没找到
-        };
-
-
-
-    ComPtr<IDWriteTextFormat> fmt;
+    FontCachePair fcp;
     for (auto f : faces)
     {
-        fmt = m_fontCache.get(f, descr, m_privateFonts.Get(), m_sysFontColl.Get());
-        if (fmt) break;
+        fcp = m_fontCache.get(f, descr, m_privateFonts.Get(), m_sysFontColl.Get());
+        fcp.fmt;
+        if (fcp.fmt) break;
     }
-    //for (const auto& f : faces)
-    //{
-    //    std::wstring name = f;
-    //    UINT32 index = 0;
-    //    BOOL   exists = FALSE;
-    //    FontKey exact{ f, descr.weight, descr.style == litehtml::font_style_italic };
-    //    // 1) 先找完全匹配
-    //    auto it = g_book->m_fontBin.find(exact);
-    //    if (it != g_book->m_fontBin.end()) {
-    //        name = it->second;                 // 命中
-    //    }
-    //    else {
-    //        // 2) 退而求其次：只匹配 family
-    //        for (const auto& kv : g_book->m_fontBin) {
-    //            if (kv.first.family == f) {      // 忽略 weight/italic
-    //                name = kv.second;
-    //                break;
-    //            }
-    //        }
-    //    }
-    //    /* 1. 私有集合 */
-    //    if (m_privateFonts)
-    //    {
-    //        FindFamilyIndex(m_privateFonts.Get(), name, index, exists);
-    //        if (exists &&
-    //            SUCCEEDED(m_dwrite->CreateTextFormat(
-    //                name.c_str(), m_privateFonts.Get(),
-    //                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-    //                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-    //                : DWRITE_FONT_STYLE_NORMAL,
-    //                DWRITE_FONT_STRETCH_NORMAL,
-    //                static_cast<float>(descr.size),
-    //                L"en-us",
-    //                &fmt)))
-    //        {
-    //            //SetFontMatric(descr, m_privateFonts.Get(), name, index, fm);
-    //            //m_actualFamily = f;          // 保存命中的家族名
-    //            //OutputDebugStringW((L"[private] 命中：" + m_actualFamily + L"\n").c_str());
-    //            break;
-    //        }
-    //    }
 
-    //    /* 2. 系统集合 */
-    //    index = 0;
-    //    exists = FALSE;
-    //    FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
-    //    if (exists &&
-    //        SUCCEEDED(m_dwrite->CreateTextFormat(
-    //            name.c_str(), nullptr,
-    //            static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-    //            descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-    //            : DWRITE_FONT_STYLE_NORMAL,
-    //            DWRITE_FONT_STRETCH_NORMAL,
-    //            static_cast<float>(descr.size),
-    //            L"en-us",
-    //            &fmt)))
-    //    {
-    //        //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
-    //        //m_actualFamily = f;              // 保存命中的家族名
-    //        //OutputDebugStringW((L"[system] 命中：" + m_actualFamily + L"\n").c_str());
-    //        break;
-    //    }
-    //    OutputDebugStringW((L"[DWrite] 未找到字体：" + name + L"\n").c_str());
-    //}
 
-    //if (!fmt){
-    //    std::wstring name = a2w(g_cfg.default_font_name);
-    //    OutputDebugStringW(L"[DWrite] 未找到字体:");
-    //    OutputDebugStringW(a2w(descr.family).c_str());
-    //    OutputDebugStringW(L"  使用默认字体：");
-    //    OutputDebugStringW(name.c_str());
-    //    OutputDebugStringW(L"\n");
-    //    UINT32 index = 0;
-    //    BOOL   exists = FALSE;
-    //    FindFamilyIndex(m_sysFontColl.Get(), name, index, exists);
-    //    if (exists &&
-    //        SUCCEEDED(m_dwrite->CreateTextFormat(
-    //            name.c_str(), nullptr,
-    //            static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-    //            descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-    //            : DWRITE_FONT_STYLE_NORMAL,
-    //            DWRITE_FONT_STRETCH_NORMAL,
-    //            static_cast<float>(descr.size),
-    //            L"en-us",
-    //            &fmt)))
-    //    {
-    //        //SetFontMatric(descr, m_sysFontColl.Get(), name, index, fm);
-    //    }   
-    //}
-
-    if (!fmt) {
+    if (!fcp.fmt) {
         OutputDebugStringW(L"[DWrite] 加载默认字体失败\n");
         return 0;
     }
-
-
-    /*----------------------------------------------------------
-     用命中的字体家族名去拿真正的字体并计算度量
-   ----------------------------------------------------------*/
-
-    ComPtr<IDWriteFontFamily>     family;
-    ComPtr<IDWriteFont>           dwFont;
-
-
-    UINT32 len = fmt->GetFontFamilyNameLength();
-
-
-    std::wstring currentFamily;
-    WCHAR buf[512];
-    //UINT32 len = fmt->GetFontFamilyNameLength();   // 可见字符数
-    if (len + 1 < std::size(buf))
+    if (fcp.dwFont) 
     {
-        fmt->GetFontFamilyName(buf, len + 1);      // buf[len] == '\0'
-        currentFamily.assign(buf, len);        // 19 字符 + 1 NUL = 20
+        make_font_metrics(fcp.dwFont, descr, fm);
     }
 
-    /* 根据命中的来源选择集合 */
-    ComPtr<IDWriteFontCollection> targetCollection;
-    if (!currentFamily.empty())
-    {
-        std::wstring cleanName(currentFamily.c_str());   // 只保留可见字符
-        cleanName.erase(std::find(cleanName.begin(), cleanName.end(), L'\0'), cleanName.end());
-        FontKey exact{ cleanName, descr.weight, descr.style == litehtml::font_style_italic };
-        // 1) 先找完全匹配
-        auto it = g_book->m_fontBin.find(exact);
-        if (it != g_book->m_fontBin.end()) {
-            cleanName = it->second;                 // 命中
-        }
-        else {
-            // 2) 退而求其次：只匹配 family
-            for (const auto& kv : g_book->m_fontBin) {
-                if (kv.first.family == cleanName) {      // 忽略 weight/italic
-                    cleanName = kv.second;
-                    break;
-                }
-            }
-        }
-
-        UINT32 index = 0;
-        BOOL   exists = FALSE;
-
-        if (m_privateFonts &&
-            FindFamilyIndex(m_privateFonts.Get(), cleanName, index, exists) && exists)
-        {
-            targetCollection = m_privateFonts;
-        }
-        else
-        {
-            FindFamilyIndex(m_sysFontColl.Get(), cleanName, index, exists);   // 只在系统集合里再查一次
-            targetCollection = m_sysFontColl;
-        }
-
-
-
-        if (exists)
-        {
-            targetCollection->GetFontFamily(index, &family);
-            family->GetFirstMatchingFont(
-                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-                DWRITE_FONT_STRETCH_NORMAL,
-                descr.style == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
-                : DWRITE_FONT_STYLE_NORMAL,
-                &dwFont);
-
-
-
-            DWRITE_FONT_METRICS fm0 = {};
-            dwFont->GetMetrics(&fm0);
-
-            float dip = static_cast<float>(descr.size) / fm0.designUnitsPerEm;
-
-            fm->font_size = descr.size;
-
-            fm->ascent = static_cast<int>(fm0.ascent * dip + 0.5f);
-            fm->descent = static_cast<int>(fm0.descent * dip + 0.5f);
-            fm->height = static_cast<int>((fm0.ascent + fm0.descent + fm0.lineGap)
-                * dip * g_cfg.line_height_multiplier + 0.5f);
-            fm->x_height = static_cast<int>(fm0.xHeight * dip + 0.5f);
-
-            // 1. 等宽数字 0 的宽度
-            ComPtr<IDWriteTextLayout> tmpLayout;
-            std::wstring zero = L"0";
-            m_dwrite->CreateTextLayout(zero.c_str(), 1, fmt.Get(),
-                65536.0f, 65536.0f, &tmpLayout);
-            DWRITE_TEXT_METRICS tm = {};
-            if (tmpLayout) tmpLayout->GetMetrics(&tm);
-            fm->ch_width = static_cast<int>(tm.widthIncludingTrailingWhitespace + 0.5f);
-            if (fm->ch_width <= 0) fm->ch_width = fm->font_size * 3 / 5; // 兜底
-
-            // 2. 上下标偏移：简单取 x-height 的 1/2
-            fm->sub_shift = fm->x_height / 2;
-            fm->super_shift = fm->x_height / 2;
-
-            // 3. 修正 baseline
-            SetStatus(1, cleanName.c_str());
-            //char buf[256];
-            //snprintf(buf, sizeof(buf),
-            //    "[DWrite] %ls: designUnitsPerEm=%u, ascent=%u, descent=%u, lineGap=%d\n",
-            //    cleanName.c_str(), fm0.designUnitsPerEm, fm0.ascent, fm0.descent, fm0.lineGap);
-            //OutputDebugStringA(buf);
-            g_line_height = fm->height;
-        }
-    }
-    /*----------------------------------------------------------
-      6. 返回句柄
-    ----------------------------------------------------------*/
-    FontPair* fp = new FontPair{ fmt, descr };
-
+    FontPair* fp = new FontPair{ fcp.fmt, descr };
+    SetStatus(1, a2w(descr.family).c_str());
     return reinterpret_cast<litehtml::uint_ptr>(fp);
 }
 
 void D2DBackend::delete_font(litehtml::uint_ptr h)
 {
-    if (h) delete reinterpret_cast<FontPair*>(h);
+    if (!h) return;
+    auto* fp = reinterpret_cast<FontPair*>(h);
+    delete fp;              // 4. 真正释放
 }
 
-//void D2DBackend::draw_background(litehtml::uint_ptr hdc,
-//    const std::vector<litehtml::background_paint>& bg, std::unordered_map<std::string, ImageFrame>& img_cache)
-//{
-//    assert(m_rt && "render target is null");
-//    if (bg.empty()) return;
-//
-//    ComPtr<ID2D1BitmapRenderTarget> rt = m_rt;
-//
-//    for (const auto& b : bg)
-//    {
-//        //--------------------------------------------------
-//        // 1. 纯色背景
-//        //--------------------------------------------------
-//        if (b.image.empty())
-//        {
-//            ComPtr<ID2D1SolidColorBrush> brush;
-//            rt->CreateSolidColorBrush(
-//                D2D1::ColorF(b.color.red / 255.0f,
-//                    b.color.green / 255.0f,
-//                    b.color.blue / 255.0f,
-//                    b.color.alpha / 255.0f),
-//                &brush);
-//
-//            D2D1_RECT_F rc = D2D1::RectF(
-//                (float)b.border_box.left(), (float)b.border_box.top(),
-//                (float)b.border_box.right(), (float)b.border_box.bottom());
-//
-//            rt->FillRectangle(rc, brush.Get());
-//            continue;
-//        }
-//
-//        //--------------------------------------------------
-//        // 2. 图片背景
-//        //--------------------------------------------------
-//        auto it = img_cache.find(b.image);
-//        if (it == img_cache.end()) continue;   // 还没加载
-//
-//        const ImageFrame& frame = it->second;
-//        if (frame.rgba.empty()) continue;
-//
-//        // 如果已经缓存过 D2D 位图，直接拿；否则创建一次再缓存
-//        ComPtr<ID2D1Bitmap> bmp;
-//        auto d2d_it = m_d2dBitmapCache.find(b.image);
-//        if (d2d_it != m_d2dBitmapCache.end())
-//        {
-//            bmp = d2d_it->second;
-//        }
-//        else
-//        {
-//            D2D1_BITMAP_PROPERTIES bp =
-//                D2D1::BitmapProperties(
-//                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-//                        D2D1_ALPHA_MODE_PREMULTIPLIED));
-//
-//            HRESULT hr = rt->CreateBitmap(
-//                D2D1::SizeU(frame.width, frame.height),
-//                frame.rgba.data(),
-//                frame.stride,
-//                bp,
-//                &bmp);
-//
-//            if (SUCCEEDED(hr))
-//                m_d2dBitmapCache.emplace(b.image, bmp);
-//        }
-//
-//        if (!bmp) continue;
-//
-//        // 简单拉伸到 border_box；需要平铺/居中的话再算源/目标矩形
-//        D2D1_RECT_F dst = D2D1::RectF(
-//            (float)b.border_box.left(), (float)b.border_box.top(),
-//            (float)b.border_box.right(), (float)b.border_box.bottom());
-//
-//        rt->DrawBitmap(bmp.Get(), dst);
-//    }
-//}
-//
-
-litehtml::pixel_t D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+litehtml::pixel_t D2DBackend::text_width(const char* text,
+    litehtml::uint_ptr hFont)
 {
     if (!text || !*text || !hFont) return 0;
+
     FontPair* fp = reinterpret_cast<FontPair*>(hFont);
-    if (!fp || !fp->format) { OutputDebugStringA("fp->format is null\n"); return 0; }
+    if (!fp || !fp->format) return 0;
 
     std::wstring wtxt = a2w(text);
     if (wtxt.empty()) return 0;
-    UINT32 textLen = static_cast<UINT32>(wtxt.size());
-    if (textLen == 0) return 0;
-    ComPtr<IDWriteTextLayout> layout;
-    const float maxWidth = 65536.0f;
-    const float maxHeight = 65536.0f;
-    HRESULT hr = m_dwrite->CreateTextLayout(
-        wtxt.data(), textLen,
-        fp->format.Get(),
-        maxWidth, maxHeight,
-        &layout);
-    if (FAILED(hr)) return 0;
 
-    // 1. 关闭所有可能压缩空白的选项
-    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 };
-    layout->SetTrimming(&trimming, nullptr);
+    // 1. 创建 TextLayout
+ 
+    float maxW = 8192.0f;
+    auto layout = getLayout(wtxt, fp, maxW);
+    if (!layout) { return 0; }
+    // 3. 取逻辑宽度（已含空白、连字、kerning）
+    DWRITE_TEXT_METRICS tm{};
+    HRESULT hr = layout->GetMetrics(&tm);
+    if (FAILED(hr)) { return 0; }
 
-    // 2. 用 cluster 宽度累加，避免“纯空白字符串”返回 0
-    std::vector<DWRITE_CLUSTER_METRICS> cms;
-    UINT32 count = 0;
-    layout->GetClusterMetrics(nullptr, 0, &count);
-    if (count == 0) return 0;
-    cms.resize(count);
-    layout->GetClusterMetrics(cms.data(), count, &count);
+    // 4. DPI → 物理像素（Win7 也支持）
+    float dpi = 96.0f;               // 若你有当前 DPI，替换之
+    float physical = tm.widthIncludingTrailingWhitespace * dpi / 96.0f;
 
-    float total = 0.0f;
-    for (const auto& cm : cms)
-        total += cm.width;
-
-    return static_cast<int>(total + 0.5f);
+    return physical;
 }
+//litehtml::pixel_t D2DBackend::text_width(const char* text, litehtml::uint_ptr hFont)
+//{
+//    if (!text || !*text || !hFont) return 0;
+//    FontPair* fp = reinterpret_cast<FontPair*>(hFont);
+//    if (!fp || !fp->format) { OutputDebugStringA("fp->format is null\n"); return 0; }
+//
+//    std::wstring wtxt = a2w(text);
+//    if (wtxt.empty()) return 0;
+//    UINT32 textLen = static_cast<UINT32>(wtxt.size());
+//    if (textLen == 0) return 0;
+//    ComPtr<IDWriteTextLayout> layout;
+//    const float maxWidth = 65536.0f;
+//    const float maxHeight = 65536.0f;
+//    HRESULT hr = m_dwrite->CreateTextLayout(
+//        wtxt.data(), textLen,
+//        fp->format.Get(),
+//        maxWidth, maxHeight,
+//        &layout);
+//    if (FAILED(hr)) return 0;
+//
+//    // 1. 关闭所有可能压缩空白的选项
+//    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+//    DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 };
+//    layout->SetTrimming(&trimming, nullptr);
+//
+//    // 2. 用 cluster 宽度累加，避免“纯空白字符串”返回 0
+//    std::vector<DWRITE_CLUSTER_METRICS> cms;
+//    UINT32 count = 0;
+//    layout->GetClusterMetrics(nullptr, 0, &count);
+//    if (count == 0) return 0;
+//    cms.resize(count);
+//    layout->GetClusterMetrics(cms.data(), count, &count);
+//
+//    float total = 0.0f;
+//    for (const auto& cm : cms)
+//        total += cm.width;
+//
+//    return static_cast<int>(total + 0.5f);
+//}
 
-static void build_rounded_rect_path(
+void D2DBackend::build_rounded_rect_path(
     ComPtr<ID2D1GeometrySink>& sink,
     const litehtml::position& pos,
     const litehtml::border_radiuses& bdr)
@@ -5750,6 +5547,10 @@ AppBootstrap::AppBootstrap() {
     {
         g_vd = std::make_unique<VirtualDoc>();
     }
+    if(!g_recorder)
+    {
+        g_recorder = std::make_unique<ReadingRecorder>();
+    }
 
 }
 
@@ -6477,6 +6278,7 @@ std::wstring EPUBBook::extract_text(const tinyxml2::XMLElement* a)
 
 EPUBBook::~EPUBBook() {
     mz_zip_reader_end(&zip);
+    g_recorder->updateRecord(g_record);
     //for (const auto& path : g_tempFontFiles)
     //{
     //    RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
@@ -6586,6 +6388,7 @@ void ZipIndexW::build(mz_zip_archive& zip) {
 
 void SimpleContainer::clear()
 {
+
     m_img_cache.clear();
 
     m_anchor_map.clear();
@@ -6604,6 +6407,7 @@ const char* SimpleContainer::get_default_font_name() const
 
 void EPUBBook::clear()
 {
+
     SendMessage(g_hwndTV, WM_SETREDRAW, FALSE, 0);
     HTREEITEM hRoot = TreeView_GetRoot(g_hwndTV);
     TreeView_SelectItem(g_hwndTV, nullptr);   // 先取消选中
@@ -6620,6 +6424,7 @@ void EPUBBook::clear()
     m_roots.clear();
     ocf_pkg_ = {};
     m_fontBin.clear();
+    m_file_path = L"";
 }
 
 void D2DCanvas::clear()
@@ -6695,7 +6500,7 @@ D2DBackend::D2DBackend(int w, int h, HWND hwnd)
         OutputDebugStringA("DWriteCreateFactory failed\n");
         return;
     }
-
+    m_dwrite->CreateTextAnalyzer(&m_analyzer);
     /* 5) 系统字体集合 */
     hr = m_dwrite->GetSystemFontCollection(&m_sysFontColl, FALSE);
     if (FAILED(hr)) {
@@ -6851,7 +6656,7 @@ FontCache::FontCache() {
 }
 
 /* ---------------------------------------------------------- */
-Microsoft::WRL::ComPtr<IDWriteTextFormat>
+FontCachePair
 FontCache::get(std::wstring& familyName, const litehtml::font_description& descr,
     IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl) {
     // 1. 构造键
@@ -6871,16 +6676,16 @@ FontCache::get(std::wstring& familyName, const litehtml::font_description& descr
     }
 
     // 3. 未命中，创建并写入
-    auto fmt = create(key, privateColl, sysColl);
+    auto fcp = create(key, privateColl, sysColl);
     {
         std::unique_lock ul(m_mtx);
-        m_map[key] = fmt;          // 若并发重复，后写覆盖，无妨
+        m_map[key] = fcp;          // 若并发重复，后写覆盖，无妨
     }
-    return fmt;
+    return fcp;
 }
 
 /* ---------------------------------------------------------- */
-Microsoft::WRL::ComPtr<IDWriteTextFormat>
+FontCachePair
 FontCache::create(const FontKey& key, IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl) {
     // 候选家族列表：精确 → 仅 family → 默认
     std::wstring tryName;
@@ -6903,7 +6708,8 @@ FontCache::create(const FontKey& key, IDWriteFontCollection* privateColl, IDWrit
     for (auto coll : { privateColl, sysColl }) {   // 先私有，再系统
         if (!coll) continue;
         UINT32 index = 0;
-        if (!findFamily(coll, tryName, index)) continue;
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> dwFamily;
+        if (!findFamily(coll, tryName, dwFamily, index)) continue;
 
         Microsoft::WRL::ComPtr<IDWriteTextFormat> fmt;
         if (SUCCEEDED(m_dw->CreateTextFormat(
@@ -6913,48 +6719,49 @@ FontCache::create(const FontKey& key, IDWriteFontCollection* privateColl, IDWrit
             DWRITE_FONT_STRETCH_NORMAL,
             static_cast<float>(key.size),
             L"en-us",
-            &fmt))) {
-            return fmt;   // 成功
+            &fmt))) 
+        {
+            ComPtr<IDWriteFont>  dwFont;
+            dwFamily->GetFirstMatchingFont(
+                static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+                DWRITE_FONT_STRETCH_NORMAL,
+                key.italic == litehtml::font_style_italic ? DWRITE_FONT_STYLE_ITALIC
+                : DWRITE_FONT_STYLE_NORMAL,
+                &dwFont);
+            FontCachePair fcp;
+            fcp.fmt = fmt;
+            fcp.dwFont = dwFont;
+            return std::move(fcp);   // 成功
         }
     }
 
-    //使用默认字体
-    Microsoft::WRL::ComPtr<IDWriteTextFormat> fmt;
-    if (SUCCEEDED(m_dw->CreateTextFormat(
-        m_defaultFamily.c_str(), sysColl,
-        static_cast<DWRITE_FONT_WEIGHT>(key.weight),
-        key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL,
-        static_cast<float>(key.size),
-        L"en-us",
-        &fmt))) {
-        return fmt;   // 成功
-    }
-
     // 理论上不会走到这里，除非默认字体也失败
-    return nullptr;
+    
+    return { nullptr, nullptr };
+    
 }
 
 /* ---------------------------------------------------------- */
 bool FontCache::findFamily(IDWriteFontCollection* coll,
     const std::wstring& target,
+    Microsoft::WRL::ComPtr<IDWriteFontFamily>& family, 
     UINT32& index)
 {
     // 1) 快路径：DWrite 自带
-    BOOL exists = FALSE;
-    if (SUCCEEDED(coll->FindFamilyName(target.c_str(), &index, &exists)) && exists)
-        return true;
+    //BOOL exists = FALSE;
+    //if (SUCCEEDED(coll->FindFamilyName(target.c_str(), &index, &exists)) && exists)
+    //    return true;
 
     // 2) 慢路径：逐 family 遍历
     UINT32 count = coll->GetFontFamilyCount();
     for (UINT32 i = 0; i < count; ++i)
     {
-        Microsoft::WRL::ComPtr<IDWriteFontFamily> fam;
-        if (FAILED(coll->GetFontFamily(i, &fam)))
+      
+        if (FAILED(coll->GetFontFamily(i, &family)))
             continue;
 
         Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
-        if (FAILED(fam->GetFamilyNames(&names)))
+        if (FAILED(family->GetFamilyNames(&names)))
             continue;
 
         UINT32 len = 0;
@@ -7066,8 +6873,8 @@ void VirtualDoc::load_html(std::wstring& href)
     m_top_block.clear();
     load_by_id(m_bottom_block, id, true);
 
-    id -= 1;
-    load_by_id(m_top_block, id, false);
+    //id -= 1;
+    //load_by_id(m_top_block, id, false);
 }
 void VirtualDoc::merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom)
 {
@@ -7092,29 +6899,93 @@ void VirtualDoc::merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom)
             src.body_blocks.end());
     }
 }
+//void VirtualDoc::calculate_height(HtmlBlock& block)
+//{
+//    for (auto& b : block.body_blocks)
+//    {
+//        std::string text = "<html>" + block.head + "<body>" + b.html + "</body></html>";
+//        m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+//        m_doc->render(m_render_width);
+//        b.height = m_doc->height();
+//        block.height += m_doc->height();
+//    }
+//
+//}
+
+// ------------------------------------------------------------------
+// 预估值：每个标签额外占多少行（经验值，可再调）
+// ------------------------------------------------------------------
+ float VirtualDoc::tag_line_weight(std::string_view tag)
+{
+    static const std::unordered_map<std::string_view, float> tbl = {
+        {"p", 1.0f}, {"div", 1.0f}, {"h1", 2.2f}, {"h2", 1.8f}, {"h3", 1.6f},
+        {"h4", 1.4f}, {"h5", 1.2f}, {"h6", 1.0f}, {"li", 1.0f}, {"tr", 1.0f},
+        {"td", 0.5f}, {"img", 4.0f}, {"table", 2.0f}, {"math", 2.5f},
+        {"pre", 1.5f}, {"blockquote", 1.2f}
+    };
+    auto it = tbl.find(tag);
+    return (it == tbl.end()) ? 0.0f : it->second;
+}
+
+// ------------------------------------------------------------------
+// 纯字符串扫描，O(n)
+// ------------------------------------------------------------------
+ int VirtualDoc::estimate_height(const std::string& html_fragment,
+    int doc_width,
+    int line_height)
+{
+    if (html_fragment.empty() || doc_width <= 0 || line_height <= 0)
+        return 0;
+
+    const float avg_char_width = 8.0f;   // 可再校准
+    size_t text_len = 0;
+    float  extra_lines = 0.0f;
+
+    for (size_t i = 0; i < html_fragment.size(); ) {
+        if (html_fragment[i] == '<') {
+            size_t j = html_fragment.find('>', i);
+            if (j == std::string::npos) break;
+            std::string_view tag(&html_fragment[i + 1], j - i - 1);
+
+            // 去掉属性：取第一个空格前的部分
+            size_t sp = tag.find_first_of(" \t\n/");
+            if (sp != std::string_view::npos) tag = tag.substr(0, sp);
+
+            if (!tag.empty() && tag[0] != '/')
+                extra_lines += tag_line_weight(tag);
+
+            i = j + 1;
+        }
+        else {
+            size_t j = html_fragment.find('<', i);
+            if (j == std::string::npos) j = html_fragment.size();
+            text_len += (j - i);
+            i = j;
+        }
+    }
+
+    // 文本行数
+    float text_lines = static_cast<float>(text_len * avg_char_width) / doc_width;
+    float total_lines = std::ceil(text_lines) + extra_lines;
+
+    return static_cast<int>(std::round(total_lines * line_height));
+}
+
+
 void VirtualDoc::calculate_height(HtmlBlock& block)
 {
-    for (auto& b : block.body_blocks)
-    {
-        std::string text = "<html>" + block.head + "<body>" + b.html + "</body></html>";
-        m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-        m_doc->render(m_render_width);
-        b.height = m_doc->height();
-        block.height += m_doc->height();
+    block.height = 0;
+    for (auto& b : block.body_blocks) {
+        b.height = estimate_height(b.html, m_render_width, g_line_height);
+        block.height += b.height;
     }
-    //std::string text;
-    //text += "<html>" + block.head + "<body>";
-    //for (auto b : block.body_blocks)
-    //{
-    //    text += b.html;
-    //}
-    //text += "</body></html>";
-    //m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-    //m_doc->render(m_render_width);
-    //OutputDebugStringA(("calculate height: " + 
-    //    std::to_string(block.height) + 
-    //    "；actual height: " + 
-    //std::to_string(m_doc->height() )+ "\n").c_str());
+}
+void VirtualDoc::calculate_block_height(std::string head, BodyBlock& block)
+{
+    std::string text = "<html>" + head + "<body>" + block.html + "</body></html>";
+    m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+    m_doc->render(m_render_width);
+    block.height = m_doc->height();
 }
 HtmlBlock VirtualDoc::get_html_block(std::string html, int spine_id)
 {
@@ -7269,6 +7140,7 @@ std::vector<BodyBlock> VirtualDoc::get_body_blocks(std::string& html,
     return blocks;
 }
 
+
 void VirtualDoc::load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom)
 {
     std::wstring href = get_href_by_id(spine_id);
@@ -7282,17 +7154,58 @@ void VirtualDoc::load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom)
     merge_block(dst, block, isAddToBottom);
 }
 
+ScrollPosition VirtualDoc::get_scroll_position()
+{
+    ScrollPosition pos{};
+    if (m_render_block.body_blocks.empty())
+        return pos;
+
+    int   y = 0;                     // 已累加像素
+    int   cur_spine = -1;            // 当前正在统计的 spine
+    int   spine_offset = 0;          // 当前 spine 内部已累加像素
+
+    for (const auto& b : m_render_block.body_blocks)
+    {
+        if (b.spine_id != cur_spine)
+        {
+            // 进入新 spine
+            cur_spine = b.spine_id;
+            spine_offset = 0;
+        }
+
+        if (y + static_cast<int>(b.height) > g_offsetY)
+        {
+            // 滚动位置落在本 block
+            pos.spine_id = cur_spine;
+            pos.offset = spine_offset + (g_offsetY - y);
+            return pos;
+        }
+
+        y += static_cast<int>(b.height);
+        spine_offset += static_cast<int>(b.height);
+    }
+
+    // 如果 scrollY 超过总高度，返回最后一个块末尾
+    const auto& last = m_render_block.body_blocks.back();
+    pos.spine_id = last.spine_id;
+    pos.offset = spine_offset;
+    return pos;
+}
+
 litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_offset)
 {
-
     if (!m_book || !m_container) { return nullptr; }
+
+
     y_offset += scrollY;
-    OutputDebugStringA(std::to_string(y_offset).c_str());
-    OutputDebugStringA(" ");
+    //OutputDebugStringA(std::to_string(y_offset).c_str());
+    //OutputDebugStringA(" ");
     if (y_offset < 0)
     {
         g_states.needRelayout.store(true);
         //remove_bottom();
+        add_top(y_offset);
+        add_top(y_offset);
         add_top(y_offset);
         add_top(y_offset);
         add_top(y_offset);
@@ -7304,7 +7217,8 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
         add_bottom();
         add_bottom();
         add_bottom();
-
+        add_bottom();
+        add_bottom();
     }
     while (m_render_block.height < client_h * 3)
     {
@@ -7320,12 +7234,13 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
             text += b.html;
         }
         text += "</body></html>";
-        g_container->m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-        g_container->m_doc->render(m_render_width);
-
+        m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+        m_doc->render(m_render_width);
+        m_render_block.height = m_doc->height();
+        
     }
     scrollY = 0;
-    return nullptr;
+    return m_doc;
 }
 
 
@@ -7339,14 +7254,46 @@ void VirtualDoc::add_bottom()
     }
     if (!m_bottom_block.body_blocks.empty())
     {
+        m_render_block.head = m_bottom_block.head;
         auto block = m_bottom_block.body_blocks.front();
+        //if (block.height <= 0)
+        //{
+        //    calculate_block_height(m_render_block.head, block);
+        //}
         m_bottom_block.body_blocks.erase(m_bottom_block.body_blocks.begin());
 
         m_render_block.height += block.height;
         m_bottom_block.height -= block.height;
+
         m_render_block.body_blocks.push_back(std::move(block));
     }
 }
+
+// 向上滚动
+void VirtualDoc::add_top(int& y_offset)
+{
+    if (m_top_block.body_blocks.empty())
+    {
+        auto id = m_render_block.body_blocks.front().spine_id - 1;
+        load_by_id(m_top_block, id, false);
+    }
+    if (!m_top_block.body_blocks.empty()) {
+        m_render_block.head = m_top_block.head;
+        auto block = m_top_block.body_blocks.back();
+        //if (block.height <= 0)
+        //{
+        //    calculate_block_height(m_render_block.head, block);
+        //}
+        m_top_block.body_blocks.pop_back();
+
+        m_render_block.height += block.height;
+        m_top_block.height -= block.height;
+        y_offset += block.height;
+        m_render_block.body_blocks.insert(m_render_block.body_blocks.begin(), std::move(block));
+    }
+}
+
+
 void VirtualDoc::remove_top(int& y_offset)
 {
     if (!m_render_block.body_blocks.empty())
@@ -7358,24 +7305,6 @@ void VirtualDoc::remove_top(int& y_offset)
         m_render_block.height -= block.height;
         y_offset -= block.height;
         m_top_block.body_blocks.push_back(std::move(block));
-    }
-}
-// 向上滚动
-void VirtualDoc::add_top(int& y_offset)
-{
-    if (m_top_block.body_blocks.empty())
-    {
-        auto id = m_render_block.body_blocks.front().spine_id - 1;
-        load_by_id(m_top_block, id, false);
-    }
-    if (!m_top_block.body_blocks.empty()) {
-        auto block = m_top_block.body_blocks.back();
-        m_top_block.body_blocks.pop_back();
-
-        m_render_block.height += block.height;
-        m_top_block.height -= block.height;
-        y_offset += block.height;
-        m_render_block.body_blocks.insert(m_render_block.body_blocks.begin(), std::move(block));
     }
 }
 void VirtualDoc::remove_bottom()
@@ -7398,4 +7327,199 @@ void VirtualDoc::clear()
     m_bottom_block.clear();
     m_top_block.clear();
     g_offsetY = 0;
+}
+
+
+/* ---------- 工具 ---------- */
+static int64_t nowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+/* ---------- 构造/析构 ---------- */
+ReadingRecorder::ReadingRecorder() { initDB(); }
+ReadingRecorder::~ReadingRecorder() { if (m_db) sqlite3_close(m_db); }
+
+/* ---------- 初始化数据库 ---------- */
+void ReadingRecorder::initDB() {
+    namespace fs = std::filesystem;
+    fs::create_directories("data");
+    if (sqlite3_open("data/Books.db", &m_db) != SQLITE_OK)
+        throw std::runtime_error("sqlite open failed");
+
+    sqlite3_exec(m_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    const char* sql = R"(
+        CREATE TABLE IF NOT EXISTS books(
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            path             TEXT UNIQUE,
+            title            TEXT,
+            author           TEXT,
+            open_count       INTEGER DEFAULT 0,
+            total_words      INTEGER DEFAULT 0,
+            last_spine_id    INTEGER DEFAULT 0,
+            last_scrollY     INTEGER DEFAULT 0,
+            font_size        INTEGER DEFAULT 0,
+            line_height_mul  REAL    DEFAULT 0.0,
+            doc_width        INTEGER DEFAULT 0,
+            total_time_s     INTEGER DEFAULT 0,
+            last_open_us     INTEGER DEFAULT 0,
+            enableCSS        INTEGER DEFAULT 1,
+            enableJS         INTEGER DEFAULT 0,
+            enableGlobalCSS  INTEGER DEFAULT 0,
+            enablePreHTML    INTEGER DEFAULT 1,
+            displayTOC       INTEGER DEFAULT 1,
+            displayStatus    INTEGER DEFAULT 1,
+            displayMenu      INTEGER DEFAULT 1,
+            displayScroll    INTEGER DEFAULT 1
+        );
+    )";
+    sqlite3_exec(m_db, sql, nullptr, nullptr, nullptr);
+}
+
+/* ---------- 打开书 ---------- */
+BookRecord ReadingRecorder::openBook(const std::string& absolutePath) {
+    BookRecord rec;
+    rec.path = absolutePath;
+
+    const char* select = "SELECT * FROM books WHERE path=?;";
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(m_db, select, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, absolutePath.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // 已存在
+        rec.id = sqlite3_column_int64(stmt, 0);
+        rec.title = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        rec.author = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        rec.openCount = sqlite3_column_int(stmt, 4);
+        rec.totalWords = sqlite3_column_int(stmt, 5);
+        rec.lastSpineId = sqlite3_column_int(stmt, 6);
+        rec.lastScrollY = sqlite3_column_int(stmt, 7);
+        rec.fontSize = sqlite3_column_int(stmt, 8);
+        rec.lineHeightMul = static_cast<float>(sqlite3_column_double(stmt, 9));
+        rec.docWidth = sqlite3_column_int(stmt, 10);
+        rec.totalTime = sqlite3_column_int(stmt, 11);
+        rec.lastOpenTimestamp = sqlite3_column_int64(stmt, 12);
+        rec.enableCSS = sqlite3_column_int(stmt, 13);
+        rec.enableJS = sqlite3_column_int(stmt, 14);
+        rec.enableGlobalCSS = sqlite3_column_int(stmt, 15);
+        rec.enablePreHTML = sqlite3_column_int(stmt, 16);
+        rec.displayTOC = sqlite3_column_int(stmt, 17);
+        rec.displayStatus = sqlite3_column_int(stmt, 18);
+        rec.displayMenu = sqlite3_column_int(stmt, 19);
+        rec.displayScroll = sqlite3_column_int(stmt, 20);
+    }
+    else {
+        // 新书：用当前 g_book 状态插入
+        const char* insert = R"(
+            INSERT INTO books(path, last_open_us)
+            VALUES(?,?);
+        )";
+        sqlite3_prepare_v2(m_db, insert, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, absolutePath.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 2, nowUs());
+        sqlite3_step(stmt);
+
+        rec.id = sqlite3_last_insert_rowid(m_db);
+
+    }
+    sqlite3_finalize(stmt);
+
+    // 更新打开次数 & 最后打开时间
+    const char* update = "UPDATE books SET open_count=open_count+1, last_open_us=? WHERE id=?;";
+    sqlite3_prepare_v2(m_db, update, -1, &stmt, nullptr);
+    sqlite3_bind_int64(stmt, 1, nowUs());
+    sqlite3_bind_int64(stmt, 2, rec.id);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rec;
+}
+
+/* ---------- 关闭书 ---------- */
+void ReadingRecorder::closeBook(const BookRecord& rec) {
+    if (rec.id < 0) return;   // 无效记录
+
+
+
+    const char* sql = R"(
+        UPDATE books SET
+            title           = ?,
+            author          = ?,
+            total_words     = ?,
+            last_spine_id   = ?,
+            last_scrollY    = ?,
+            font_size       = ?,
+            line_height_mul = ?,
+            doc_width       = ?, 
+            total_time_s    = total_time_s + ?,
+            enableCSS       = ?,
+            enableJS        = ?,
+            enableGlobalCSS = ?,
+            enablePreHTML   = ?,
+            displayTOC      = ?,
+            displayStatus   = ?,
+            displayMenu     = ?,
+            displayScroll   = ?
+        WHERE id = ?;
+    )";
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    sqlite3_bind_text(stmt, 1, rec.title.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, rec.author.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, rec.totalWords);
+    sqlite3_bind_int(stmt, 4, rec.lastSpineId);
+    sqlite3_bind_int(stmt, 5, rec.lastScrollY);
+    sqlite3_bind_int(stmt, 6, rec.fontSize);
+    sqlite3_bind_double(stmt, 7, rec.lineHeightMul);
+    sqlite3_bind_double(stmt, 8, rec.docWidth);
+    sqlite3_bind_int(stmt, 9, rec.totalTime);
+    sqlite3_bind_int(stmt, 10, rec.enableCSS);
+    sqlite3_bind_int(stmt, 11, rec.enableJS);
+    sqlite3_bind_int(stmt, 12, rec.enableGlobalCSS);
+    sqlite3_bind_int(stmt, 13, rec.enablePreHTML);
+    sqlite3_bind_int(stmt, 14, rec.displayTOC);
+    sqlite3_bind_int(stmt, 15, rec.displayStatus);
+    sqlite3_bind_int(stmt, 16, rec.displayMenu);
+    sqlite3_bind_int(stmt, 17, rec.displayScroll);
+    sqlite3_bind_int64(stmt, 18, rec.id);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+
+void ReadingRecorder::updateRecord(BookRecord& record)
+{
+    if (g_book && record.id > 0)
+    {
+        record.displayMenu = g_cfg.displayMenuBar;
+        record.displayScroll = g_cfg.displayScrollBar;
+        record.displayStatus = g_cfg.displayStatusBar;
+        record.displayTOC = g_cfg.displayTOC;
+
+        record.enableCSS = g_cfg.enableCSS;
+        record.enableGlobalCSS = g_cfg.enableGlobalCSS;
+        record.enableJS = g_cfg.enableJS;
+        record.enablePreHTML = g_cfg.enablePreprocessHTML;
+
+        record.fontSize = g_cfg.default_font_size;
+        record.lineHeightMul = g_cfg.line_height_multiplier;
+        record.docWidth = g_cfg.document_width;
+
+        if (g_vd) {
+            ScrollPosition p = g_vd->get_scroll_position();
+            record.lastSpineId = p.spine_id;
+            record.lastScrollY = p.offset;
+        }
+
+
+        auto titIt = g_book->ocf_pkg_.meta.find(L"dc:title");
+        auto authIt = g_book->ocf_pkg_.meta.find(L"dc:creator");
+
+        record.title = titIt != g_book->ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
+        record.author = authIt != g_book->ocf_pkg_.meta.end() ? w2a(authIt->second) : "";
+        closeBook(record);
+
+    }
 }
