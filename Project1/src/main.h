@@ -7,6 +7,8 @@
 #define WM_LOAD_ERROR (WM_USER + 3)
 #include <windows.h>
 #include <windowsx.h>   // 加这一行
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #include <commctrl.h>
 #include <shellapi.h>
 #include <fstream>
@@ -700,6 +702,7 @@ struct AppSettings {
     bool displayStatusBar = true;
     bool displayMenuBar = true;
     bool displayScrollBar = true;
+    int record_update_interval_ms = 1000;
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Cambria";
     int default_font_size = 16;
@@ -953,8 +956,8 @@ private:
 
 struct ScrollPosition
 {
-    int spine_id;
-    int offset;
+    int spine_id = 0;
+    int offset = 0;
 };
 
 
@@ -962,15 +965,15 @@ struct BodyBlock {
     int spine_id = 0;
     int block_id = 0;
     std::string html;
-    float height = 0; // 未渲染前默认 -1
+    float height = 0.0f; // 未渲染前默认 -1
 
 };
 
 struct HtmlBlock {
-    float height = 0;
+    int spine_id;
+    float height = 0.0f;
     std::string head;
     std::vector<BodyBlock> body_blocks;
-    void clear() { height = 0; head = ""; body_blocks.clear(); }
 };
 
 
@@ -984,6 +987,7 @@ public:
     void load_html(std::wstring& href);
     void clear();
     ScrollPosition get_scroll_position();
+    std::vector<HtmlBlock> m_blocks;
 private:
 
     static int estimate_height(const std::string& html_fragment, int doc_width, int line_height);
@@ -1003,12 +1007,13 @@ private:
     int get_id_by_href(std::wstring& href);
     std::wstring get_href_by_id(int spine_id);
 
-    void add_top(int& y_offset);
-    void add_bottom();
 
-    void remove_top(int& y_offset);
-    void remove_bottom();
-    void load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom);
+    void insert_next_chapter();
+    float get_height();
+    void insert_prev_chapter();
+
+
+    bool load_by_id(int spine_id, bool isPushBack);
 
 
     litehtml::document::ptr m_doc;
@@ -1017,9 +1022,6 @@ private:
     std::shared_ptr<SimpleContainer> m_container;
     int m_render_width;
 
-    HtmlBlock m_render_block;
-    HtmlBlock m_top_block;
-    HtmlBlock m_bottom_block;
 
 };
 
@@ -1101,7 +1103,7 @@ struct BookRecord {
     int         openCount = 0;
     int         totalWords = 0;
     int         lastSpineId = 0;
-    int         lastScrollY = 0;
+    int         lastOffset = 0;
     int         fontSize = 0;
     float       lineHeightMul = 0.0f;
     int         docWidth = 0;
@@ -1122,7 +1124,7 @@ public:
     ReadingRecorder();
     ~ReadingRecorder();
 
-    BookRecord openBook(const std::string& absolutePath); // 返回记录（读或建）
+    BookRecord openBook(const std::string absolutePath); // 返回记录（读或建）
     void       closeBook(const BookRecord& rec);            // 一次性写回
 
     void updateRecord(BookRecord& record);

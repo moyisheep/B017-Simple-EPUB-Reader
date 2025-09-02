@@ -41,7 +41,7 @@ std::set<std::wstring> g_activeFonts;
 std::unique_ptr<AppBootstrap> g_bootstrap;
 std::unique_ptr<ReadingRecorder> g_recorder;
 BookRecord g_record;
-
+static MMRESULT g_ticTimer = 0;   // 0 表示当前没有定时器
 int g_center_offset = 0;
 
 
@@ -1357,7 +1357,13 @@ std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string&
     //return text;
     return "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>" + inner;
 }
+void CALLBACK Tick(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
+{
+    // 直接在工作线程/回调里刷新
+    if (g_recorder && !g_vd->m_blocks.empty()) { g_recorder->updateRecord(g_record); }
+    OutputDebugStringA("定时器触发\n");
 
+}
 LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -1365,7 +1371,6 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
     {
         if (g_container && g_container->m_canvas) {
-            g_states.needRelayout.store(true);
             g_container->resize(LOWORD(lp), HIWORD(lp));
         }
         return 0;
@@ -1473,6 +1478,9 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_EPUB_ANCHOR:
     {
+        // 更新阅读记录
+        if (g_ticTimer) { timeKillEvent(g_ticTimer); }
+        g_ticTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT); // 约 60 FPS
         if (!g_container->m_doc) { return 0; }
         wchar_t* sel = reinterpret_cast<wchar_t*>(wp);
         if (sel) {
@@ -1536,7 +1544,9 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         int code = LOWORD(wp);
         int pos = HIWORD(wp);
         int delta = 0;
-
+        // 更新阅读记录
+        if (g_ticTimer) { timeKillEvent(g_ticTimer); }
+        g_ticTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT); // 约 60 FPS
         switch (code)
         {
         case SB_LINEUP:   delta = -30; break;      // 3 行
@@ -1560,6 +1570,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSEWHEEL:
     {
+        
         RECT rc;
         GetClientRect(hWnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
@@ -1568,12 +1579,17 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         if (zDelta >= 0) { g_scrollY -= g_line_height * factor; }
         else { g_scrollY += g_line_height * factor; }
         SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
+        // 更新阅读记录
+        if (g_ticTimer) { timeKillEvent(g_ticTimer); }
+        g_ticTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT); // 约 60 FPS
         UpdateCache();
         InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
     }
+
     case WM_PAINT:
     {
+
         if (g_container && g_container->m_doc && g_container->m_canvas && g_states.isUpdate.exchange(false))
         {
 
@@ -1700,35 +1716,36 @@ void UpdateCache()
 //    /* 3) 渲染整页 */
 //    g_pg.render(g_container->m_canvas.get(), g_scrollY);
 //}
+
 inline void DumpBookRecord(const BookRecord& r)
 {
-    std::ostringstream oss;
-    oss << std::boolalpha;   // 让 bool 打印成 true/false
-    oss << "===== BookRecord Dump =====\n";
-    oss << "id                 = " << r.id << '\n';
-    oss << "path               = " << r.path << '\n';
-    oss << "title              = " << r.title << '\n';
-    oss << "author             = " << r.author << '\n';
-    oss << "openCount          = " << r.openCount << '\n';
-    oss << "totalWords         = " << r.totalWords << '\n';
-    oss << "lastSpineId        = " << r.lastSpineId << '\n';
-    oss << "lastScrollY        = " << r.lastScrollY << '\n';
-    oss << "fontSize           = " << r.fontSize << '\n';
-    oss << "lineHeightMul      = " << std::fixed << std::setprecision(2) << r.lineHeightMul << '\n';
-    oss << "docWidth           = " << r.docWidth << '\n';
-    oss << "totalTime          = " << r.totalTime << " (s)\n";
-    oss << "lastOpenTimestamp  = " << r.lastOpenTimestamp << " (us)\n";
-    oss << "enableCSS          = " << r.enableCSS << '\n';
-    oss << "enableJS           = " << r.enableJS << '\n';
-    oss << "enableGlobalCSS    = " << r.enableGlobalCSS << '\n';
-    oss << "enablePreHTML      = " << r.enablePreHTML << '\n';
-    oss << "displayTOC         = " << r.displayTOC << '\n';
-    oss << "displayStatus      = " << r.displayStatus << '\n';
-    oss << "displayMenu        = " << r.displayMenu << '\n';
-    oss << "displayScroll      = " << r.displayScroll << '\n';
-    oss << "============================\n";
+    std::wostringstream oss;            // ← 宽字符流
+    oss << std::boolalpha;
+    oss << L"===== BookRecord Dump =====\n";
+    oss << L"id                 = " << r.id << L'\n';
+    oss << L"path               = " << a2w(r.path) << L'\n';   // path 已经是 std::wstring 就 OK
+    oss << L"title              = " << a2w(r.title) << L'\n';
+    oss << L"author             = " << a2w(r.author) << L'\n';
+    oss << L"openCount          = " << r.openCount << L'\n';
+    oss << L"totalWords         = " << r.totalWords << L'\n';
+    oss << L"lastSpineId        = " << r.lastSpineId << L'\n';
+    oss << L"lastOffset         = " << r.lastOffset << L'\n';
+    oss << L"fontSize           = " << r.fontSize << L'\n';
+    oss << L"lineHeightMul      = " << std::fixed << std::setprecision(2) << r.lineHeightMul << L'\n';
+    oss << L"docWidth           = " << r.docWidth << L'\n';
+    oss << L"totalTime          = " << r.totalTime << L" (s)\n";
+    oss << L"lastOpenTimestamp  = " << r.lastOpenTimestamp << L" (us)\n";
+    oss << L"enableCSS          = " << r.enableCSS << L'\n';
+    oss << L"enableJS           = " << r.enableJS << L'\n';
+    oss << L"enableGlobalCSS    = " << r.enableGlobalCSS << L'\n';
+    oss << L"enablePreHTML      = " << r.enablePreHTML << L'\n';
+    oss << L"displayTOC         = " << r.displayTOC << L'\n';
+    oss << L"displayStatus      = " << r.displayStatus << L'\n';
+    oss << L"displayMenu        = " << r.displayMenu << L'\n';
+    oss << L"displayScroll      = " << r.displayScroll << L'\n';
+    oss << L"============================\n";
 
-    OutputDebugStringA(oss.str().c_str());
+    OutputDebugStringW(oss.str().c_str());   // ← 宽字符版本
 }
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -1754,7 +1771,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_parse_task.valid()) {
             g_parse_task.wait();
         }
-        g_recorder->updateRecord(g_record);
+
   
         g_pg.clear();              // 如果你 Paginator 有 clear() 就调
         g_container->clear();
@@ -1799,15 +1816,15 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             ShowWindow(g_hView, SW_SHOW);
             ShowWindow(g_hwndTV, SW_SHOW);
         }
-
+        g_vd->clear();
         g_record = g_recorder->openBook(w2a(g_book->m_file_path));
         DumpBookRecord(g_record);
         auto spine_id = g_record.lastSpineId;
-
+        g_offsetY = g_record.lastOffset;
         g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
    
         g_states.needRelayout.store(true);
-        g_vd->clear();
+  
         g_vd->load_book(g_book, g_container, g_cfg.document_width);
         g_vd->load_html(g_last_html_path);
 
@@ -1912,6 +1929,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_MOUSEWHEEL: {
+
         //if(g_book){ g_book->hide_tooltip(); }
 
         //UpdateCache();              // 关键：立即排版并缓存
@@ -1996,8 +2014,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
         }
     }
-    case WM_VSCROLL: {}
-    case WM_HSCROLL: {}
+    case WM_VSCROLL: { return 0; }
+    case WM_HSCROLL: { return 0; }
     case WM_COMMAND: {
         switch (LOWORD(w)) {
         case IDM_TOGGLE_CSS: {
@@ -2368,7 +2386,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 //    PostMessageW(g_hView, WM_EPUB_ANCHOR,
 //        reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
 //}
-    UpdateWindow(g_hView);
+    InvalidateRect(g_hView, nullptr, true);
     UpdateWindow(g_hWnd);
 }
 
@@ -6278,7 +6296,7 @@ std::wstring EPUBBook::extract_text(const tinyxml2::XMLElement* a)
 
 EPUBBook::~EPUBBook() {
     mz_zip_reader_end(&zip);
-    g_recorder->updateRecord(g_record);
+
     //for (const auto& path : g_tempFontFiles)
     //{
     //    RemoveFontResourceExW(path.c_str(), FR_PRIVATE, 0);
@@ -6438,7 +6456,7 @@ void D2DBackend::clear()
     m_d2dBitmapCache.clear();
     m_clipStack.clear();
     m_fontCache.clear();
-    m_layoutCache.clear();
+    //m_layoutCache.clear();
     m_brushPool.clear();
 }
 
@@ -6840,9 +6858,7 @@ void VirtualDoc::load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<Simpl
 void VirtualDoc::set_render_width(int width)
 {
     m_render_width = width;
-    calculate_height(m_render_block);
-    calculate_height(m_top_block);
-    calculate_height(m_bottom_block);
+
 }
 // ---------- 分页 ----------
 std::wstring VirtualDoc::get_href_by_id(int id)
@@ -6865,17 +6881,7 @@ int VirtualDoc::get_id_by_href(std::wstring& href)
     }
     return -1;
 }
-void VirtualDoc::load_html(std::wstring& href)
-{
-    m_doc.reset();
-    auto id = get_id_by_href(href);
-    m_bottom_block.clear();
-    m_top_block.clear();
-    load_by_id(m_bottom_block, id, true);
 
-    //id -= 1;
-    //load_by_id(m_top_block, id, false);
-}
 void VirtualDoc::merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom)
 {
 
@@ -6990,8 +6996,10 @@ void VirtualDoc::calculate_block_height(std::string head, BodyBlock& block)
 HtmlBlock VirtualDoc::get_html_block(std::string html, int spine_id)
 {
     HtmlBlock block;
+    block.spine_id = spine_id;
     block.head = get_head(html);
     block.body_blocks = get_body_blocks(html, spine_id);
+    
     // 插入一段空白
     BodyBlock bi;
     bi.spine_id = spine_id;
@@ -6999,6 +7007,7 @@ HtmlBlock VirtualDoc::get_html_block(std::string html, int spine_id)
     bi.html = "<div style = \"height:" + std::to_string(g_cfg.split_space_height) + "px; \"></div>";
     bi.block_id = block.body_blocks.back().block_id + 1;
     block.body_blocks.push_back(std::move(bi));
+
     return block;
 }
 
@@ -7119,7 +7128,6 @@ std::vector<BodyBlock> VirtualDoc::get_body_blocks(std::string& html,
         bb.spine_id = spine_id;
         bb.block_id = block_id++;
         bb.html = current.str();
-        bb.height = 0;
         blocks.emplace_back(std::move(bb));
         current.str("");
         current.clear();
@@ -7140,55 +7148,69 @@ std::vector<BodyBlock> VirtualDoc::get_body_blocks(std::string& html,
     return blocks;
 }
 
+void VirtualDoc::load_html(std::wstring& href)
+{
+    m_doc.reset();
+    auto id = get_id_by_href(href);
+    if(id < 0)
+    {
+        OutputDebugStringW(href.c_str());
+        OutputDebugStringW(L" 未找到\n");
+        return ;
+    }
+    m_blocks.clear();
+    load_by_id(id, true);
+    // 先渲染好加载的章节
+    {
+        std::string text;
+        text += "<html>" + m_blocks.back().head + "<body>";
+        for (auto hb : m_blocks)
+        {
+            for (auto b : hb.body_blocks)
+            {
+                text += b.html;
+            }
+        }
 
-void VirtualDoc::load_by_id(HtmlBlock& dst, int spine_id, bool isAddToBottom)
+        text += "</body></html>";
+        m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+        m_doc->render(m_render_width);
+        m_blocks.back().height = m_doc->height();
+    }
+
+    //id -= 1;
+    //load_by_id(m_top_block, id, false);
+}
+bool VirtualDoc::load_by_id( int spine_id, bool isPushBack)
 {
     std::wstring href = get_href_by_id(spine_id);
-    if (href.empty()) { return; }
+    if (href.empty()) { return false; }
     std::string html = m_book->load_html(href);
-    if (html.empty()) return;
+    if (html.empty()) { return false; }
     if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
     if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
     auto block = get_html_block(html, spine_id);
-    calculate_height(block);
-    merge_block(dst, block, isAddToBottom);
+ 
+    if (isPushBack){ m_blocks.push_back(std::move(block)); }
+    else
+    { 
+        m_blocks.emplace(m_blocks.begin(), std::move(block));
+    }
+
+    return true;
 }
 
 ScrollPosition VirtualDoc::get_scroll_position()
 {
     ScrollPosition pos{};
-    if (m_render_block.body_blocks.empty())
-        return pos;
-
-    int   y = 0;                     // 已累加像素
-    int   cur_spine = -1;            // 当前正在统计的 spine
-    int   spine_offset = 0;          // 当前 spine 内部已累加像素
-
-    for (const auto& b : m_render_block.body_blocks)
+    if (m_blocks.empty()) { return pos; }
+    pos.offset = g_offsetY;
+    for (auto hb: m_blocks)
     {
-        if (b.spine_id != cur_spine)
-        {
-            // 进入新 spine
-            cur_spine = b.spine_id;
-            spine_offset = 0;
-        }
-
-        if (y + static_cast<int>(b.height) > g_offsetY)
-        {
-            // 滚动位置落在本 block
-            pos.spine_id = cur_spine;
-            pos.offset = spine_offset + (g_offsetY - y);
-            return pos;
-        }
-
-        y += static_cast<int>(b.height);
-        spine_offset += static_cast<int>(b.height);
+        pos.spine_id = hb.spine_id;
+        if ((pos.offset - hb.height) < 0) {break; }
+        pos.offset -= hb.height;
     }
-
-    // 如果 scrollY 超过总高度，返回最后一个块末尾
-    const auto& last = m_render_block.body_blocks.back();
-    pos.spine_id = last.spine_id;
-    pos.offset = spine_offset;
     return pos;
 }
 
@@ -7200,43 +7222,53 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
     y_offset += scrollY;
     //OutputDebugStringA(std::to_string(y_offset).c_str());
     //OutputDebugStringA(" ");
+   
     if (y_offset < 0)
     {
         g_states.needRelayout.store(true);
-        //remove_bottom();
-        add_top(y_offset);
-        add_top(y_offset);
-        add_top(y_offset);
-        add_top(y_offset);
-        add_top(y_offset);
+        insert_prev_chapter();
     }
-    if (y_offset > (m_render_block.height - client_h))
+    if (y_offset > static_cast<int>(get_height() - client_h))
     {
         //remove_top(y_offset);
         g_states.needRelayout.store(true);
-        add_bottom();
-        add_bottom();
-        add_bottom();
-        add_bottom();
-        add_bottom();
-    }
-    while (m_render_block.height < client_h * 3)
-    {
-        g_states.needRelayout.store(true);
-        add_bottom();
+        insert_next_chapter();
     }
 
-    if (g_states.needRelayout.exchange(false)) {
+
+    if (g_states.needRelayout.exchange(false)) 
+    {
         std::string text;
-        text += "<html>" + m_render_block.head + "<body>";
-        for (auto b : m_render_block.body_blocks)
+        text += "<html>" + m_blocks.back().head + "<body>";
+        for (auto hb: m_blocks)
         {
-            text += b.html;
+            for (auto b: hb.body_blocks)
+            {
+                text += b.html;
+            }
         }
+
         text += "</body></html>";
         m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
         m_doc->render(m_render_width);
-        m_render_block.height = m_doc->height();
+
+        if (m_blocks.size() == 1) { m_blocks.back().height = m_doc->height(); };
+        if (m_blocks.size() > 1)
+        {
+            if (m_blocks.front().height == 0.0f)
+            {
+                float height = std::max(m_doc->height() - get_height(), 0.0f);
+                y_offset += height;
+                m_blocks.front().height = height;
+            }
+            else if (m_blocks.back().height == 0.0f)
+            {
+                float height = std::max(m_doc->height() - get_height(), 0.0f);
+                
+                m_blocks.back().height = height;
+            }
+        }
+
         
     }
     scrollY = 0;
@@ -7244,88 +7276,32 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
 }
 
 
-// 向下滚动
-void VirtualDoc::add_bottom()
+float VirtualDoc::get_height()
 {
-    if (m_bottom_block.body_blocks.empty())
+    float height = 0.0f;
+    if (m_blocks.empty()) { return height; }
+    for (auto b: m_blocks)
     {
-        auto id = m_render_block.body_blocks.back().spine_id + 1;
-        load_by_id(m_bottom_block, id, true);
+        height += b.height;
     }
-    if (!m_bottom_block.body_blocks.empty())
-    {
-        m_render_block.head = m_bottom_block.head;
-        auto block = m_bottom_block.body_blocks.front();
-        //if (block.height <= 0)
-        //{
-        //    calculate_block_height(m_render_block.head, block);
-        //}
-        m_bottom_block.body_blocks.erase(m_bottom_block.body_blocks.begin());
-
-        m_render_block.height += block.height;
-        m_bottom_block.height -= block.height;
-
-        m_render_block.body_blocks.push_back(std::move(block));
-    }
+    return height;
 }
-
-// 向上滚动
-void VirtualDoc::add_top(int& y_offset)
+void VirtualDoc::insert_prev_chapter()
 {
-    if (m_top_block.body_blocks.empty())
-    {
-        auto id = m_render_block.body_blocks.front().spine_id - 1;
-        load_by_id(m_top_block, id, false);
-    }
-    if (!m_top_block.body_blocks.empty()) {
-        m_render_block.head = m_top_block.head;
-        auto block = m_top_block.body_blocks.back();
-        //if (block.height <= 0)
-        //{
-        //    calculate_block_height(m_render_block.head, block);
-        //}
-        m_top_block.body_blocks.pop_back();
-
-        m_render_block.height += block.height;
-        m_top_block.height -= block.height;
-        y_offset += block.height;
-        m_render_block.body_blocks.insert(m_render_block.body_blocks.begin(), std::move(block));
-    }
+    auto id = m_blocks.front().spine_id - 1;
+    load_by_id(id, false);
+}
+void VirtualDoc::insert_next_chapter()
+{
+    auto id = m_blocks.back().spine_id + 1;
+    load_by_id(id, true);
 }
 
 
-void VirtualDoc::remove_top(int& y_offset)
-{
-    if (!m_render_block.body_blocks.empty())
-    {
-        auto block = m_render_block.body_blocks.front();
-        m_render_block.body_blocks.erase(m_render_block.body_blocks.begin());
-
-        m_top_block.height += block.height;
-        m_render_block.height -= block.height;
-        y_offset -= block.height;
-        m_top_block.body_blocks.push_back(std::move(block));
-    }
-}
-void VirtualDoc::remove_bottom()
-{
-    if (!m_render_block.body_blocks.empty())
-    {
-        auto block = m_render_block.body_blocks.back();
-        m_render_block.body_blocks.pop_back();
-
-        m_bottom_block.height += block.height;
-        m_render_block.height -= block.height;
-
-        m_bottom_block.body_blocks.insert(m_bottom_block.body_blocks.begin(), std::move(block));
-    }
-}
 
 void VirtualDoc::clear()
 {
-    m_render_block.clear();
-    m_bottom_block.clear();
-    m_top_block.clear();
+    m_blocks.clear();
     g_offsetY = 0;
 }
 
@@ -7357,7 +7333,7 @@ void ReadingRecorder::initDB() {
             open_count       INTEGER DEFAULT 0,
             total_words      INTEGER DEFAULT 0,
             last_spine_id    INTEGER DEFAULT 0,
-            last_scrollY     INTEGER DEFAULT 0,
+            last_offset      INTEGER DEFAULT 0,
             font_size        INTEGER DEFAULT 0,
             line_height_mul  REAL    DEFAULT 0.0,
             doc_width        INTEGER DEFAULT 0,
@@ -7377,7 +7353,7 @@ void ReadingRecorder::initDB() {
 }
 
 /* ---------- 打开书 ---------- */
-BookRecord ReadingRecorder::openBook(const std::string& absolutePath) {
+BookRecord ReadingRecorder::openBook(const std::string absolutePath) {
     BookRecord rec;
     rec.path = absolutePath;
 
@@ -7394,7 +7370,7 @@ BookRecord ReadingRecorder::openBook(const std::string& absolutePath) {
         rec.openCount = sqlite3_column_int(stmt, 4);
         rec.totalWords = sqlite3_column_int(stmt, 5);
         rec.lastSpineId = sqlite3_column_int(stmt, 6);
-        rec.lastScrollY = sqlite3_column_int(stmt, 7);
+        rec.lastOffset = sqlite3_column_int(stmt, 7);
         rec.fontSize = sqlite3_column_int(stmt, 8);
         rec.lineHeightMul = static_cast<float>(sqlite3_column_double(stmt, 9));
         rec.docWidth = sqlite3_column_int(stmt, 10);
@@ -7448,7 +7424,7 @@ void ReadingRecorder::closeBook(const BookRecord& rec) {
             author          = ?,
             total_words     = ?,
             last_spine_id   = ?,
-            last_scrollY    = ?,
+            last_offset     = ?,
             font_size       = ?,
             line_height_mul = ?,
             doc_width       = ?, 
@@ -7470,7 +7446,7 @@ void ReadingRecorder::closeBook(const BookRecord& rec) {
     sqlite3_bind_text(stmt, 2, rec.author.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 3, rec.totalWords);
     sqlite3_bind_int(stmt, 4, rec.lastSpineId);
-    sqlite3_bind_int(stmt, 5, rec.lastScrollY);
+    sqlite3_bind_int(stmt, 5, rec.lastOffset);
     sqlite3_bind_int(stmt, 6, rec.fontSize);
     sqlite3_bind_double(stmt, 7, rec.lineHeightMul);
     sqlite3_bind_double(stmt, 8, rec.docWidth);
@@ -7510,15 +7486,21 @@ void ReadingRecorder::updateRecord(BookRecord& record)
         if (g_vd) {
             ScrollPosition p = g_vd->get_scroll_position();
             record.lastSpineId = p.spine_id;
-            record.lastScrollY = p.offset;
+            record.lastOffset = p.offset;
+        }
+
+        if (record.title.empty())
+        {
+            auto titIt = g_book->ocf_pkg_.meta.find(L"dc:title");
+            record.title = titIt != g_book->ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
+        }
+        if(record.author.empty())
+        {
+            auto authIt = g_book->ocf_pkg_.meta.find(L"dc:creator");
+            record.author = authIt != g_book->ocf_pkg_.meta.end() ? w2a(authIt->second) : "";
         }
 
 
-        auto titIt = g_book->ocf_pkg_.meta.find(L"dc:title");
-        auto authIt = g_book->ocf_pkg_.meta.find(L"dc:creator");
-
-        record.title = titIt != g_book->ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
-        record.author = authIt != g_book->ocf_pkg_.meta.end() ? w2a(authIt->second) : "";
         closeBook(record);
 
     }
