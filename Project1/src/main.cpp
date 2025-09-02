@@ -52,7 +52,9 @@ static MMRESULT g_tickTimer = 0;   // 0 表示当前没有定时器
 int g_center_offset = 0;
 
 std::string g_tootip_css = "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>";
-
+static HWND  g_hwndSplit = nullptr;   // 分隔条
+static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
+static bool  g_dragging = false;     // 是否正在拖动
 
 
 
@@ -1490,18 +1492,18 @@ inline void DumpBookRecord(const BookRecord& r)
     OutputDebugStringW(oss.str().c_str());   // ← 宽字符版本
 }
 // ---------- 窗口 ----------
-LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    switch (m) {
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
     case WM_CREATE: {
-        DragAcceptFiles(h, TRUE);
+        DragAcceptFiles(hwnd, TRUE);
         SendMessage(g_hWnd, WM_SIZE, 0, 0);
 
         return 0;
     }
     case WM_DROPFILES: {
         wchar_t file[MAX_PATH]{};
-        DragQueryFileW(reinterpret_cast<HDROP>(w), 0, file, MAX_PATH);
-        DragFinish(reinterpret_cast<HDROP>(w));
+        DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, file, MAX_PATH);
+        DragFinish(reinterpret_cast<HDROP>(wp));
 
         // 只接受 .epub / .EPUB
         const wchar_t* ext = wcsrchr(file, L'.');
@@ -1554,9 +1556,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         if (!g_states.isLoaded) {
             g_states.isLoaded = true;
-            ShowWindow(g_hStatus, SW_SHOW);
+            PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
+            PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
+
             ShowWindow(g_hView, SW_SHOW);
-            ShowWindow(g_hwndTV, SW_SHOW);
+     
         }
         g_vd->clear();
         g_record = g_recorder->openBook(w2a(g_book->m_file_path));
@@ -1586,39 +1590,43 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_SIZE:
     {
-
-        SendMessage(g_hStatus, WM_SIZE, 0, 0);
-        // 2. 分栏
-        int parts[2] = { 120, -1 };   // -1 = 占满剩余宽度
-        SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
-
+        /* 1. StatusBar 高度 */
         RECT rcStatus, rcClient;
-        GetClientRect(h, &rcClient);
-        GetWindowRect(g_hStatus, &rcStatus);
-        ScreenToClient(h, (POINT*)&rcStatus);
-        ScreenToClient(h, (POINT*)&rcStatus + 1);
-        int cyStatus = rcStatus.bottom - rcStatus.top;
+        GetClientRect(hwnd, &rcClient);
+        int cyStatus = 0;
+        if (g_cfg.displayStatusBar)
+        {
+            SendMessage(g_hStatus, WM_SIZE, 0, 0);
+            int parts[2] = { 120, -1 };
+            SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
+            GetWindowRect(g_hStatus, &rcStatus);
+            ScreenToClient(hwnd, (POINT*)&rcStatus);
+            ScreenToClient(hwnd, (POINT*)&rcStatus + 1);
+            cyStatus = rcStatus.bottom - rcStatus.top;
+        }
 
+        /* 2. 剩余可用区域 */
         int cx = rcClient.right;
         int cy = rcClient.bottom - cyStatus;
 
-        const int TV_W = 200;
-        const int BAR_H = 30;
+        /* 3. TOC 宽度 & 竖线 ★ */
+        const int TV_W = g_cfg.displayTOC ? g_splitX : 0;   // ★ 用变量
+        ShowWindow(g_hwndTV, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
 
+        /* 4. 重新摆放子窗口 ★ */
         MoveWindow(g_hwndTV, 0, 0, TV_W, cy, TRUE);
+        MoveWindow(g_hwndSplit, TV_W, 0, 2, cy, TRUE);   // ★ 2 px 竖线
+        MoveWindow(g_hView, TV_W + 2, 0, cx - TV_W - 2, cy, TRUE);
 
-        MoveWindow(g_hView, TV_W, 0, cx - TV_W, cy, TRUE);
         UpdateCache();
         SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
-        //UpdateWindow(g_hView);
-
-        InvalidateRect(g_hWnd, nullptr, TRUE);  // TRUE = 先发送 WM_ERASEBKGND
-        UpdateWindow(g_hWnd);
-
+        InvalidateRect(hwnd, nullptr, false);
+        //UpdateWindow(hwnd);
         return 0;
     }
     case WM_LOAD_ERROR: {
-        wchar_t* msg = (wchar_t*)l;
+        wchar_t* msg = (wchar_t*)lp;
         SetStatus(0, msg);
         free(msg);                // 对应 CoTaskMemAlloc / _wcsdup
         return 0;
@@ -1669,36 +1677,63 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         EndPaint(g_hWnd, &ps);
         return 0;
     }
-
+    case WM_LBUTTONDOWN:
+    {
+        if (LOWORD(lp) >= g_splitX && LOWORD(lp) <= g_splitX + 2)
+        {
+            SetCapture(hwnd); g_dragging = true;
+        }
+        break;
+    }
     case WM_MOUSEWHEEL: {
 
 
         return 0;
     }
 
-
-    case WM_DESTROY: {
-        for (HTREEITEM h = TreeView_GetRoot(g_hwndTV); h; )
+    case WM_MOUSEMOVE:
+    {
+        if (g_dragging)
         {
-            TVITEMW tvi{ TVIF_PARAM };
-            tvi.hItem = h;
-            TreeView_GetItem(g_hwndTV, &tvi);
-            free((void*)tvi.lParam);
-            h = TreeView_GetNextSibling(g_hwndTV, h);
+            int x = LOWORD(lp);
+            if (x < 50) x = 50; if (x > 400) x = 400;
+            g_splitX = x;
+            PostMessage(hwnd, WM_SIZE, 0, 0);
         }
+        break;
+    }
+    case WM_LBUTTONUP:
+    {
+        if (g_dragging) { ReleaseCapture(); g_dragging = false; }
+        break;
+    }
+    case WM_SETCURSOR:
+    {
+        if (LOWORD(lp) == HTCLIENT)
+        {
+            POINT pt; GetCursorPos(&pt); ScreenToClient(hwnd, &pt);
+            if (pt.x >= g_splitX && pt.x <= g_splitX + 2)
+            {
+                SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE;
+            }
+        }
+        break;
+    }
+    case WM_DESTROY: {
+
         PostQuitMessage(0);
         return 0;
     }
     case WM_NOTIFY:
     {
-        LPNMHDR nm = reinterpret_cast<LPNMHDR>(l);
+        LPNMHDR nm = reinterpret_cast<LPNMHDR>(lp);
         if (nm->hwndFrom != g_hwndTV) break;
 
         switch (nm->code)
         {
         case TVN_GETDISPINFO:
         {
-            auto* pdi = reinterpret_cast<NMTVDISPINFO*>(l);
+            auto* pdi = reinterpret_cast<NMTVDISPINFO*>(lp);
             auto* data = reinterpret_cast<const TVData*>(pdi->item.lParam);
             if (!data || !data->node || !data->node->nav)   // 三重保护
             {
@@ -1711,7 +1746,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         case TVN_SELCHANGED:
         {
-            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(l);
+            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
             TVITEMW tvi{ TVIF_PARAM, pnmtv->itemNew.hItem };
             if (TreeView_GetItem(g_hwndTV, &tvi))
             {
@@ -1726,7 +1761,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         case TVN_ITEMEXPANDING:
         {
-            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(l);
+            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
             if (pnmtv->action != TVE_EXPAND) break;
 
             auto* data = reinterpret_cast<TVData*>(pnmtv->itemNew.lParam);
@@ -1755,7 +1790,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_VSCROLL: { return 0; }
     case WM_HSCROLL: { return 0; }
     case WM_COMMAND: {
-        switch (LOWORD(w)) {
+        switch (LOWORD(wp)) {
         case IDM_TOGGLE_CSS: {
             g_cfg.enableCSS = !g_cfg.enableCSS;
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
@@ -1793,12 +1828,34 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
             break;
         }
+        case IDM_TOGGLE_TOC_WINDOW:
+        {
+            g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
+                MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
+            if (g_cfg.displayTOC) { ShowWindow(g_hwndTV, SW_SHOW); }
+            else { ShowWindow(g_hwndTV, SW_HIDE); }
+            // 让主窗口重新布局
+            PostMessage(g_hWnd, WM_SIZE, 0, 0);
+            break;
+        }
+        case IDM_TOGGLE_STATUS_WINDOW:
+        {
+            g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
+                MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
+            if (g_cfg.displayStatusBar) { ShowWindow(g_hStatus, SW_SHOW); }
+            else { ShowWindow(g_hStatus, SW_HIDE); }
+            // 让主窗口重新布局
+            PostMessage(g_hWnd, WM_SIZE, 0, 0);
+            break;
+        }
         break;
 
         }
     }
     }
-    return DefWindowProc(h, m, w, l);
+    return DefWindowProc(hwnd, msg, wp, lp);
 
 }
 // 从资源加载 PNG → Gdiplus::Image*
@@ -1986,10 +2043,15 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
     g_hwndTV = CreateWindowExW(
         0, WC_TREEVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER |
+        WS_CHILD | WS_VISIBLE | WS_BORDER | 
         TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_NOTOOLTIPS,
         0, 0, 200, 600,
         g_hWnd, (HMENU)100, g_hInst, nullptr);
+    g_hwndSplit = CreateWindowExW(
+        0, WC_STATICW, nullptr,
+        WS_CHILD | WS_VISIBLE | SS_ETCHEDVERT,
+        200, 0, 2, 600,          // 2 px 宽
+        g_hWnd, (HMENU)101, g_hInst, nullptr);
     g_hView = CreateWindowExW(
         0, L"EPUBView", nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
@@ -2019,25 +2081,22 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
         MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
-    
+
+ 
+
+
     EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
     EnableMenuItem(hMenu, IDM_TOGGLE_PREPROCESS_HTML, MF_BYCOMMAND | MF_GRAYED);
-    //if(!g_cfg.enableCSS)
-    //{
-    //    EnableMenuItem(hMenu, IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_GRAYED);
-    //}
-    //else 
-    //{
-    //    EnableMenuItem(hMenu, IDM_TOGGLE_GLOBAL_CSS, MF_BYCOMMAND | MF_ENABLED);
-    //}
+
     EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableMenuItem(hMenu, IDM_TOGGLE_SCROLLBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(hMenu, IDM_TOGGLE_STATUS_WINDOW, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
+    //EnableMenuItem(hMenu, IDM_TOGGLE_STATUS_WINDOW, MF_BYCOMMAND | MF_GRAYED);
+    //EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableClearType();
     // =====初始化隐藏=====
-    ShowWindow(g_hStatus, SW_HIDE);
-    ShowWindow(g_hwndTV, SW_HIDE);
+    PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
+    PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
+
     ShowWindow(g_hView, SW_HIDE);
     ShowWindow(g_hTooltip, SW_HIDE);
     // ====================
