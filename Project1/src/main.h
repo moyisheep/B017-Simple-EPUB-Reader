@@ -28,15 +28,9 @@
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
-//#include <litehtml/document.h>
-//#include <litehtml/element.h>
-//#include <litehtml/types.h>
-//#include <litehtml/render_item.h>
-//
-//#include <litehtml/html_tag.h>
-#include <ft2build.h>
-#include FT_FREETYPE_H
-#pragma comment(lib, "freetype.lib")
+
+
+
 #pragma comment(lib, "comctl32.lib")
 #include <objidl.h>
 #include <filesystem>
@@ -69,7 +63,9 @@ using namespace Gdiplus;
 #include <locale>
 #pragma comment(lib, "dwrite.lib")
 #include <d2d1_3.h>        // ID2D1DeviceContext / ID2D1Bitmap1
-
+#include <vector>
+#include <algorithm>
+#include <unordered_set>
 #pragma comment(lib, "d2d1.lib")
 #include <dwrite_1.h>   // 需要 IDWriteTextFormat1
 #include <d2d1_1.h>       // D2D 1.1
@@ -150,21 +146,7 @@ namespace std {
     };
 }
 
-//struct FontKey {
-//    std::wstring family;   // CSS 中声明的名字
-//    int          weight;   // 400 / 700
-//    bool         italic;   // true = italic
-//    bool operator==(const FontKey& o) const noexcept {
-//        return family == o.family && weight == o.weight && italic == o.italic;
-//    }
-//};
-//namespace std {
-//    template<> struct hash<FontKey> {
-//        size_t operator()(const FontKey& k) const noexcept {
-//            return hash<wstring>()(k.family) ^ (hash<int>()(k.weight) << 1) ^ (hash<bool>()(k.italic) << 2);
-//        }
-//    };
-//}
+
 
 // ---------- 字体缓存 ----------
 struct FontPair {
@@ -173,7 +155,7 @@ struct FontPair {
 };
 
 // -------------- 运行时策略 -----------------
-enum class Renderer { GDI, D2D, FreeType };
+enum class Renderer { GDI, D2D};
 // -------------- 抽象接口 -----------------
 class IRenderBackend {
 public:
@@ -200,7 +182,6 @@ public:
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
     virtual void clear() = 0;
-    virtual HBITMAP get_bitmap() = 0;
 };
 
 class AppBootstrap {
@@ -252,7 +233,6 @@ public:
     ~GdiBackend();
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
-    HBITMAP  get_bitmap() override { return nullptr; }
 private:
     HDC m_hdc;
     HBITMAP m_memDC;
@@ -356,7 +336,7 @@ public:
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
     void make_font_metrics(const ComPtr<IDWriteFont>& dwFont, const litehtml::font_description& descr, litehtml::font_metrics* fm);
-    HBITMAP  get_bitmap() override;
+ 
     ComPtr<ID2D1HwndRenderTarget> m_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
 private:
     // 自动 AddRef/Release
@@ -388,63 +368,6 @@ private:
     ComPtr<IDWriteTextAnalyzer> m_analyzer;
 };
 
-// -------------- FreeType 后端 -----------------
-class FreetypeBackend : public IRenderBackend {
-public:
-    using RasterCB = std::function<void(int, int, const uint8_t*, int, int)>;
-    FreetypeBackend(int w, int h, int dpi,
-        uint8_t* surface, int stride,
-        FT_Library lib);
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
-    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
-    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
-    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
-    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
-    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
-    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
-    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
-    void				delete_font(litehtml::uint_ptr hFont) override;
-    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
-    void	del_clip() override;
-
-    void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
-    void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-    void clear() override;
-    HBITMAP  get_bitmap() override { return nullptr; }
-    ~FreetypeBackend();
-private:
-    int m_w, m_h, m_dpi;
-    RasterCB m_raster;
-    uint8_t* m_surface;
-    int m_stride;
-    FT_Library m_lib;
-    void blit_glyph(int x, int y,
-        const FT_Bitmap& bmp,
-        litehtml::web_color c);
-    void fill_rect(const litehtml::position& rc,
-        litehtml::web_color c);
-    std::vector<FT_Face>  m_faces;          // 已加载的 FreeType 字体
-    std::vector<std::vector<uint8_t>> m_fontBlobs; // 保持内存常驻
-    // 缓存已转换的 FT_Bitmap，避免重复解析
-    std::unordered_map<std::string, FT_Bitmap> m_ftBitmapCache;
-    /* 把 ImageFrame → FT_Bitmap（8-bit 灰度或 32-bit RGBA） */
-    static FT_Bitmap make_ft_bitmap(const ImageFrame& frame)
-    {
-        FT_Bitmap ftBmp = {};
-        ftBmp.rows = static_cast<unsigned>(frame.height);
-        ftBmp.width = static_cast<unsigned>(frame.width);
-        ftBmp.pitch = static_cast<int>(frame.stride);
-        ftBmp.buffer = const_cast<unsigned char*>(frame.rgba.data());
-        ftBmp.pixel_mode = FT_PIXEL_MODE_BGRA;   // 如果你后端是 RGBA，可改
-        ftBmp.num_grays = 256;
-        return ftBmp;
-    }
-    void draw_image(const ImageFrame& frame,
-        const litehtml::position& dst);
-};
 
 class ICanvas {
 public:
@@ -466,7 +389,7 @@ public:
     virtual void resize(int width, int height) = 0;
     virtual std::set<std::wstring> getCurrentFonts() = 0;
     virtual void clear() = 0;
-    virtual HBITMAP  get_bitmap() = 0;
+
     /* 工厂：根据当前策略创建画布 */
     //static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
 };
@@ -488,7 +411,7 @@ public:
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
-    HBITMAP  get_bitmap() override { return nullptr; }
+
 private:
     int  m_w, m_h;
     HDC  m_memDC;
@@ -509,7 +432,7 @@ public:
     void resize(int width, int height) override;
     std::set<std::wstring> getCurrentFonts() override;
     void clear() override;
-    HBITMAP  get_bitmap() override;
+
 private:
     int  m_w, m_h;
     ComPtr<ID2D1Bitmap> m_bmp;
@@ -519,26 +442,6 @@ private:
 
 };
 
-class FreetypeCanvas : public ICanvas {
-public:
-    FreetypeCanvas(int w, int h, int dpi);
-    ~FreetypeCanvas();
-    IRenderBackend* backend() override { return m_backend.get(); }
-    void present(HDC hdc, int x, int y) override;
-    int width()  const override { return m_w; }
-    int height() const override { return m_h; }
-    litehtml::uint_ptr getContext() override;
-    void BeginDraw() override;
-    void EndDraw() override;
-    void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-    void clear() override;
-    HBITMAP  get_bitmap() override { return nullptr; }
-private:
-    int  m_w, m_h, m_dpi;
-    std::vector<uint8_t>        m_pixels;   // 4*w*h
-    std::unique_ptr<FreetypeBackend> m_backend;
-};
 
 class Paginator {
 public:
@@ -669,7 +572,7 @@ public:
         const std::string& opf_dir,
         std::vector<OCFNavPoint>& out);
 
-    void show_tooltip(const std::string html, int x, int y);
+    void show_tooltip(const litehtml::element::ptr& el);
     void hide_tooltip();
     static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
     void clear();
@@ -698,13 +601,14 @@ struct AppSettings {
     bool enableJS = false;   // 默认禁用 JS
     bool enableGlobalCSS = false;
     bool enablePreprocessHTML = true;
+    bool enableHoverPreview = true;
     bool displayTOC = true;
     bool displayStatusBar = true;
     bool displayMenuBar = true;
     bool displayScrollBar = true;
     int record_update_interval_ms = 1000;
     Renderer fontRenderer = Renderer::D2D;
-    std::string default_font_name = "Cambria";
+    std::string default_font_name = "Segoe UI";
     int default_font_size = 16;
     float line_height_multiplier = 1.5;
     int tooltip_width = 350;
@@ -729,102 +633,6 @@ struct AppStates {
         cancelToken = std::make_shared<std::atomic_bool>(false);
     }
 };
-//static  std::unordered_map<std::wstring, std::wstring> g_fontAlias = {
-//    /* 英文字体 */
-//    {L"charis",               L"Charis SIL"},
-//    {L"charis sil",           L"Charis SIL"},
-//    {L"times",                L"Times New Roman"},
-//    {L"times new roman",      L"Times New Roman"},
-//    {L"timesnewroman",        L"Times New Roman"},
-//    {L"arial",                L"Arial"},
-//    {L"helvetica",            L"Arial"},           // 在 Windows 上 Helvetica 映射到 Arial
-//    {L"verdana",              L"Verdana"},
-//    {L"tahoma",               L"Tahoma"},
-//    {L"georgia",              L"Georgia"},
-//    {L"garamond",             L"Garamond"},
-//    {L"palatino",             L"Palatino Linotype"},
-//    {L"palatino linotype",    L"Palatino Linotype"},
-//    {L"courier",              L"Courier New"},
-//    {L"courier new",          L"Courier New"},
-//    {L"consolas",             L"Consolas"},
-//    {L"lucida console",       L"Lucida Console"},
-//    {L"lucida sans unicode",  L"Lucida Sans Unicode"},
-//    {L"comic sans",           L"Comic Sans MS"},
-//    {L"comic sans ms",        L"Comic Sans MS"},
-//    {L"impact",               L"Impact"},
-//    {L"trebuchet",            L"Trebuchet MS"},
-//    {L"trebuchet ms",          L"Trebuchet MS"},
-//    {L"franklin gothic",      L"Franklin Gothic Medium"},
-//    {L"tradegothicltstd",        L"Trade Gothic LT Std"},
-//    {L"bodoniegyptian-regular", L"BodoniEgyptian"},
-//    {L"nobel-regular",           L"Nobel"},
-//    {L"nsannotations500-mono" , L"NSAnnotations500 Monospace500"},
-//    /* 思源 / 开源无衬线 */
-//    {L"source sans",           L"Source Sans Pro"},
-//    {L"source sans pro",       L"Source Sans Pro"},
-//    {L"source serif",          L"Source Serif Pro"},
-//    {L"source serif pro",      L"Source Serif Pro"},
-//    {L"source code",           L"Source Code Pro"},
-//    {L"source code pro",       L"Source Code Pro"},
-//
-//    /* 等宽 / 编程字体 */
-//    {L"fira code",             L"Fira Code"},
-//    {L"fira mono",             L"Fira Mono"},
-//    {L"jetbrains mono",        L"JetBrains Mono"},
-//    {L"cascadia code",         L"Cascadia Code"},
-//    {L"cascadia mono",         L"Cascadia Mono"},
-//    {L"roboto mono",           L"Roboto Mono"},
-//    {L"inconsolata",           L"Inconsolata"},
-//
-//    /* 中文字体（简体） */
-//    {L"simsun",                L"SimSun"},
-//    {L"songti",                L"SimSun"},
-//    {L"宋体",                  L"SimSun"},
-//    {L"simhei",                L"SimHei"},
-//    {L"黑体",                  L"SimHei"},
-//    {L"microsoft yahei",       L"Microsoft YaHei"},
-//    {L"yahei",                 L"Microsoft YaHei"},
-//    {L"微软雅黑",               L"Microsoft YaHei"},
-//    {L"dengxian",               L"DengXian"},
-//    {L"等线",                  L"DengXian"},
-//    {L"kaiti",                 L"KaiTi"},
-//    {L"kaiti sc",              L"KaiTi"},
-//    {L"楷体",                  L"KaiTi"},
-//    {L"fangsong",              L"FangSong"},
-//    {L"fangsong sc",           L"FangSong"},
-//    {L"仿宋",                  L"FangSong"},
-//    {L"lisu",                  L"LiSu"},
-//    {L"隶书",                  L"LiSu"},
-//    {L"hy-xiaolishu",          L"HYXiaoLiShu_GB18030Super"},
-//
-//
-//    /* 中文字体（繁体） */
-//    {L"mingliu",               L"MingLiU"},
-//    {L"pmingliu",              L"PMingLiU"},
-//    {L"mingliuhkscs",          L"MingLiU_HKSCS"},
-//    {L"標楷體",                L"DFKai-SB"},
-//
-//    /* 日文字体 */
-//    {L"ms gothic",             L"MS Gothic"},
-//    {L"ms mincho",             L"MS Mincho"},
-//    {L"yu gothic",             L"Yu Gothic"},
-//    {L"yu mincho",             L"Yu Mincho"},
-//    {L"meiryo",                L"Meiryo"},
-//    {L"メイリオ",               L"Meiryo"},
-//
-//    /* 韩文字体 */
-//    {L"malgun gothic",         L"Malgun Gothic"},
-//    {L"malgun",                L"Malgun Gothic"},
-//    {L"맑은 고딕",             L"Malgun Gothic"},
-//    {L"batang",                L"Batang"},
-//    {L"gulim",                 L"Gulim"},
-//    {L"dotum",                 L"Dotum"}
-//};
-
-
-
-
-
 
 
 // 把整棵树存到 LPARAM 里
@@ -846,26 +654,6 @@ public:
     virtual bool load(const std::wstring& file_path) = 0;
     // 按路径返回原始二进制
     virtual std::vector<uint8_t> get_data(const std::wstring& path) const = 0;
-};
-
-
-
-class RenderWorker {
-public:
-    RenderWorker();
-    void push(int w, int h, int scrollY);
-    void stop();
-    ~RenderWorker();
-private:
-
-    void loop();
-    struct Task { int w, h, scrollY; };
-
-    std::queue<Task> m_taskQ;
-    std::mutex m_qMtx;
-    std::condition_variable m_qCV;
-    std::thread m_worker;
-    bool m_stop = false;
 };
 
 
@@ -909,6 +697,8 @@ public:
     void	split_text(const char* text, const std::function<void(const char*)>& on_word, const std::function<void(const char*)>& on_space) override;
     litehtml::string resolve_color(const litehtml::string& /*color*/) const { return litehtml::string(); }
 
+ 
+
     litehtml::pixel_t	pt_to_px(float pt) const override;
 
 
@@ -936,10 +726,11 @@ public:
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     std::shared_ptr<litehtml::document> m_doc;
     std::unique_ptr<ICanvas> m_canvas;
-    std::unique_ptr<RenderWorker> m_render_worker;
-
+    void init_dpi();
 private:
     std::wstring m_root;
+    float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
+
     // 1. 锚点表（id -> element）
 
     // 2. 最后一次传入的 HDC，用于 set_clip / del_clip
@@ -990,15 +781,14 @@ public:
     std::vector<HtmlBlock> m_blocks;
 private:
 
-    static int estimate_height(const std::string& html_fragment, int doc_width, int line_height);
 
-    void calculate_height(HtmlBlock& block);
 
-    void calculate_block_height(std::string head, BodyBlock& block);
+
+
 
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
-    static float tag_line_weight(std::string_view tag);
+
     std::string get_head(std::string& html);
     std::vector<BodyBlock> get_body_blocks(std::string& html, int spine_id = 0, size_t max_chunk_bytes = 4*1024);
     void serialize_node(const GumboNode* node, std::ostream& out);
@@ -1008,9 +798,9 @@ private:
     std::wstring get_href_by_id(int spine_id);
 
 
-    void insert_next_chapter();
+    bool insert_next_chapter();
     float get_height();
-    void insert_prev_chapter();
+    bool insert_prev_chapter();
 
 
     bool load_by_id(int spine_id, bool isPushBack);
