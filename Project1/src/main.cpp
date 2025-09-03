@@ -1,6 +1,6 @@
 ﻿#include "main.h"
 
-HWND  g_hwndTV = nullptr;    // 侧边栏 TreeView
+HWND  g_hwndToc = nullptr;    // 侧边栏 TreeView
 HIMAGELIST g_hImg = nullptr;   // 图标(可选)
 HWND      g_hWnd;
 HWND g_hStatus = nullptr;   // 状态栏句柄
@@ -56,7 +56,8 @@ static HWND  g_hwndSplit = nullptr;   // 分隔条
 static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
 static bool  g_dragging = false;     // 是否正在拖动
 
-
+// 全局
+std::unique_ptr<TocPanel> g_toc;
 
 
 static bool isWin10OrLater()
@@ -869,91 +870,6 @@ inline void SetStatus(int pane, const wchar_t* msg)
         (LPARAM)msg);
 }
 
-/* static */
-void EPUBBook::FreeTreeData(HWND tv)
-{
-    HTREEITEM hRoot = TreeView_GetRoot(tv);
-    std::function<void(HTREEITEM)> freeData = [&](HTREEITEM h)
-        {
-            for (; h; h = TreeView_GetNextSibling(tv, h))
-            {
-                TVITEMW tvi{ TVIF_PARAM, h };
-                TreeView_GetItem(tv, &tvi);
-                delete reinterpret_cast<TVData*>(tvi.lParam);
-
-                freeData(TreeView_GetChild(tv, h));
-            }
-        };
-    freeData(hRoot);
-}
-void EPUBBook::LoadToc()
-{
-    SendMessage(g_hwndTV, WM_SETREDRAW, FALSE, 0);
-
-    // ✅ 释放旧节点数据
-
-    HTREEITEM hRoot = TreeView_GetRoot(g_hwndTV);
-    TreeView_SelectItem(g_hwndTV, nullptr);   // 先取消选中
-    FreeTreeData(g_hwndTV);                   // 释放 TVData*
-    TreeView_DeleteAllItems(g_hwndTV);          // 此时不会再触发 TVN_SELCHANGED
-
-    BuildTree(ocf_pkg_.toc, m_nodes, m_roots);
-    for (size_t r : m_roots)
-        InsertTreeNodeLazy(g_hwndTV, m_nodes[r], m_nodes, TVI_ROOT);
-
-    SendMessage(g_hwndTV, WM_SETREDRAW, TRUE, 0);
-    RedrawWindow(g_hwndTV, nullptr, nullptr,
-        RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
-}
-
-void EPUBBook::BuildTree(const std::vector<OCFNavPoint>& flat,
-    std::vector<TreeNode>& nodes,
-    std::vector<size_t>& roots)
-{
-    if (flat.empty()) return;
-    nodes.clear();
-    nodes.reserve(flat.size());
-    std::vector<size_t> stack;
-    stack.reserve(32);
-    stack.push_back(SIZE_MAX);
-
-    for (const auto& np : flat)
-    {
-        while (stack.size() > static_cast<size_t>(np.order + 1))
-            stack.pop_back();
-
-        size_t idx = nodes.size();
-        nodes.emplace_back(&np);
-
-        if (stack.back() != SIZE_MAX)
-            nodes[stack.back()].childIdx.push_back(idx);
-        else
-            roots.push_back(idx);
-
-        stack.push_back(idx);
-    }
-}
-
-/* static */
-HTREEITEM EPUBBook::InsertTreeNodeLazy(HWND tv,
-    const TreeNode& node,
-    const std::vector<TreeNode>& allNodes,
-    HTREEITEM parent)
-{
-    TVINSERTSTRUCTW tvis = {};
-    tvis.hParent = parent;
-    tvis.hInsertAfter = TVI_LAST;
-    tvis.itemex.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
-    tvis.itemex.pszText = LPSTR_TEXTCALLBACKW;
-    tvis.itemex.cChildren = node.childIdx.empty() ? 0 : 1;
-
-    // ✅ 使用 TVData，而不是裸指针
-    auto* data = new TVData{ &node, &allNodes };
-    tvis.itemex.lParam = reinterpret_cast<LPARAM>(data);
-
-    HTREEITEM hItem = TreeView_InsertItem(tv, &tvis);
-    return hItem;
-}
 
 MemFile EPUBBook::read_zip(const wchar_t* file_name) const {
     MemFile mf;
@@ -1522,7 +1438,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_container->m_canvas->clear();
         g_book->clear();
         InvalidateRect(g_hView, nullptr, true);
-        InvalidateRect(g_hwndTV, nullptr, true);
+        InvalidateRect(g_hwndToc, nullptr, true);
 
 
         // 2. 立即释放旧对象，防止野指针
@@ -1611,11 +1527,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         /* 3. TOC 宽度 & 竖线 ★ */
         const int TV_W = g_cfg.displayTOC ? g_splitX : 0;   // ★ 用变量
-        ShowWindow(g_hwndTV, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_hwndToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
         ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
 
         /* 4. 重新摆放子窗口 ★ */
-        MoveWindow(g_hwndTV, 0, 0, TV_W, cy, TRUE);
+        MoveWindow(g_hwndToc, 0, 0, TV_W, cy, TRUE);
         MoveWindow(g_hwndSplit, TV_W, 0, 2, cy, TRUE);   // ★ 2 px 竖线
         MoveWindow(g_hView, TV_W + 2, 0, cx - TV_W - 2, cy, TRUE);
 
@@ -1724,69 +1640,77 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PostQuitMessage(0);
         return 0;
     }
-    case WM_NOTIFY:
-    {
-        LPNMHDR nm = reinterpret_cast<LPNMHDR>(lp);
-        if (nm->hwndFrom != g_hwndTV) break;
+    //case WM_NOTIFY:
+    //{
+    //    LPNMHDR nm = reinterpret_cast<LPNMHDR>(lp);
+    //    if (nm->hwndFrom != g_hwndTV) break;
 
-        switch (nm->code)
-        {
-        case TVN_GETDISPINFO:
-        {
-            auto* pdi = reinterpret_cast<NMTVDISPINFO*>(lp);
-            auto* data = reinterpret_cast<const TVData*>(pdi->item.lParam);
-            if (!data || !data->node || !data->node->nav)   // 三重保护
-            {
-                pdi->item.pszText = const_cast <wchar_t*>(L"");
-                break;
-            }
-            pdi->item.pszText = const_cast<wchar_t*>(data->node->nav->label.c_str());
-            break;
-        }
+    //    switch (nm->code)
+    //    {
+    //    case TVN_GETDISPINFO:
+    //    {
+    //        NMTVDISPINFO* pdi = reinterpret_cast<NMTVDISPINFO*>(lp);
 
-        case TVN_SELCHANGED:
-        {
-            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
-            TVITEMW tvi{ TVIF_PARAM, pnmtv->itemNew.hItem };
-            if (TreeView_GetItem(g_hwndTV, &tvi))
-            {
-                auto* data = reinterpret_cast<const TVData*>(tvi.lParam);
-                if (data && data->node && data->node->nav && !data->node->nav->href.empty())
-                {
-                    g_book->OnTreeSelChanged(data->node->nav->href.c_str());
-                }
-            }
-            break;
-        }
+    //        /* 1. 不是真的要文本，直接返回 */
+    //        if (!(pdi->item.mask & TVIF_TEXT) || !pdi->item.pszText)
+    //            break;
 
-        case TVN_ITEMEXPANDING:
-        {
-            auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
-            if (pnmtv->action != TVE_EXPAND) break;
+    //        /* 2. 取数据 */
+    //        const TVData* data = reinterpret_cast<const TVData*>(pdi->item.lParam);
+    //        if (!data || !data->node || !data->node->nav)
+    //        {
+    //            pdi->item.pszText = const_cast<wchar_t*>(L"");
+    //            break;
+    //        }
 
-            auto* data = reinterpret_cast<TVData*>(pnmtv->itemNew.lParam);
-            if (!data || data->inserted) break;   // 已经插过直接返回
+    //        /* 3. 直接给指针，零拷贝 */
+    //        pdi->item.pszText = const_cast<wchar_t*>(data->node->nav->label.c_str());
+    //        break;
+    //    }
 
-            HTREEITEM hParent = pnmtv->itemNew.hItem;
-            for (size_t idx : data->node->childIdx)
-            {
-                const TreeNode& child = (*data->all)[idx];
-                TVINSERTSTRUCTW tvis{};
-                tvis.hParent = hParent;
-                tvis.hInsertAfter = TVI_LAST;
-                tvis.itemex.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
-                tvis.itemex.pszText = LPSTR_TEXTCALLBACKW;
-                tvis.itemex.cChildren = child.childIdx.empty() ? 0 : 1;
-                auto* childData = new TVData{ &child, data->all };
-                tvis.itemex.lParam = reinterpret_cast<LPARAM>(childData);
-                TreeView_InsertItem(g_hwndTV, &tvis);
-            }
-            data->inserted = true;   // 标记已插入
-            break;
-        }
-        break;
-        }
-    }
+    //    case TVN_SELCHANGED:
+    //    {
+    //        auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
+    //        TVITEMW tvi{ TVIF_PARAM, pnmtv->itemNew.hItem };
+    //        if (TreeView_GetItem(g_hwndTV, &tvi))
+    //        {
+    //            auto* data = reinterpret_cast<const TVData*>(tvi.lParam);
+    //            if (data && data->node && data->node->nav && !data->node->nav->href.empty())
+    //            {
+    //                g_book->OnTreeSelChanged(data->node->nav->href.c_str());
+    //            }
+    //        }
+    //        break;
+    //    }
+
+    //    case TVN_ITEMEXPANDING:
+    //    {
+    //        auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
+    //        if (pnmtv->action != TVE_EXPAND) break;
+
+    //        auto* data = reinterpret_cast<TVData*>(pnmtv->itemNew.lParam);
+    //        if (!data || data->inserted) break;   // 已经插过直接返回
+
+    //        HTREEITEM hParent = pnmtv->itemNew.hItem;
+    //        for (size_t idx : data->node->childIdx)
+    //        {
+    //            const TreeNode& child = (*data->all)[idx];
+    //            TVINSERTSTRUCTW tvis{};
+    //            tvis.hParent = hParent;
+    //            tvis.hInsertAfter = TVI_LAST;
+    //            tvis.itemex.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+    //            tvis.itemex.pszText = LPSTR_TEXTCALLBACKW;
+    //            tvis.itemex.cChildren = child.childIdx.empty() ? 0 : 1;
+    //            auto* childData = new TVData{ &child, data->all };
+    //            tvis.itemex.lParam = reinterpret_cast<LPARAM>(childData);
+    //            TreeView_InsertItem(g_hwndTV, &tvis);
+    //        }
+    //        data->inserted = true;   // 标记已插入
+    //        break;
+    //    }
+    //    break;
+    //    }
+    //}
     case WM_VSCROLL: { return 0; }
     case WM_HSCROLL: { return 0; }
     case WM_COMMAND: {
@@ -1833,8 +1757,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
                 MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
-            if (g_cfg.displayTOC) { ShowWindow(g_hwndTV, SW_SHOW); }
-            else { ShowWindow(g_hwndTV, SW_HIDE); }
+            if (g_cfg.displayTOC) { ShowWindow(g_hwndToc, SW_SHOW); }
+            else { ShowWindow(g_hwndToc, SW_HIDE); }
             // 让主窗口重新布局
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
@@ -1998,6 +1922,7 @@ void register_thumb_class()
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 }
+
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
@@ -2041,12 +1966,30 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         0, 0, 0, 0,           // 位置和大小由 WM_SIZE 调整
         g_hWnd, nullptr, g_hInst, nullptr);
 
-    g_hwndTV = CreateWindowExW(
-        0, WC_TREEVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | 
-        TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_NOTOOLTIPS,
+    // 一次性创建
+    const wchar_t TOC_CLASS[] = L"TocPanelClass";
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = TocPanel::WndProc;          // 你的新 WndProc
+    wc.hInstance = g_hInst;
+    wc.lpszClassName = TOC_CLASS;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;             // 自绘
+    wc.cbWndExtra = sizeof(LONG_PTR);   // ← 必须有
+    RegisterClassExW(&wc);
+
+
+    // 2. 创建
+    g_hwndToc = CreateWindowExW(
+        WS_EX_COMPOSITED,          // 双缓冲
+        TOC_CLASS,                 // 用注册的类名
+        nullptr,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL,
         0, 0, 200, 600,
         g_hWnd, (HMENU)100, g_hInst, nullptr);
+
+    // 2. 创建
+     // 代替 g_hwndTV = CreateWindowExW(...)
+
     g_hwndSplit = CreateWindowExW(
         0, WC_STATICW, nullptr,
         WS_CHILD | WS_VISIBLE | SS_ETCHEDVERT,
@@ -2227,18 +2170,18 @@ void SimpleContainer::get_viewport(litehtml::position& client) const
 {
     // 1. 取客户区物理像素
     RECT rc{};
-    GetClientRect(g_hView, &rc);
+    GetClientRect(m_hwnd, &rc);
 
     // 2. 计算滚动条宽度（垂直滚动条存在时）
     int scrollW = 0;
-    if (GetWindowLongPtr(g_hView, GWL_STYLE) & WS_VSCROLL)
+    if (GetWindowLongPtr(m_hwnd, GWL_STYLE) & WS_VSCROLL)
         scrollW = GetSystemMetrics(SM_CXVSCROLL);
 
     // 3. DPI 缩放因子
-    HDC hdc = GetDC(g_hView);
+    HDC hdc = GetDC(m_hwnd);
     int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
     int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(g_hView, hdc);
+    ReleaseDC(m_hwnd, hdc);
 
     float scaleX = 96.0f / dpiX;
     float scaleY = 96.0f / dpiY;
@@ -4462,7 +4405,15 @@ AppBootstrap::AppBootstrap() {
     {
         g_recorder = std::make_unique<ReadingRecorder>();
     }
-
+    if (!g_toc) 
+    { 
+        g_toc = std::make_unique<TocPanel>(); 
+        g_toc->GetWindow(g_hwndToc);
+    }
+    // 绑定目录点击 -> 章节跳转
+    g_toc->SetOnNavigate([](const std::wstring& href) {
+        g_book->OnTreeSelChanged(href.c_str());
+        });
 }
 
 AppBootstrap::~AppBootstrap() {
@@ -5173,20 +5124,11 @@ const char* SimpleContainer::get_default_font_name() const
 void EPUBBook::clear()
 {
 
-    SendMessage(g_hwndTV, WM_SETREDRAW, FALSE, 0);
-    HTREEITEM hRoot = TreeView_GetRoot(g_hwndTV);
-    TreeView_SelectItem(g_hwndTV, nullptr);   // 先取消选中
-    FreeTreeData(g_hwndTV);                   // 释放 TVData*
-    TreeView_DeleteAllItems(g_hwndTV);          // 此时不会再触发 TVN_SELCHANGED
-    SendMessage(g_hwndTV, WM_SETREDRAW, TRUE, 0);
-    RedrawWindow(g_hwndTV, nullptr, nullptr,
-        RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
+
 
     mz_zip_reader_end(&zip);
     cache.clear();
-    m_nodes.clear();
-    m_nodes.shrink_to_fit();
-    m_roots.clear();
+
     ocf_pkg_ = {};
     m_fontBin.clear();
     m_file_path = L"";
@@ -5778,6 +5720,14 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
         
     }
     scrollY = 0;
+
+    ScrollPosition p = get_scroll_position();
+    if (p.spine_id != m_current_id)
+    {
+        m_current_id = p.spine_id;
+        std::wstring href = get_href_by_id(m_current_id);
+        g_toc->SetHighlightByHref(href);
+    }
     return m_doc;
 }
 
@@ -6015,3 +5965,574 @@ void ReadingRecorder::updateRecord(BookRecord& record)
 
     }
 }
+
+
+void TocPanel::GetWindow(HWND hwnd)
+{
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)this);
+    hwnd_ = hwnd;
+}
+
+
+void TocPanel::Load(const std::vector<OCFNavPoint>& flat)
+{
+    // 复用你原来的 BuildTree 算法
+    nodes_.clear();
+    roots_.clear();
+    nodes_.reserve(flat.size());
+    std::vector<size_t> st;
+    st.push_back(SIZE_MAX);
+    for (const auto& np : flat)
+    {
+        while (st.size() > static_cast<size_t>(np.order + 1)) st.pop_back();
+        size_t idx = nodes_.size();
+        nodes_.push_back(Node{ &np });
+        if (st.back() != SIZE_MAX)
+            nodes_[st.back()].childIdx.push_back(idx);
+        else
+            roots_.push_back(idx);
+        st.push_back(idx);
+    }
+    for (auto& n : nodes_) n.expanded = false;
+    RebuildVisible();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+/* ---------- 内部实现 ---------- */
+LRESULT CALLBACK TocPanel::WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_NCCREATE)
+        SetWindowLongPtr(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCT*)l)->lpCreateParams);
+    TocPanel* self = (TocPanel*)GetWindowLongPtr(h, GWLP_USERDATA);
+    return self ? self->HandleMsg(m, w, l) : DefWindowProc(h, m, w, l);
+}
+
+LRESULT TocPanel::HandleMsg(UINT m, WPARAM w, LPARAM l)
+{
+    switch (m)
+    {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: { PAINTSTRUCT ps; OnPaint(BeginPaint(hwnd_, &ps)); EndPaint(hwnd_, &ps); } return 0;
+    case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
+    case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(w)); return 0;
+    case WM_VSCROLL:     OnVScroll(LOWORD(w), HIWORD(w)); return 0;
+    case WM_KEYDOWN:
+        if (w == VK_UP && selLine_ > 0) { selLine_--; EnsureVisible(selLine_); InvalidateRect(hwnd_, nullptr, FALSE); }
+        if (w == VK_DOWN && selLine_ + 1 < (int)vis_.size()) { selLine_++; EnsureVisible(selLine_); InvalidateRect(hwnd_, nullptr, FALSE); }
+        return 0;
+    }
+    return DefWindowProc(hwnd_, m, w, l);
+}
+
+TocPanel::TocPanel()
+{
+    // 16 px 高，默认宽度，正常粗细，不斜体，不 underline，不 strikeout
+    hFont_ = CreateFontW(16, 0, 0, 0,
+        FW_NORMAL,
+        FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        L"Segoe UI");   // 字体名
+
+}
+TocPanel::~TocPanel()
+{
+    if (hFont_) DeleteObject(hFont_);
+}
+void TocPanel::RebuildVisible()
+{
+    vis_.clear();
+    std::function<void(size_t)> walk = [&](size_t idx) {
+        vis_.push_back(idx);
+        const Node& n = nodes_[idx];
+        if (n.expanded)
+            for (size_t c : n.childIdx) walk(c);
+        };
+    for (size_t r : roots_) walk(r);
+
+    // 1. 总高度（像素）
+    totalH_ = (int)vis_.size() * lineH_;
+
+    // 2. 客户区高度（像素）
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    int clientH = rc.bottom - rc.top;
+
+    // 3. 设置滚动条
+    SCROLLINFO si{ sizeof(si) };
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    si.nMin = 0;
+    si.nMax = totalH_;          // 像素
+    si.nPage = clientH;          // 像素
+    SetScrollInfo(hwnd_, SB_VERT, &si, TRUE);
+}
+
+int TocPanel::HitTest(int y) const
+{
+    int line = (y + scrollY_) / lineH_;
+    return (line >= 0 && line < (int)vis_.size()) ? line : -1;
+}
+
+void TocPanel::Toggle(int line)
+{
+    size_t idx = vis_[line];
+    nodes_[idx].expanded = !nodes_[idx].expanded;
+    RebuildVisible();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void TocPanel::EnsureVisible(int line)
+{
+    RECT rc; GetClientRect(hwnd_, &rc);
+    int y = line * lineH_;
+    if (y < scrollY_) scrollY_ = y;
+    else if (y + lineH_ > scrollY_ + rc.bottom) scrollY_ = y + lineH_ - rc.bottom;
+    SetScrollPos(hwnd_, SB_VERT, scrollY_, TRUE);
+}
+
+void TocPanel::OnPaint(HDC hdc)
+{
+    RECT rc; GetClientRect(hwnd_, &rc);
+    /* 1. 先把整块客户区刷成背景色，解决残影 */
+    FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
+    int first = scrollY_ / lineH_;
+    int last = std::min(first + rc.bottom / lineH_ + 1, (long)vis_.size());
+    HFONT hOld = (HFONT)SelectObject(hdc, hFont_);
+
+
+    for (int i = first; i < last; ++i)
+    {
+        const Node& n = nodes_[vis_[i]];
+
+        // 行矩形：整体向下、向右各偏移 marginTop / marginLeft
+        RECT r{ marginLeft,
+                marginTop + i * lineH_ - scrollY_,
+                rc.right,
+                marginTop + (i + 1) * lineH_ - scrollY_ };
+
+        HBRUSH br = (i == selLine_)
+            ? GetSysColorBrush(COLOR_HIGHLIGHT)
+            : GetSysColorBrush(COLOR_WINDOW);
+        FillRect(hdc, &r, br);
+
+        int indent = n.nav->order * 16;
+        WCHAR sign[2] = L"";
+        if (!n.childIdx.empty())
+            sign[0] = n.expanded ? L'−' : L'+';
+
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, GetSysColor(i == selLine_
+            ? COLOR_HIGHLIGHTTEXT
+            : COLOR_WINDOWTEXT));
+
+        // 文字再缩进：左侧留白 + 层级缩进
+        int textLeft = marginLeft + indent;
+        TextOutW(hdc, textLeft, r.top + 2, sign, lstrlenW(sign));
+        textLeft += 12;
+        TextOutW(hdc, textLeft, r.top + 2,
+            n.nav->label.c_str(),
+            static_cast<int>(n.nav->label.size()));
+    }
+    SelectObject(hdc, hOld);   // 恢复
+}
+
+void TocPanel::OnLButtonDown(int x, int y)
+{
+    int line = HitTest(y);
+    if (line < 0) return;
+
+    const Node& n = nodes_[vis_[line]];
+    if (n.childIdx.empty())
+    {
+        selLine_ = line;
+        InvalidateRect(hwnd_, nullptr, false);
+        if (onNavigate_) onNavigate_(n.nav->href);
+    }
+    else
+    {
+        selLine_ = line;
+
+        Toggle(line);
+    }
+}
+void TocPanel::SetHighlightByHref(const std::wstring& href)
+{
+    // ---------- 1. 找目标节点 ----------
+    size_t target = nodes_.size();
+    for (size_t i = 0; i < nodes_.size(); ++i)
+        if (nodes_[i].nav && nodes_[i].nav->href == href)
+        {
+            target = i; break;
+        }
+    if (target == nodes_.size()) return;
+
+    // ---------- 2. 记录路径并展开 ----------
+    // path 只需存需要展开的节点，最多树高
+    std::vector<size_t> path;
+    std::function<bool(size_t)> dfs = [&](size_t idx) -> bool
+        {
+            if (idx == target) return true;          // 命中目标
+
+            Node& n = nodes_[idx];
+            if (!n.expanded)                       // 折叠就展开
+                n.expanded = true;
+
+            for (size_t c : n.childIdx)
+                if (dfs(c))
+                {
+                    path.push_back(idx);           // 回溯时记录父节点
+                    return true;
+                }
+            return false;
+        };
+
+    for (size_t r : roots_)                    // 支持多根
+        if (dfs(r)) break;
+
+    // 3. 重建可见表（O(N) 一次遍历）
+    RebuildVisible();
+
+    // 4. 直接取行号（yLine 已在 RebuildVisible 中更新）
+    selLine_ = -1;
+    for (size_t i = 0; i < vis_.size(); ++i)
+        if (vis_[i] == target) { selLine_ = static_cast<int>(i); break; }
+
+    if (selLine_ != -1)
+        EnsureVisible(selLine_);
+    // 5. 重绘
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+void TocPanel::OnVScroll(int code, int pos)
+{
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    int clientH = rc.bottom - rc.top;
+    int maxY = std::max(0, totalH_ - clientH);
+
+    switch (code)
+    {
+    case SB_LINEUP:      scrollY_ -= lineH_; break;
+    case SB_LINEDOWN:    scrollY_ += lineH_; break;
+    case SB_PAGEUP:      scrollY_ -= clientH; break;   // 按页滚 = 客户区高度
+    case SB_PAGEDOWN:    scrollY_ += clientH; break;
+    case SB_THUMBTRACK:
+    case SB_THUMBPOSITION:
+    {
+        SCROLLINFO si{ sizeof(si), SIF_TRACKPOS };
+        if (GetScrollInfo(hwnd_, SB_VERT, &si))
+            scrollY_ = si.nTrackPos;      // 拿到 32 位真实位置
+        break;
+    }
+    }
+
+    scrollY_ = std::max(0, std::min(scrollY_, maxY));
+
+    SetScrollPos(hwnd_, SB_VERT, scrollY_, TRUE);
+    InvalidateRect(hwnd_, nullptr, TRUE);
+}
+void TocPanel::OnMouseWheel(int delta)
+{
+    scrollY_ -= delta;
+    OnVScroll(SB_THUMBPOSITION, scrollY_);
+}
+
+void EPUBBook::LoadToc()
+{
+    if (g_toc)
+    {
+        g_toc->Load(ocf_pkg_.toc);                 // 代替 EPUBBook::LoadToc()
+    }
+}
+
+
+bool ZipProvider::load(const std::wstring& file_path)
+{
+    namespace fs = std::filesystem;
+    if (!fs::exists(file_path))
+    {
+        OutputDebugStringW(L"[ZipProvider] 文件不存在\n");
+        return false;
+    }
+
+
+    mz_zip_reader_end(&m_zip);           // 1. 先关闭旧 zip
+    memset(&m_zip, 0, sizeof(m_zip));
+
+    if (!mz_zip_reader_init_file(&m_zip, w2a(file_path).c_str(), 0))
+    {
+        OutputDebugStringW((L"[ZipProvider] zip 打开失败：" +
+            std::to_wstring(mz_zip_get_last_error(&m_zip)) + L"\n").c_str());
+        return false;
+    }
+
+    m_zipIndex = ZipIndexW(m_zip);
+    return true;
+}
+MemFile ZipProvider::get(const std::wstring& path)  const
+{
+    MemFile mf;
+    std::string narrow_name = w2a(path);
+    size_t uncomp_size = 0;
+    void* p = mz_zip_reader_extract_file_to_heap(
+        const_cast<mz_zip_archive*>(&m_zip),
+        narrow_name.c_str(),
+        &uncomp_size, 0);
+
+    if (p) {
+        mf.data.assign(static_cast<uint8_t*>(p),
+            static_cast<uint8_t*>(p) + uncomp_size);
+        mz_free(p);
+    }
+    return mf;
+}
+
+std::wstring ZipProvider::find(const std::wstring& path)
+{
+    return m_zipIndex.find(path);
+}
+MemFile LocalFileProvider::get(const std::wstring& path) const
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    // 文件不存在或非普通文件
+    if (!fs::is_regular_file(path, ec) || ec)
+        return {};
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+        return {};
+
+    file.seekg(0, std::ios::end);
+    const auto len = static_cast<size_t>(file.tellg());
+    file.seekg(0);
+
+    MemFile mf;
+    mf.data.resize(len);
+    file.read(reinterpret_cast<char*>(mf.data.data()), len);
+
+    if (!file)        // 读取失败
+        return {};
+
+    return mf;        // NRVO / move
+}
+
+
+bool EPUBParser::load(std::shared_ptr<IFileProvider> fp)
+{
+    m_fp = fp;
+    parse_ocf();
+    parse_opf();
+    parse_toc();
+    return true;
+}
+
+bool EPUBParser::parse_ocf()
+{
+    m_ocf_pkg = {};  // 清空
+    auto mf = m_fp->get(L"META-INF/container.xml");
+    if (mf.data.empty()) return false;
+
+    tinyxml2::XMLDocument doc;
+    if (doc.Parse(mf.begin(), mf.size()) != tinyxml2::XML_SUCCESS) { return false; }
+
+    auto* rootfile = doc.FirstChildElement("container")
+        ? doc.FirstChildElement("container")->FirstChildElement("rootfiles")
+        : nullptr;
+    rootfile = rootfile ? rootfile->FirstChildElement("rootfile") : nullptr;
+    if (!rootfile || !rootfile->Attribute("full-path")) { return false; }
+
+    m_ocf_pkg.rootfile = a2w(rootfile->Attribute("full-path"));
+    m_ocf_pkg.opf_dir = m_ocf_pkg.rootfile.substr(0, m_ocf_pkg.rootfile.find_last_of(L'/') + 1);
+    return true;
+}
+bool EPUBParser::parse_opf()
+{
+    auto opf = m_fp->get(m_ocf_pkg.rootfile.c_str());
+    std::string xml(opf.begin(), opf.begin() + opf.size());
+    if (opf.data.empty()) return false;
+    tinyxml2::XMLDocument doc;
+    if (doc.Parse(xml.c_str(), xml.size()) != tinyxml2::XML_SUCCESS) return false;
+
+    auto* manifest = doc.RootElement()
+        ? doc.RootElement()->FirstChildElement("manifest")
+        : nullptr;
+
+    for (auto* it = manifest ? manifest->FirstChildElement("item") : nullptr;
+        it; it = it->NextSiblingElement("item"))
+    {
+        OCFItem item;
+        item.id = a2w(it->Attribute("id") ? it->Attribute("id") : "");
+        item.href = a2w(it->Attribute("href") ? it->Attribute("href") : "");
+        item.media_type = a2w(it->Attribute("media-type") ? it->Attribute("media-type") : "");
+        item.properties = a2w(it->Attribute("properties") ? it->Attribute("properties") : "");
+
+
+        // 只在 href 非空时拼绝对路径
+        if (!item.href.empty())
+            item.href = m_fp->find(item.href);
+
+        m_ocf_pkg.manifest.emplace_back(std::move(item));
+    }
+
+    // spine
+    auto* spine = doc.RootElement()
+        ? doc.RootElement()->FirstChildElement("spine")
+        : nullptr;
+    // 先把 manifest 做成 id -> href 的映射
+    std::unordered_map<std::wstring, std::wstring> id2href;
+    for (const auto& m : m_ocf_pkg.manifest)
+        id2href[m.id] = m.href;
+
+    // 再解析 spine
+    for (auto* it = spine ? spine->FirstChildElement("itemref") : nullptr;
+        it; it = it->NextSiblingElement("itemref")) {
+
+        OCFRef ref;
+        ref.idref = a2w(it->Attribute("idref") ? it->Attribute("idref") : "");
+        ref.href = id2href[ref.idref];   // 直接填进去
+        ref.linear = a2w(it->Attribute("linear") ? it->Attribute("linear") : "yes");
+        m_ocf_pkg.spine.emplace_back(std::move(ref));
+    }
+    // meta
+    auto* meta = doc.RootElement()
+        ? doc.RootElement()->FirstChildElement("metadata")
+        : nullptr;
+    for (auto* it = meta ? meta->FirstChildElement() : nullptr;
+        it; it = it->NextSiblingElement()) {
+        m_ocf_pkg.meta[a2w(it->Name())] = a2w(it->GetText() ? it->GetText() : "");
+    }
+    return true;
+}
+bool EPUBParser::parse_toc()
+{
+    std::wstring toc_path;
+    for (const auto& it : m_ocf_pkg.manifest)
+    {
+        if (it.properties.find(L"nav") != std::wstring::npos ||
+            it.id.find(L"ncx") != std::wstring::npos)
+        {
+            toc_path = it.href;
+            break;
+        }
+    }
+    if (toc_path.empty()) return false;
+
+    m_ocf_pkg.toc_path = toc_path;
+    auto toc = m_fp->get(toc_path.c_str());
+    if (toc.data.empty()) return false;
+
+    tinyxml2::XMLDocument doc;
+    if (doc.Parse(toc.begin(), toc.size()) != tinyxml2::XML_SUCCESS) return false;
+
+    bool is_nav = is_xhtml(toc_path);
+    std::string opf_dir = w2a(m_ocf_pkg.opf_dir);
+
+    m_ocf_pkg.toc.clear();
+
+    if (is_nav)
+    {
+        auto* body = doc.FirstChildElement("html")
+            ? doc.FirstChildElement("html")->FirstChildElement("body")
+            : nullptr;
+        if (!body) return false;
+
+        for (auto* nav = body->FirstChildElement("nav");
+            nav;
+            nav = nav->NextSiblingElement("nav"))
+        {
+            const char* type = nav->Attribute("epub:type");
+            if (type && std::string(type) == "toc")
+            {
+                parse_nav_list(nav->FirstChildElement("ol"), 0, opf_dir, m_ocf_pkg.toc);
+                break;   // 找到就停
+            }
+        }
+    }
+    else // NCX
+    {
+        auto* navMap = doc.RootElement()
+            ? doc.RootElement()->FirstChildElement("navMap")
+            : nullptr;
+        if (navMap)
+            parse_ncx_points(navMap->FirstChildElement("navPoint"), 0, opf_dir, m_ocf_pkg.toc);
+    }
+    return true;
+}
+
+void EPUBParser::parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
+    const std::string& opf_dir,
+    std::vector<OCFNavPoint>& out)
+{
+    if (!navPoint) return;
+    for (auto* pt = navPoint; pt; pt = pt->NextSiblingElement("navPoint"))
+    {
+        auto* lbl = pt->FirstChildElement("navLabel");
+        auto* txt = lbl ? lbl->FirstChildElement("text") : nullptr;
+        auto* con = pt->FirstChildElement("content");
+
+        OCFNavPoint np;
+
+        np.label = txt ? extract_text(txt) : L"";
+        np.href = a2w(con && con->Attribute("src") ? con->Attribute("src") : "");
+        if (!np.href.empty())
+            np.href = m_fp->find(np.href);
+        np.order = level;               // 层级深度
+        out.emplace_back(std::move(np));
+
+        // 递归子 <navPoint>
+        parse_ncx_points(pt->FirstChildElement("navPoint"), level + 1, opf_dir, out);
+    }
+}
+
+void EPUBParser::parse_nav_list(tinyxml2::XMLElement* ol, int level,
+    const std::string& opf_dir,
+    std::vector<OCFNavPoint>& out)
+{
+    if (!ol) return;
+    for (auto* li = ol->FirstChildElement("li"); li; li = li->NextSiblingElement("li"))
+    {
+        auto* a = li->FirstChildElement("a");
+        if (!a) continue;
+
+        OCFNavPoint np;
+        np.label = extract_text(a);
+        np.href = a2w(a->Attribute("href") ? a->Attribute("href") : "");
+        if (!np.href.empty())
+            np.href = m_fp->find(np.href);
+        np.order = level;               // 层级深度
+        out.emplace_back(std::move(np));
+
+        // 递归子 <ol>
+        if (auto* sub = li->FirstChildElement("ol"))
+            parse_nav_list(sub, level + 1, opf_dir, out);
+    }
+}
+
+std::wstring EPUBParser::extract_text(const tinyxml2::XMLElement* a)
+{
+    if (!a) return L"";
+
+    // 1. 拿到 <a> 的完整 XML 字符串
+    tinyxml2::XMLPrinter printer;
+    a->Accept(&printer);
+    std::string xml = printer.CStr();   // "<a ...><span ...>I</span>: The Meadow</a>"
+
+    // 2. 去掉最外层 <a ...> 和 </a>
+    size_t start = xml.find('>') + 1;
+    size_t end = xml.rfind('<');
+    if (start == std::string::npos || end == std::string::npos || end <= start)
+        return L"";
+
+    std::string inner = xml.substr(start, end - start);   // "<span ...>I</span>: The Meadow"
+
+    // 3. 简单剥掉所有标签（正则或手写）
+    std::regex tag_re("<[^>]*>");
+    std::string plain = std::regex_replace(inner, tag_re, "");
+
+    return a2w(plain);   // "I: The Meadow"
+}
+

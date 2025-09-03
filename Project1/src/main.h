@@ -477,8 +477,11 @@ struct OCFPackage {
 };
 
 struct TreeNode {
-    const OCFNavPoint* nav;   // 只读引用
-    std::vector<size_t> childIdx; // 子节点索引
+    const OCFNavPoint* nav = nullptr;
+    std::vector<size_t> childIdx;
+    // 仅用于自绘面板
+    bool expanded = false;   // 当前是否展开
+    int  yLine = 0;      // 当前在面板中的行号（缓存）
 };
 
 class ZipIndexW {
@@ -576,7 +579,7 @@ public:
     void hide_tooltip();
     static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
     void clear();
-
+    void LoadToc();
     HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
     std::wstring           m_tooltip_url;          // 缓存当前 url
     std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
@@ -586,13 +589,14 @@ public:
 
     EPUBBook() noexcept {}
     ~EPUBBook();
+
 private:
-    static HTREEITEM InsertTreeNodeLazy(HWND, const TreeNode&, const std::vector<TreeNode>&, HTREEITEM);
+
+
     void BuildTree(const std::vector<OCFNavPoint>&, std::vector<TreeNode>&, std::vector<size_t>&);
-    void FreeTreeData(HWND tv);
-    void LoadToc();
-    std::vector<TreeNode> m_nodes;
-    std::vector<size_t>   m_roots;
+
+
+
 };
 
 
@@ -648,13 +652,6 @@ struct TVData {
 
 
 
-class IFileProvider {
-public:
-    virtual ~IFileProvider() = default;
-    virtual bool load(const std::wstring& file_path) = 0;
-    // 按路径返回原始二进制
-    virtual std::vector<uint8_t> get_data(const std::wstring& path) const = 0;
-};
 
 
 
@@ -697,8 +694,6 @@ public:
     void	split_text(const char* text, const std::function<void(const char*)>& on_word, const std::function<void(const char*)>& on_space) override;
     litehtml::string resolve_color(const litehtml::string& /*color*/) const { return litehtml::string(); }
 
- 
-
     litehtml::pixel_t	pt_to_px(float pt) const override;
 
 
@@ -728,18 +723,9 @@ public:
     std::unique_ptr<ICanvas> m_canvas;
     void init_dpi();
 private:
-    std::wstring m_root;
+
     float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
-
-    // 1. 锚点表（id -> element）
-
-    // 2. 最后一次传入的 HDC，用于 set_clip / del_clip
-    HDC m_last_hdc = nullptr;
     HWND m_hwnd = nullptr;
-    // 3. 默认字体句柄（FontWrapper 是你自己的字体包装类）
-    HFONT m_hDefaultFont = nullptr;
-
-
 
 };
 
@@ -780,12 +766,6 @@ public:
     ScrollPosition get_scroll_position();
     std::vector<HtmlBlock> m_blocks;
 private:
-
-
-
-
-
-
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
 
@@ -811,6 +791,7 @@ private:
     std::shared_ptr<EPUBBook> m_book;
     std::shared_ptr<SimpleContainer> m_container;
     int m_render_width;
+    int m_current_id = 0;
 
 
 };
@@ -922,4 +903,107 @@ public:
 private:
     void initDB();
     sqlite3* m_db = nullptr;
+};
+
+
+class TocPanel
+{
+public:
+    using OnNavigate = std::function<void(const std::wstring& href)>;
+
+    TocPanel();
+    ~TocPanel();
+
+    void GetWindow(HWND hwnd);
+
+    void Load(const std::vector<OCFNavPoint>& flatToc);
+    void SetOnNavigate(OnNavigate cb) { onNavigate_ = std::move(cb); }
+    static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+    void SetHighlightByHref(const std::wstring& href);
+private:
+    struct Node : TreeNode{};
+
+    // 消息泵
+
+    LRESULT HandleMsg(UINT, WPARAM, LPARAM);
+
+    // 内部工具
+    void RebuildVisible();
+    int  HitTest(int y) const;
+    void Toggle(int line);
+    void EnsureVisible(int line);
+
+    // 绘制
+    void OnPaint(HDC);
+    void OnVScroll(int code, int pos);
+    void OnMouseWheel(int delta);
+    void OnLButtonDown(int x, int y);
+
+    // 数据
+    std::vector<Node>          nodes_;
+    std::vector<size_t>        roots_;
+    std::vector<size_t>        vis_;      // 可见行索引
+    int                        lineH_ = 20;
+    int                        scrollY_ = 0;
+    int                        totalH_ = 0;
+    int                        selLine_ = -1;
+    OnNavigate                 onNavigate_;
+    HFONT hFont_ = nullptr;
+    HWND hwnd_ = nullptr;
+    int marginTop = 4;   // 顶部留白
+    int marginLeft = 10;  // 左侧留白
+};
+
+//  file system
+class IFileProvider {
+public:
+    virtual ~IFileProvider() = default;
+    virtual bool load(const std::wstring& file_path) = 0;
+    // 按路径返回原始二进制
+    virtual MemFile get(const std::wstring& path) const = 0;
+    virtual std::wstring find(const std::wstring& path) = 0;
+};
+
+class ZipProvider : public IFileProvider 
+{
+public:
+    bool load(const std::wstring& file_path) override;
+    MemFile get(const std::wstring& path) const override;
+    std::wstring find(const std::wstring& path);
+private:
+    mz_zip_archive m_zip = {};
+    ZipIndexW m_zipIndex;
+};
+
+class LocalFileProvider : public IFileProvider
+{
+    bool load(const std::wstring& file_path) override { return true; };
+    // 按路径返回原始二进制
+    MemFile get(const std::wstring& path) const override;
+    std::wstring find(const std::wstring& path) { return L""; }
+};
+
+
+class EPUBParser
+{
+public:
+    bool load(std::shared_ptr<IFileProvider> fp);
+private:
+    bool parse_ocf();
+    bool parse_opf();
+    bool parse_toc();
+    static std::wstring extract_text(const tinyxml2::XMLElement* a);
+
+    // 递归解析 EPUB3-Nav <ol>
+    void parse_nav_list(tinyxml2::XMLElement* ol, int level,
+        const std::string& opf_dir,
+        std::vector<OCFNavPoint>& out);
+
+
+    // 递归解析 NCX <navPoint>
+    void parse_ncx_points(tinyxml2::XMLElement* navPoint, int level,
+        const std::string& opf_dir,
+        std::vector<OCFNavPoint>& out);
+    std::shared_ptr<IFileProvider> m_fp;
+    OCFPackage m_ocf_pkg;
 };
