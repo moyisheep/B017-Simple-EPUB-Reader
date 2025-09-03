@@ -13,7 +13,7 @@ HINSTANCE g_hInst;
 std::shared_ptr<SimpleContainer> g_container;
 std::shared_ptr<SimpleContainer> g_tooltip_container;
 std::shared_ptr<EPUBBook>  g_book;
-Paginator g_pg;
+
 Gdiplus::Image* g_pSplashImg = nullptr;
 std::future<void> g_parse_task;
 enum class StatusBar { INFO = 0, FONT = 1 };
@@ -47,8 +47,9 @@ std::set<std::wstring> g_activeFonts;
 
 std::unique_ptr<AppBootstrap> g_bootstrap;
 std::unique_ptr<ReadingRecorder> g_recorder;
-BookRecord g_record;
+
 static MMRESULT g_tickTimer = 0;   // 0 表示当前没有定时器
+static MMRESULT g_flushTimer = 0;
 int g_center_offset = 0;
 
 std::string g_tootip_css = "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>";
@@ -1138,7 +1139,7 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 void CALLBACK Tick(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
 {
     // 直接在工作线程/回调里刷新
-    if (g_recorder && !g_vd->m_blocks.empty()) { g_recorder->updateRecord(g_record); }
+    if (g_recorder && !g_vd->m_blocks.empty()) { g_recorder->updateRecord(); }
     OutputDebugStringA("定时器触发\n");
     g_tickTimer = 0;
 }
@@ -1162,20 +1163,25 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 
   
         int doc_x = x - g_center_offset;
-        int doc_y = y + g_scrollY;
+        int doc_y = y + g_offsetY;
         litehtml::position::vector redraw_boxes;
         g_container->m_doc->on_lbutton_down(doc_x, doc_y, 0, 0, redraw_boxes);
         break;
     }
     case WM_LBUTTONUP:
     {
+        // 更新阅读记录
+        if (!g_tickTimer)
+        {
+            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
+        }
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
         //g_book->hide_tooltip();
         if (!g_container->m_doc) { return 0; }
 
         int doc_x = x - g_center_offset;
-        int doc_y = y + g_scrollY;
+        int doc_y = y + g_offsetY;
         litehtml::position::vector redraw_boxes;
         g_container->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxes);
 
@@ -1183,7 +1189,11 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSEMOVE:
     {
-
+        // 更新阅读记录
+        if (!g_tickTimer)
+        {
+            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
+        }
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
 
@@ -1222,7 +1232,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         if (sel) {
             std::string cssSel = "[id=\"" + w2a(sel) + "\"]";
             if (auto el = g_container->m_doc->root()->select_one(cssSel.c_str())) {
-                g_scrollY = el->get_placement().y;
+                g_offsetY = el->get_placement().y;
             }
             free(sel);          // 对应 _wcsdup
         }
@@ -1263,6 +1273,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 
         return 0;
     }
+
     case WM_VSCROLL:
     {
         RECT rc;
@@ -1377,8 +1388,10 @@ void UpdateCache()
     g_center_offset = std::max((w - g_cfg.document_width) * 0.5, 0.0);
 }
 
-inline void DumpBookRecord(const BookRecord& r)
+inline void DumpBookRecord()
 {
+    if (!g_recorder || g_recorder->m_book_record.id < 0) { return; }
+    auto& r = g_recorder->m_book_record;
     std::wostringstream oss;            // ← 宽字符流
     oss << std::boolalpha;
     oss << L"===== BookRecord Dump =====\n";
@@ -1406,6 +1419,7 @@ inline void DumpBookRecord(const BookRecord& r)
     oss << L"============================\n";
 
     OutputDebugStringW(oss.str().c_str());   // ← 宽字符版本
+    OutputDebugStringW((L"\nTotal Read Time (s): " + std::to_wstring(g_recorder->getTotalTime()) + L"\n").c_str());
 }
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1433,10 +1447,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
   
-        g_pg.clear();              // 如果你 Paginator 有 clear() 就调
+
         g_container->clear();
         g_container->m_canvas->clear();
         g_book->clear();
+        g_toc->clear();
         InvalidateRect(g_hView, nullptr, true);
         InvalidateRect(g_hwndToc, nullptr, true);
 
@@ -1479,14 +1494,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
      
         }
         g_vd->clear();
-        g_record = g_recorder->openBook(w2a(g_book->m_file_path));
-        DumpBookRecord(g_record);
-        auto spine_id = g_record.lastSpineId;
-        g_offsetY = g_record.lastOffset;
+        g_recorder->flush();
+        g_recorder->openBook(w2a(g_book->m_file_path));
+        auto& record = g_recorder->m_book_record;
+        DumpBookRecord();
+        auto spine_id = record.lastSpineId;
+        g_offsetY = record.lastOffset;
+
         g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
-   
         g_states.needRelayout.store(true);
-  
         g_vd->load_book(g_book, g_container, g_cfg.document_width);
         g_vd->load_html(g_last_html_path);
 
@@ -1636,7 +1652,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_DESTROY: {
-
+        g_recorder->flush();
         PostQuitMessage(0);
         return 0;
     }
@@ -2094,27 +2110,29 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
     std::string  id = (pos == std::wstring::npos) ? "" :
         w2a(whref.substr(pos + 1));
 
-
-    g_vd->load_book(g_book, g_container, g_cfg.document_width);
-    g_states.needRelayout.store(true);
-    g_vd->clear();
-    g_vd->load_html(file_path);
-    //std::string html = g_book->load_html(file_path.c_str());
-    //g_book->init_doc(html);
-    //g_states.needRelayout.store(true, std::memory_order_release);
-    g_last_html_path = file_path;
-    UpdateCache();
+    if (file_path != g_last_html_path)
+    {
+        g_vd->load_book(g_book, g_container, g_cfg.document_width);
+        g_states.needRelayout.store(true);
+        g_vd->clear();
+        g_vd->load_html(file_path);
+        //std::string html = g_book->load_html(file_path.c_str());
+        //g_book->init_doc(html);
+        //g_states.needRelayout.store(true, std::memory_order_release);
+        g_last_html_path = file_path;
+        UpdateCache();
+    }
     //SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
 
 
 /* 3. 跳转到锚点 */
-//if (!id.empty())
-//{
-//    std::wstring cssSel = a2w(id);   // 转成宽字符
-//    // WM_APP + 3 约定为“跳转到锚点选择器”
-//    PostMessageW(g_hView, WM_EPUB_ANCHOR,
-//        reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
-//}
+    if (!id.empty())
+    {
+        std::wstring cssSel = a2w(id);   // 转成宽字符
+        // WM_APP + 3 约定为“跳转到锚点选择器”
+        PostMessageW(g_hView, WM_EPUB_ANCHOR,
+            reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
+    }
     InvalidateRect(g_hView, nullptr, true);
     UpdateWindow(g_hWnd);
 }
@@ -2283,7 +2301,7 @@ void SimpleContainer::on_anchor_click(const char* url,
     if (url[0] == '#')
     {
 
-        std::wstring cssSel = a2w(url);   // 转成宽字符
+        std::wstring cssSel = a2w(url + 1);   // 去掉开头的 '#'  
         // WM_APP + 3 约定为“跳转到锚点选择器”
         PostMessageW(g_hView, WM_EPUB_ANCHOR,
             reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
@@ -4806,63 +4824,7 @@ std::string EPUBBook::get_anchor_html(litehtml::document* doc,
     return html;
 }
 
-void Paginator::load(litehtml::document* doc, int w, int h)
-{
-    m_doc = doc;
 
-    m_w = w;
-    m_h = h;
-    g_maxScroll = 0;
-    if (!m_doc) return;
-
-    g_maxScroll = m_doc->height();
-}
-void Paginator::render(ICanvas* canvas, int scrollY)
-{
-    if (!canvas || !m_doc) return;
-    //if (g_scrollY > g_maxScroll)
-    //{
-    //    int id = get_id_by_href(g_currentHtmlPath);
-    //    if (id >= 0) {
-    //        id += 1;
-    //        std::wstring html = get_href_by_id(id);
-    //        if (!html.empty())
-    //        {
-    //            g_book->OnTreeSelChanged(html.c_str());
-    //        }
-    //    }
-    //    return;
-    //}
-    //if (g_scrollY < 0)
-    //{
-    //    int id = get_id_by_href(g_currentHtmlPath);
-    //    if (id >= 0) {
-    //        id -= 1;
-    //        std::wstring html = get_href_by_id(id);
-    //        if (!html.empty())
-    //        {
-    //            g_book->OnTreeSelChanged(html.c_str());
-    //        }
-    //    }
-    //    return;
-    //}
-    int render_width = g_cfg.document_width;
-    if (g_states.needRelayout.exchange(false)) {
-        g_container->m_doc->render(g_cfg.document_width, litehtml::render_all);
-    }
-    g_center_offset = std::max((m_w - render_width) * 0.5, 0.0);
-
-    //canvas->BeginDraw();
-    //litehtml::position clip(g_center_offset, 0, g_cfg.document_width, m_h);
-    //m_doc->draw(g_container->m_canvas->getContext(),
-    //    g_center_offset, -g_scrollY, &clip);
-    //canvas->EndDraw();
-}
-void Paginator::clear() {
-    m_doc = nullptr;
-    m_w = m_h = 0;
-    g_maxScroll = 0;
-}
 
 std::set<std::wstring> D2DBackend::getCurrentFonts() {
     std::set<std::wstring> out;
@@ -5037,6 +4999,7 @@ SimpleContainer::SimpleContainer(HWND hwnd)
 
 SimpleContainer::~SimpleContainer()
 {
+    clear();
 }
 
 void SimpleContainer::resize(int w, int h)
@@ -5373,6 +5336,15 @@ void D2DBackend::resize(int width, int height) {
 
 
 
+
+VirtualDoc::VirtualDoc()
+{
+}
+
+VirtualDoc::~VirtualDoc()
+{
+    clear();
+}
 
 void VirtualDoc::load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width)
 {
@@ -5726,7 +5698,7 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
     {
         m_current_id = p.spine_id;
         std::wstring href = get_href_by_id(m_current_id);
-        g_toc->SetHighlightByHref(href);
+        //g_toc->SetHighlightByHref(href);
     }
     return m_doc;
 }
@@ -5759,6 +5731,7 @@ void VirtualDoc::clear()
 {
     m_blocks.clear();
     g_offsetY = 0;
+    m_doc.reset();
 }
 
 
@@ -5769,17 +5742,28 @@ static int64_t nowUs() {
 }
 
 /* ---------- 构造/析构 ---------- */
-ReadingRecorder::ReadingRecorder() { initDB(); }
-ReadingRecorder::~ReadingRecorder() { if (m_db) sqlite3_close(m_db); }
+ReadingRecorder::ReadingRecorder() 
+{ 
+    initDB(); 
+    m_book_record = {};
+    m_time_frag = {};
+}
+ReadingRecorder::~ReadingRecorder() 
+{ 
+    if (m_dbBook) sqlite3_close(m_dbBook); 
+    if (m_dbTime) sqlite3_close(m_dbTime);
+}
 
 /* ---------- 初始化数据库 ---------- */
 void ReadingRecorder::initDB() {
     namespace fs = std::filesystem;
     fs::create_directories("data");
-    if (sqlite3_open("data/Books.db", &m_db) != SQLITE_OK)
+
+    /* ---------- Books.db ---------- */
+    if (sqlite3_open("data/Books.db", &m_dbBook) != SQLITE_OK)
         throw std::runtime_error("sqlite open failed");
 
-    sqlite3_exec(m_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(m_dbBook, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     const char* sql = R"(
         CREATE TABLE IF NOT EXISTS books(
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5794,6 +5778,7 @@ void ReadingRecorder::initDB() {
             line_height_mul  REAL    DEFAULT 0.0,
             doc_width        INTEGER DEFAULT 0,
             total_time_s     INTEGER DEFAULT 0,
+            first_open_us    INTEGER DEFAULT 0,
             last_open_us     INTEGER DEFAULT 0,
             enableCSS        INTEGER DEFAULT 1,
             enableJS         INTEGER DEFAULT 0,
@@ -5805,17 +5790,39 @@ void ReadingRecorder::initDB() {
             displayScroll    INTEGER DEFAULT 1
         );
     )";
-    sqlite3_exec(m_db, sql, nullptr, nullptr, nullptr);
+    sqlite3_exec(m_dbBook, sql, nullptr, nullptr, nullptr);
+
+    /* ---------- Time.db ---------- */
+    if (sqlite3_open("data/Time.db", &m_dbTime) != SQLITE_OK)
+        throw std::runtime_error("sqlite open Time.db failed");
+    sqlite3_exec(m_dbTime, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+
+    const char* sqlTime = R"(
+        CREATE TABLE IF NOT EXISTS reading_time(
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            path     TEXT,
+            title         TEXT,
+            authors       TEXT,
+            spine_id      INTEGER,
+            current_chapter TEXT,
+            start_time    REAL,
+            end_time      REAL,
+            duration      INTEGER
+        );
+    )";
+    sqlite3_exec(m_dbTime, sqlTime, nullptr, nullptr, nullptr);
 }
 
 /* ---------- 打开书 ---------- */
-BookRecord ReadingRecorder::openBook(const std::string absolutePath) {
+void ReadingRecorder::openBook(const std::string absolutePath) {
+    m_book_record = {};
+    m_time_frag = {};
     BookRecord rec;
     rec.path = absolutePath;
 
     const char* select = "SELECT * FROM books WHERE path=?;";
     sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(m_db, select, -1, &stmt, nullptr);
+    sqlite3_prepare_v2(m_dbBook, select, -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, absolutePath.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -5835,49 +5842,68 @@ BookRecord ReadingRecorder::openBook(const std::string absolutePath) {
         rec.lineHeightMul = static_cast<float>(sqlite3_column_double(stmt, 9));
         rec.docWidth = sqlite3_column_int(stmt, 10);
         rec.totalTime = sqlite3_column_int(stmt, 11);
-        rec.lastOpenTimestamp = sqlite3_column_int64(stmt, 12);
-        rec.enableCSS = sqlite3_column_int(stmt, 13);
-        rec.enableJS = sqlite3_column_int(stmt, 14);
-        rec.enableGlobalCSS = sqlite3_column_int(stmt, 15);
-        rec.enablePreHTML = sqlite3_column_int(stmt, 16);
-        rec.displayTOC = sqlite3_column_int(stmt, 17);
-        rec.displayStatus = sqlite3_column_int(stmt, 18);
-        rec.displayMenu = sqlite3_column_int(stmt, 19);
-        rec.displayScroll = sqlite3_column_int(stmt, 20);
+        rec.lastOpenTimestamp = sqlite3_column_int64(stmt, 13);
+        rec.enableCSS = sqlite3_column_int(stmt, 14);
+        rec.enableJS = sqlite3_column_int(stmt, 15);
+        rec.enableGlobalCSS = sqlite3_column_int(stmt, 16);
+        rec.enablePreHTML = sqlite3_column_int(stmt, 17);
+        rec.displayTOC = sqlite3_column_int(stmt, 18);
+        rec.displayStatus = sqlite3_column_int(stmt, 19);
+        rec.displayMenu = sqlite3_column_int(stmt, 20);
+        rec.displayScroll = sqlite3_column_int(stmt, 21);
     }
     else {
         // 新书：用当前 g_book 状态插入
         const char* insert = R"(
-            INSERT INTO books(path, last_open_us)
-            VALUES(?,?);
+            INSERT INTO books(path, first_open_us, last_open_us)
+            VALUES(?, ?, ?);
         )";
-        sqlite3_prepare_v2(m_db, insert, -1, &stmt, nullptr);
+        sqlite3_prepare_v2(m_dbBook, insert, -1, &stmt, nullptr);
         sqlite3_bind_text(stmt, 1, absolutePath.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_int64(stmt, 2, nowUs());
+        sqlite3_bind_int64(stmt, 3, nowUs());
         sqlite3_step(stmt);
 
-        rec.id = sqlite3_last_insert_rowid(m_db);
+        rec.id = sqlite3_last_insert_rowid(m_dbBook);
 
     }
     sqlite3_finalize(stmt);
 
     // 更新打开次数 & 最后打开时间
     const char* update = "UPDATE books SET open_count=open_count+1, last_open_us=? WHERE id=?;";
-    sqlite3_prepare_v2(m_db, update, -1, &stmt, nullptr);
+    sqlite3_prepare_v2(m_dbBook, update, -1, &stmt, nullptr);
     sqlite3_bind_int64(stmt, 1, nowUs());
     sqlite3_bind_int64(stmt, 2, rec.id);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    return rec;
+    m_book_record =  std::move(rec);
+}
+int64_t ReadingRecorder::getTotalTime()
+{
+    const char* sql = "SELECT COALESCE(SUM(duration),0) FROM reading_time;";
+    sqlite3_stmt* stmt = nullptr;
+    int64_t totalUs = 0;
+
+    if (sqlite3_prepare_v2(m_dbTime, sql, -1, &stmt, nullptr) == SQLITE_OK)
+    {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            totalUs = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return totalUs / 1'000'000;   // 返回秒
+}
+/* ---------- 写入 ---------- */
+void ReadingRecorder::flush() {
+    if (m_book_record.id < 0) return;   // 无效记录
+
+    flushBookRecord();
+    flushTimeRecord();
 }
 
-/* ---------- 关闭书 ---------- */
-void ReadingRecorder::closeBook(const BookRecord& rec) {
-    if (rec.id < 0) return;   // 无效记录
-
-
-
+void ReadingRecorder::flushBookRecord()
+{
+    auto& rec = m_book_record;
     const char* sql = R"(
         UPDATE books SET
             title           = ?,
@@ -5888,7 +5914,7 @@ void ReadingRecorder::closeBook(const BookRecord& rec) {
             font_size       = ?,
             line_height_mul = ?,
             doc_width       = ?, 
-            total_time_s    = total_time_s + ?,
+            total_time_s    = ?,
             enableCSS       = ?,
             enableJS        = ?,
             enableGlobalCSS = ?,
@@ -5900,7 +5926,7 @@ void ReadingRecorder::closeBook(const BookRecord& rec) {
         WHERE id = ?;
     )";
     sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    sqlite3_prepare_v2(m_dbBook, sql, -1, &stmt, nullptr);
 
     sqlite3_bind_text(stmt, 1, rec.title.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, rec.author.c_str(), -1, SQLITE_STATIC);
@@ -5924,48 +5950,193 @@ void ReadingRecorder::closeBook(const BookRecord& rec) {
     sqlite3_finalize(stmt);
 }
 
-
-void ReadingRecorder::updateRecord(BookRecord& record)
+void ReadingRecorder::flushTimeRecord()
 {
-    if (g_book && record.id > 0)
+    if (m_time_frag.empty()) return;
+
+    /* 0. 先把缓存拿出来，防止 flush 期间又被写入 */
+    std::vector<timeFragment> batch = std::move(m_time_frag);
+    m_time_frag.clear();                 // 立即清空原缓存
+
+    /* 1. 按时间升序 */
+    std::sort(batch.begin(), batch.end(),
+        [](const timeFragment& a, const timeFragment& b)
+        { return a.timestamp < b.timestamp; });
+
+    /* 2. 事务开始 */
+    char* err = nullptr;
+    if (sqlite3_exec(m_dbTime, "BEGIN;", nullptr, nullptr, &err) != SQLITE_OK)
     {
-        record.displayMenu = g_cfg.displayMenuBar;
-        record.displayScroll = g_cfg.displayScrollBar;
-        record.displayStatus = g_cfg.displayStatusBar;
-        record.displayTOC = g_cfg.displayTOC;
+        OutputDebugStringA(("BEGIN failed: " + std::string(err) + "\n").c_str());
+        sqlite3_free(err);
+        return;
+    }
 
-        record.enableCSS = g_cfg.enableCSS;
-        record.enableGlobalCSS = g_cfg.enableGlobalCSS;
-        record.enableJS = g_cfg.enableJS;
-        record.enablePreHTML = g_cfg.enablePreprocessHTML;
+    constexpr int64_t MERGE_THRESHOLD_US = 2'000'000;
 
-        record.fontSize = g_cfg.default_font_size;
-        record.lineHeightMul = g_cfg.line_height_multiplier;
-        record.docWidth = g_cfg.document_width;
-
-        if (g_vd) {
-            ScrollPosition p = g_vd->get_scroll_position();
-            record.lastSpineId = p.spine_id;
-            record.lastOffset = p.offset;
+    for (const timeFragment& frag : batch)
+    {
+        /* 3. 查询最近一条 */
+        const char* sqlSel = R"(
+            SELECT id, end_time, duration
+            FROM reading_time
+            WHERE path = ? AND current_chapter = ? AND spine_id = ?
+            ORDER BY end_time DESC
+            LIMIT 1;
+        )";
+        sqlite3_stmt* sel = nullptr;
+        if (sqlite3_prepare_v2(m_dbTime, sqlSel, -1, &sel, nullptr) != SQLITE_OK)
+        {
+            OutputDebugStringA(("prepare SELECT failed\n"));
+            continue;
         }
+        sqlite3_bind_text(sel, 1, frag.path.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(sel, 2, frag.chapter.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(sel, 3, frag.spine_id);
 
-        if (record.title.empty())
+        bool merged = false;
+        if (sqlite3_step(sel) == SQLITE_ROW)
+        {
+            int     oldId = sqlite3_column_int(sel, 0);
+            int64_t oldEnd = sqlite3_column_int64(sel, 1);
+            if (frag.timestamp - oldEnd <= MERGE_THRESHOLD_US)
+            {
+                const char* sqlUpd = R"(
+                    UPDATE reading_time
+                    SET end_time = ?,
+                        duration = duration + (? - end_time)
+                    WHERE id = ?;
+                )";
+                sqlite3_stmt* upd = nullptr;
+                if (sqlite3_prepare_v2(m_dbTime, sqlUpd, -1, &upd, nullptr) == SQLITE_OK)
+                {
+                    sqlite3_bind_int64(upd, 1, frag.timestamp);
+                    sqlite3_bind_int64(upd, 2, frag.timestamp);
+                    sqlite3_bind_int(upd, 3, oldId);
+                    if (sqlite3_step(upd) != SQLITE_DONE)
+                        OutputDebugStringA(("UPDATE step failed\n"));
+                    sqlite3_finalize(upd);
+                }
+                else
+                {
+                    OutputDebugStringA(("prepare UPDATE failed\n"));
+                }
+                merged = true;
+            }
+        }
+        sqlite3_finalize(sel);
+
+        if (!merged)
+        {
+            const char* sqlIns = R"(
+                INSERT INTO reading_time
+                (path, title, authors, spine_id, current_chapter,
+                 start_time, end_time, duration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            )";
+            sqlite3_stmt* ins = nullptr;
+            if (sqlite3_prepare_v2(m_dbTime, sqlIns, -1, &ins, nullptr) == SQLITE_OK)
+            {
+                sqlite3_bind_text(ins, 1, frag.path.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_text(ins, 2, frag.title.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_text(ins, 3, frag.author.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_int(ins, 4, frag.spine_id);
+                sqlite3_bind_text(ins, 5, frag.chapter.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_int64(ins, 6, frag.timestamp);
+                sqlite3_bind_int64(ins, 7, frag.timestamp);
+                sqlite3_bind_int64(ins, 8, 0);
+
+                if (sqlite3_step(ins) != SQLITE_DONE)
+                    OutputDebugStringA(("INSERT step failed\n"));
+                sqlite3_finalize(ins);
+            }
+            else
+            {
+                OutputDebugStringA(("prepare INSERT failed\n"));
+            }
+        }
+    }
+
+    /* 4. 提交事务 */
+    if (sqlite3_exec(m_dbTime, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK)
+    {
+        OutputDebugStringA(("COMMIT failed: " + std::string(err) + "\n").c_str());
+        sqlite3_free(err);
+    }
+}
+void CALLBACK OnFlush(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
+{
+    // 直接在工作线程/回调里刷新
+    if (g_recorder) { g_recorder->flush(); }
+    g_flushTimer = 0;
+}
+void ReadingRecorder::updateRecord()
+{
+    if (m_book_record.id < 0) { return; }
+ 
+    if (g_book)
+    {
+        m_book_record.displayMenu = g_cfg.displayMenuBar;
+        m_book_record.displayScroll = g_cfg.displayScrollBar;
+        m_book_record.displayStatus = g_cfg.displayStatusBar;
+        m_book_record.displayTOC = g_cfg.displayTOC;
+
+        m_book_record.enableCSS = g_cfg.enableCSS;
+        m_book_record.enableGlobalCSS = g_cfg.enableGlobalCSS;
+        m_book_record.enableJS = g_cfg.enableJS;
+        m_book_record.enablePreHTML = g_cfg.enablePreprocessHTML;
+
+        m_book_record.fontSize = g_cfg.default_font_size;
+        m_book_record.lineHeightMul = g_cfg.line_height_multiplier;
+        m_book_record.docWidth = g_cfg.document_width;
+        m_book_record.totalTime += 1;
+
+
+        if (m_book_record.title.empty())
         {
             auto titIt = g_book->ocf_pkg_.meta.find(L"dc:title");
-            record.title = titIt != g_book->ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
+            m_book_record.title = titIt != g_book->ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
         }
-        if(record.author.empty())
+        if(m_book_record.author.empty())
         {
             auto authIt = g_book->ocf_pkg_.meta.find(L"dc:creator");
-            record.author = authIt != g_book->ocf_pkg_.meta.end() ? w2a(authIt->second) : "";
+            m_book_record.author = authIt != g_book->ocf_pkg_.meta.end() ? w2a(authIt->second) : "";
         }
 
-
-        closeBook(record);
+        timeFragment tf;
+        tf.path = m_book_record.path;
+        tf.title = m_book_record.title;
+        tf.author = m_book_record.author;
+        tf.timestamp = nowUs();
+        
+        if (g_vd) {
+            ScrollPosition p = g_vd->get_scroll_position();
+            m_book_record.lastSpineId = p.spine_id;
+            m_book_record.lastOffset = p.offset;
+            
+            tf.spine_id = p.spine_id;
+            tf.chapter = w2a(g_book->get_chapter_name_by_id(p.spine_id));
+        }
+        m_time_frag.push_back(std::move(tf));
+        if (!g_flushTimer)
+        {
+            g_flushTimer = timeSetEvent(g_cfg.record_flush_interval_ms, 0, OnFlush, 0, TIME_ONESHOT);
+        }
 
     }
 }
 
+void TocPanel::clear()
+{
+    nodes_.clear();
+    roots_.clear();
+    vis_.clear();      // 可见行索引
+    lineH_ = 20;
+    scrollY_ = 0;
+    totalH_ = 0;
+    selLine_ = -1;
+
+}
 
 void TocPanel::GetWindow(HWND hwnd)
 {
@@ -6235,8 +6406,12 @@ void TocPanel::OnVScroll(int code, int pos)
 }
 void TocPanel::OnMouseWheel(int delta)
 {
-    scrollY_ -= delta;
-    OnVScroll(SB_THUMBPOSITION, scrollY_);
+    // 每 120 单位滚一行；可根据需要改成多行或整页
+    int lines = delta / WHEEL_DELTA;          // WHEEL_DELTA = 120
+    for (int i = 0; i < abs(lines); ++i)
+    {
+        OnVScroll(lines > 0 ? SB_LINEUP : SB_LINEDOWN, 0);
+    }
 }
 
 void EPUBBook::LoadToc()
@@ -6536,3 +6711,39 @@ std::wstring EPUBParser::extract_text(const tinyxml2::XMLElement* a)
     return a2w(plain);   // "I: The Meadow"
 }
 
+std::wstring EPUBBook::get_chapter_name_by_id(int spine_id)
+{
+    // 从给定 spine_id 开始，依次递减查找
+    for (int id = spine_id; id >= 0; --id)
+    {
+        // 1. 取出 spine 对应的 ref
+        if (id >= static_cast<int>(ocf_pkg_.spine.size()))
+            continue;
+
+        std::wstring href = ocf_pkg_.spine[id].href;
+
+
+        if (href.empty())
+            continue;
+
+        // 3. 去掉锚点
+        size_t pos = href.find(L'#');
+        if (pos != std::wstring::npos)
+            href = href.substr(0, pos);
+
+        // 4. 与 toc 中的 href比对（同样去掉锚点）
+        for (const auto& nav : ocf_pkg_.toc)
+        {
+            std::wstring nav_href = nav.href;
+            pos = nav_href.find(L'#');
+            if (pos != std::wstring::npos)
+                nav_href = nav_href.substr(0, pos);
+
+            if (nav_href == href)
+                return nav.label;
+        }
+    }
+
+    // 遍历到 id=0 仍未找到
+    return L"";
+}

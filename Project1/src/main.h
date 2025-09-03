@@ -443,17 +443,7 @@ private:
 };
 
 
-class Paginator {
-public:
-    void load(litehtml::document* doc, int w, int h);
-    void render(ICanvas* canvas, int scrollY);   // 关键：不再区分 HDC / RT
-    void clear();
-private:
-    litehtml::document* m_doc = nullptr;
-    int m_w = 0, m_h = 0;
 
-
-};
 
 // -------------- 新增数据结构 --------------
 struct OCFItem {
@@ -552,7 +542,7 @@ public:
     void parse_opf_(void);   // 解析 OPF
     void parse_toc_(void);                        // 解析 TOC
 
-
+    std::wstring get_chapter_name_by_id(int spine_id);
     void OnTreeSelChanged(const wchar_t* href);
     bool load(const wchar_t* epub_path);
     MemFile read_zip(const wchar_t* file_name) const;
@@ -611,6 +601,7 @@ struct AppSettings {
     bool displayMenuBar = true;
     bool displayScrollBar = true;
     int record_update_interval_ms = 1000;
+    int record_flush_interval_ms = 10 * 1000;
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Segoe UI";
     int default_font_size = 16;
@@ -758,6 +749,8 @@ struct HtmlBlock {
 
 class VirtualDoc {
 public:
+    VirtualDoc();
+    ~VirtualDoc();
     void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
     void set_render_width(int width);
     litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
@@ -765,17 +758,18 @@ public:
     void clear();
     ScrollPosition get_scroll_position();
     std::vector<HtmlBlock> m_blocks;
+
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
-
+    int get_id_by_href(std::wstring& href);
+    std::wstring get_href_by_id(int spine_id);
     std::string get_head(std::string& html);
     std::vector<BodyBlock> get_body_blocks(std::string& html, int spine_id = 0, size_t max_chunk_bytes = 4*1024);
     void serialize_node(const GumboNode* node, std::ostream& out);
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
-    int get_id_by_href(std::wstring& href);
-    std::wstring get_href_by_id(int spine_id);
+
 
 
     bool insert_next_chapter();
@@ -890,19 +884,39 @@ struct BookRecord {
     bool        displayScroll = true;
 };
 
+struct timeFragment
+{
+    std::string path;
+    std::string title;
+    std::string author;
+    int       spine_id;
+    std::string chapter;
+    int64_t timestamp;
+};
+
 class ReadingRecorder {
 public:
     ReadingRecorder();
     ~ReadingRecorder();
 
-    BookRecord openBook(const std::string absolutePath); // 返回记录（读或建）
-    void       closeBook(const BookRecord& rec);            // 一次性写回
+    void openBook(const std::string absolutePath); // 返回记录（读或建）
+    void flush();            // 一次性写回
+    void flushBookRecord();
+    void flushTimeRecord();
+    void updateRecord();
+    int64_t getTotalTime();
 
-    void updateRecord(BookRecord& record);
-
+    BookRecord m_book_record;
 private:
     void initDB();
-    sqlite3* m_db = nullptr;
+
+    sqlite3* m_dbBook = nullptr;
+    sqlite3* m_dbTime = nullptr;
+
+    std::vector<timeFragment> m_time_frag;
+
+
+
 };
 
 
@@ -913,7 +927,7 @@ public:
 
     TocPanel();
     ~TocPanel();
-
+    void clear();
     void GetWindow(HWND hwnd);
 
     void Load(const std::vector<OCFNavPoint>& flatToc);
