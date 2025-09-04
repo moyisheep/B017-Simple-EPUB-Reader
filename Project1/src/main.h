@@ -4,7 +4,6 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 
-#define WM_LOAD_ERROR (WM_USER + 3)
 #include <windows.h>
 #include <windowsx.h>   // 加这一行
 #include <mmsystem.h>
@@ -596,18 +595,31 @@ struct AppSettings {
     bool enableGlobalCSS = false;
     bool enablePreprocessHTML = true;
     bool enableHoverPreview = true;
+
     bool displayTOC = true;
     bool displayStatusBar = true;
     bool displayMenuBar = true;
     bool displayScrollBar = true;
+    bool displayToolbar = true;
+
     int record_update_interval_ms = 1000;
     int record_flush_interval_ms = 10 * 1000;
+    int tooltip_delay_ms = 200;
+
+    int font_size = 16;
+    float line_height = 1.5f; //倍数
+    int document_width = 600;
+
+    int default_font_size = 16;
+    float default_line_height = 1.5;
+    int default_document_width = 800;
+
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Segoe UI";
-    int default_font_size = 16;
+
     float line_height_multiplier = 1.5;
     int tooltip_width = 350;
-    int document_width = 600;
+
     int split_space_height = 300; // 单位:px
     std::wstring default_serif = L"Georgia";
     std::wstring default_sans_serif = L"Verdana";
@@ -752,13 +764,13 @@ public:
     VirtualDoc();
     ~VirtualDoc();
     void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
-    void set_render_width(int width);
+
     litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
     void load_html(std::wstring& href);
     void clear();
     ScrollPosition get_scroll_position();
     std::vector<HtmlBlock> m_blocks;
-
+    void reload();
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -769,7 +781,7 @@ private:
     void serialize_node(const GumboNode* node, std::ostream& out);
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
-
+    std::wstring m_current_href;
 
 
     bool insert_next_chapter();
@@ -784,7 +796,7 @@ private:
     std::vector<OCFRef> m_spine;
     std::shared_ptr<EPUBBook> m_book;
     std::shared_ptr<SimpleContainer> m_container;
-    int m_render_width;
+
     int m_current_id = 0;
 
 
@@ -1020,4 +1032,56 @@ private:
         std::vector<OCFNavPoint>& out);
     std::shared_ptr<IFileProvider> m_fp;
     OCFPackage m_ocf_pkg;
+};
+
+struct GetDocParam
+{
+    int        client_h;
+    int        scrollY;
+    int        offsetY;
+    HWND       notify_hwnd;   // 通知窗口
+};
+
+
+class AccelManager {
+public:
+    explicit AccelManager(HWND h) : m_hwnd(h) {}
+
+    // 添加/更新一条快捷键
+    void set(WORD cmd, BYTE fVirt, WORD key) {
+        // 先删除同命令的旧项
+        erase(cmd);
+        m_entries.push_back({ fVirt, key, cmd });
+        rebuild();
+    }
+    void add(WORD cmd, BYTE fVirt, WORD key) {
+        m_entries.push_back({ fVirt, key, cmd });
+        rebuild();
+    }
+    // 删除某命令
+    void erase(WORD cmd) {
+        m_entries.erase(
+            std::remove_if(m_entries.begin(), m_entries.end(),
+                [=](const ACCEL& a) { return a.cmd == cmd; }),
+            m_entries.end());
+        rebuild();
+    }
+
+    // 在消息循环里调用
+    bool translate(MSG* m) {
+        return m_hAccel && TranslateAccelerator(m_hwnd, m_hAccel, m);
+    }
+
+private:
+    void rebuild() {
+        if (m_hAccel) DestroyAcceleratorTable(m_hAccel);
+        m_hAccel = m_entries.empty()
+            ? nullptr
+            : CreateAcceleratorTable(m_entries.data(),
+                static_cast<int>(m_entries.size()));
+    }
+
+    std::vector<ACCEL> m_entries;
+    HACCEL m_hAccel = nullptr;
+    HWND m_hwnd;
 };

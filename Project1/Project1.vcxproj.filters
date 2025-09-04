@@ -15,58 +15,32 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="EpubBook.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="MainFrame.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="SettingsManager.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="ReadingRecord.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="ThemeDialog.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="Logger.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="ClientHandler.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="FileDropTarget.cpp">
+    <ClCompile Include="src\main.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="EpubBook.h">
+    <ClInclude Include="src\3rdParty\stb_truetype.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="MainFrame.h">
+    <ClInclude Include="src\main.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="SettingsManager.h">
+    <ClInclude Include="src\resource.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="ReadingRecord.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="ThemeDialog.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="Logger.hpp">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="ClientHandler.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="FileDropTarget.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\resource.rc">
+      <Filter>资源文件</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="src\splash.png">
+      <Filter>资源文件</Filter>
+    </Image>
+    <Image Include="splash.png">
+      <Filter>资源文件</Filter>
+    </Image>
   </ItemGroup>
 </Project>

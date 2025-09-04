@@ -1,30 +1,43 @@
 // Microsoft Visual C++ generated resource script.
 //
 #include "resource.h"
+/////////////////////////////////////////////////////////////////////////////
+// 中文(简体，中国) resources
 
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Menu
+//
 
 IDR_MENU_MAIN MENU
 BEGIN
     POPUP "&设置"
     BEGIN
-        MENUITEM "&启用 EPUB CSS",                      IDM_TOGGLE_CSS, CHECKED
+        MENUITEM "&启用 EPUB CSS",                IDM_TOGGLE_CSS, CHECKED
         MENUITEM "启用 JavaScript(&J)",           IDM_TOGGLE_JS, CHECKED
         MENUITEM "启用 全局 CSS",                   IDM_TOGGLE_GLOBAL_CSS, CHECKED
-        MENUITEM "启用 预处理 HTML",                  IDM_TOGGLE_PREPROCESS_HTML, CHECKED
+        MENUITEM "启用 预处理 HTML",                 IDM_TOGGLE_PREPROCESS_HTML, CHECKED
+        MENUITEM "悬停预览",                        IDM_TOGGLE_HOVER_PREVIEW, CHECKED
     END
     POPUP "&显示"
     BEGIN
-        MENUITEM "目录", IDM_TOGGLE_TOC_WINDOW, CHECKED
-        MENUITEM "状态栏", IDM_TOGGLE_STATUS_WINDOW, CHECKED
-        MENUITEM "滚动条", IDM_TOGGLE_SCROLLBAR_WINDOW, CHECKED
-        MENUITEM "菜单栏", IDM_TOGGLE_MENUBAR_WINDOW, CHECKED
-        MENUITEM "悬停预览", IDM_TOGGLE_HOVER_PREVIEW, CHECKED
+        MENUITEM "目录",                          IDM_TOGGLE_TOC_WINDOW, CHECKED
+        MENUITEM "状态栏",                         IDM_TOGGLE_STATUS_WINDOW, CHECKED
+        MENUITEM "滚动条",                         IDM_TOGGLE_SCROLLBAR_WINDOW, CHECKED
+        MENUITEM "菜单栏",                         IDM_TOGGLE_MENUBAR_WINDOW, CHECKED
     END
-
 END
 
 
 
-IDB_PNG1                PNG                     "splash.png"
+
+IDB_PNG1                PNG                     "C:\\Users\\MoYi-Sheep\\Documents\\Coding_Projects\\VS_Project\\Project1\\Project1\\splash.png"
+
+
+
+
+
 
 

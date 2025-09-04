@@ -30,6 +30,10 @@ constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
 constexpr UINT WM_EPUB_CACHE_UPDATED = WM_APP + 4;
 constexpr UINT WM_EPUB_ANCHOR = WM_APP + 5;
 constexpr UINT WM_EPUB_TOOLTIP = WM_APP + 6;
+constexpr UINT WM_EPUB_NAVIGATE = WM_APP + 7;
+
+constexpr UINT TB_SETBUTTONTEXT(WM_USER + 8);
+constexpr UINT WM_LOAD_ERROR(WM_USER + 9);
 
 // 可随时改
 
@@ -50,6 +54,8 @@ std::unique_ptr<ReadingRecorder> g_recorder;
 
 static MMRESULT g_tickTimer = 0;   // 0 表示当前没有定时器
 static MMRESULT g_flushTimer = 0;
+static MMRESULT g_tooltipTimer = 0;
+
 int g_center_offset = 0;
 
 std::string g_tootip_css = "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>";
@@ -59,6 +65,8 @@ static bool  g_dragging = false;     // 是否正在拖动
 
 // 全局
 std::unique_ptr<TocPanel> g_toc;
+// 1. 在全局或合适位置声明
+
 
 
 static bool isWin10OrLater()
@@ -811,6 +819,23 @@ static std::string insert_global_css(std::string html) {
     }
     return html;
 }
+static std::string inject_css(std::string html)
+{
+    std::ostringstream style;
+    style << "<style>\n"
+        << ":root{font-size:" << g_cfg.font_size << "px;}\n"
+        << "body,p,li,div,h1,h2,h3,h4,h5,h6{line-height:" << g_cfg.line_height << ";}\n"
+        << "</style>\n";
+
+    const std::string& block = style.str();
+    size_t pos = html.find("</head>");
+    if (pos != std::string::npos)
+        html.insert(pos, block);
+    else
+        html.insert(0, "<head>" + block + "</head>");
+
+    return html;
+}
 
 void EnableClearType()
 {
@@ -1149,8 +1174,11 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_SIZE:
     {
-        if (g_container && g_container->m_canvas) {
-            g_container->resize(LOWORD(lp), HIWORD(lp));
+        if (g_container && g_container->m_canvas)
+        {
+            RECT rcClient;
+            GetClientRect(hWnd, &rcClient);   // ← 这才是客户区
+            g_container->resize(rcClient.right, rcClient.bottom);
         }
         return 0;
     }
@@ -1208,13 +1236,13 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_EPUB_CACHE_UPDATED:
     {
-        RECT rc; GetClientRect(g_hView, &rc);
 
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-
-        g_states.isCaching.exchange(false);
-
+        litehtml::document::ptr doc(
+            reinterpret_cast<litehtml::document*>(wp),
+            [](litehtml::document*) {});   // 空删除器，所有权仍在 g_vd
+        g_container->m_doc = doc;
+        
+        g_states.isUpdate.store(true);
         InvalidateRect(g_hView, nullptr, false);
 
         return 0;
@@ -1239,6 +1267,21 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         UpdateCache();
         InvalidateRect(hWnd, nullptr, FALSE);
         UpdateWindow(g_hView);
+
+        return 0;
+    }
+    case WM_EPUB_NAVIGATE:
+    {
+        // 更新阅读记录
+        if (!g_tickTimer)
+        {
+            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
+        }
+
+        wchar_t* url = reinterpret_cast<wchar_t*>(wp);
+        g_book->OnTreeSelChanged(url);  // 现在安全地在主线程执行
+        free(url);
+
 
         return 0;
     }
@@ -1339,7 +1382,6 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_PAINT:
-    {
 
         if (g_container && g_container->m_doc && g_container->m_canvas && g_states.isUpdate.exchange(false))
         {
@@ -1354,7 +1396,6 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         return 0;
-    }
 
     case WM_ERASEBKGND:
         return 1;
@@ -1373,6 +1414,31 @@ ATOM RegisterViewClass(HINSTANCE hInst)
     return RegisterClassW(&wc);
 }
 
+
+DWORD WINAPI GetDocThread(LPVOID lp)
+{
+    auto* p = static_cast<GetDocParam*>(lp);
+
+    // 真正耗时的操作
+    litehtml::document::ptr doc = g_vd->get_doc(
+        p->client_h,
+        p->scrollY,
+        p->offsetY);
+
+    // 把结果 Post 回主线程
+    PostMessageW(p->notify_hwnd,
+        WM_EPUB_CACHE_UPDATED,
+        reinterpret_cast<WPARAM>(doc.get()),   // doc*
+        0);
+
+    delete p;
+    return 0;
+}
+void request_doc_async(int client_h, int& scrollY, int& offsetY)
+{
+    auto* param = new GetDocParam{ client_h, scrollY, offsetY, g_hView };
+    CloseHandle(CreateThread(nullptr, 0, GetDocThread, param, 0, nullptr));
+}
 void UpdateCache()
 {
     if (!g_container || !g_vd || !g_book) return;
@@ -1382,9 +1448,12 @@ void UpdateCache()
     int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
     
+    //request_doc_async(h, g_scrollY, g_offsetY);
     auto doc = g_vd->get_doc(h, g_scrollY, g_offsetY);
     g_container->m_doc = doc;
+
     g_states.isUpdate.store(true);
+
     g_center_offset = std::max((w - g_cfg.document_width) * 0.5, 0.0);
 }
 
@@ -1520,41 +1589,51 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 重新解析当前章节即可
         return 0;
     }
+
     case WM_SIZE:
     {
-        /* 1. StatusBar 高度 */
-        RECT rcStatus, rcClient;
+        RECT rcClient;
         GetClientRect(hwnd, &rcClient);
-        int cyStatus = 0;
-        if (g_cfg.displayStatusBar)
+        const int cx = rcClient.right;
+        int cyClient = rcClient.bottom;
+
+        /* 1. 工具栏高度 */
+        int cyTB = 0;
+
+
+        /* 2. 状态栏高度 */
+        int cySB = 0;
+        if (g_cfg.displayStatusBar && g_hStatus)
         {
+            ShowWindow(g_hStatus, SW_SHOW);
             SendMessage(g_hStatus, WM_SIZE, 0, 0);
             int parts[2] = { 120, -1 };
             SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
-            GetWindowRect(g_hStatus, &rcStatus);
-            ScreenToClient(hwnd, (POINT*)&rcStatus);
-            ScreenToClient(hwnd, (POINT*)&rcStatus + 1);
-            cyStatus = rcStatus.bottom - rcStatus.top;
+            RECT rcSB{};
+            GetWindowRect(g_hStatus, &rcSB);
+            cySB = rcSB.bottom - rcSB.top;
+        }
+        else if (g_hStatus)
+        {
+            ShowWindow(g_hStatus, SW_HIDE);
         }
 
-        /* 2. 剩余可用区域 */
-        int cx = rcClient.right;
-        int cy = rcClient.bottom - cyStatus;
+        /* 3. 剩余可用高度 */
+        const int cy = cyClient - cyTB - cySB;
 
-        /* 3. TOC 宽度 & 竖线 ★ */
-        const int TV_W = g_cfg.displayTOC ? g_splitX : 0;   // ★ 用变量
+        /* 4. 目录宽度 & 竖线 */
+        const int tocW = g_cfg.displayTOC ? g_splitX : 0;
         ShowWindow(g_hwndToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
         ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
 
-        /* 4. 重新摆放子窗口 ★ */
-        MoveWindow(g_hwndToc, 0, 0, TV_W, cy, TRUE);
-        MoveWindow(g_hwndSplit, TV_W, 0, 2, cy, TRUE);   // ★ 2 px 竖线
-        MoveWindow(g_hView, TV_W + 2, 0, cx - TV_W - 2, cy, TRUE);
+        /* 5. 摆放子窗口（Y 起点统一为 cyTB） */
+        MoveWindow(g_hwndToc, 0, cyTB, tocW, cy, TRUE);
+        MoveWindow(g_hwndSplit, tocW, cyTB, 2, cy, TRUE);
+        MoveWindow(g_hView, tocW + 2, cyTB, cx - tocW - 2, cy, TRUE);
 
         UpdateCache();
         SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
-        InvalidateRect(hwnd, nullptr, false);
-        //UpdateWindow(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_LOAD_ERROR: {
@@ -1653,123 +1732,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DESTROY: {
         g_recorder->flush();
+        if (g_tooltipTimer)
+        {
+            timeKillEvent(g_tooltipTimer);
+            g_tooltipTimer = 0;
+        }
         PostQuitMessage(0);
         return 0;
     }
-    //case WM_NOTIFY:
-    //{
-    //    LPNMHDR nm = reinterpret_cast<LPNMHDR>(lp);
-    //    if (nm->hwndFrom != g_hwndTV) break;
-
-    //    switch (nm->code)
-    //    {
-    //    case TVN_GETDISPINFO:
-    //    {
-    //        NMTVDISPINFO* pdi = reinterpret_cast<NMTVDISPINFO*>(lp);
-
-    //        /* 1. 不是真的要文本，直接返回 */
-    //        if (!(pdi->item.mask & TVIF_TEXT) || !pdi->item.pszText)
-    //            break;
-
-    //        /* 2. 取数据 */
-    //        const TVData* data = reinterpret_cast<const TVData*>(pdi->item.lParam);
-    //        if (!data || !data->node || !data->node->nav)
-    //        {
-    //            pdi->item.pszText = const_cast<wchar_t*>(L"");
-    //            break;
-    //        }
-
-    //        /* 3. 直接给指针，零拷贝 */
-    //        pdi->item.pszText = const_cast<wchar_t*>(data->node->nav->label.c_str());
-    //        break;
-    //    }
-
-    //    case TVN_SELCHANGED:
-    //    {
-    //        auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
-    //        TVITEMW tvi{ TVIF_PARAM, pnmtv->itemNew.hItem };
-    //        if (TreeView_GetItem(g_hwndTV, &tvi))
-    //        {
-    //            auto* data = reinterpret_cast<const TVData*>(tvi.lParam);
-    //            if (data && data->node && data->node->nav && !data->node->nav->href.empty())
-    //            {
-    //                g_book->OnTreeSelChanged(data->node->nav->href.c_str());
-    //            }
-    //        }
-    //        break;
-    //    }
-
-    //    case TVN_ITEMEXPANDING:
-    //    {
-    //        auto* pnmtv = reinterpret_cast<NMTREEVIEW*>(lp);
-    //        if (pnmtv->action != TVE_EXPAND) break;
-
-    //        auto* data = reinterpret_cast<TVData*>(pnmtv->itemNew.lParam);
-    //        if (!data || data->inserted) break;   // 已经插过直接返回
-
-    //        HTREEITEM hParent = pnmtv->itemNew.hItem;
-    //        for (size_t idx : data->node->childIdx)
-    //        {
-    //            const TreeNode& child = (*data->all)[idx];
-    //            TVINSERTSTRUCTW tvis{};
-    //            tvis.hParent = hParent;
-    //            tvis.hInsertAfter = TVI_LAST;
-    //            tvis.itemex.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
-    //            tvis.itemex.pszText = LPSTR_TEXTCALLBACKW;
-    //            tvis.itemex.cChildren = child.childIdx.empty() ? 0 : 1;
-    //            auto* childData = new TVData{ &child, data->all };
-    //            tvis.itemex.lParam = reinterpret_cast<LPARAM>(childData);
-    //            TreeView_InsertItem(g_hwndTV, &tvis);
-    //        }
-    //        data->inserted = true;   // 标记已插入
-    //        break;
-    //    }
-    //    break;
-    //    }
-    //}
     case WM_VSCROLL: { return 0; }
     case WM_HSCROLL: { return 0; }
+
     case WM_COMMAND: {
-        switch (LOWORD(wp)) {
-        case IDM_TOGGLE_CSS: {
+        switch (LOWORD(wp))
+        {
+        case IDM_TOGGLE_CSS:
             g_cfg.enableCSS = !g_cfg.enableCSS;
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
                 MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
+            if (g_vd) { g_vd->reload(); }
             break;
-        }
-        case IDM_TOGGLE_JS: {
+     
+        case IDM_TOGGLE_JS:
             g_cfg.enableJS = !g_cfg.enableJS;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
                 MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
-
+            if (g_vd) { g_vd->reload(); }
             break;
-        }
+      
         case IDM_TOGGLE_GLOBAL_CSS:
-        {
             g_cfg.enableGlobalCSS = !g_cfg.enableGlobalCSS;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
                 MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
-
+            if (g_vd) { g_vd->reload(); }
             break;
-        }
+   
         case IDM_TOGGLE_PREPROCESS_HTML:
-        {
             g_cfg.enablePreprocessHTML = !g_cfg.enablePreprocessHTML;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_PREPROCESS_HTML,
                 MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
-
+            if (g_vd) { g_vd->reload(); }
             break;
-        }
+       
 
         case IDM_TOGGLE_HOVER_PREVIEW:
-        {
             g_cfg.enableHoverPreview = !g_cfg.enableHoverPreview;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
                 MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
             break;
-        }
+    
         case IDM_TOGGLE_TOC_WINDOW:
-        {
+   
             g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
                 MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
@@ -1778,9 +1791,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // 让主窗口重新布局
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
-        }
+   
         case IDM_TOGGLE_STATUS_WINDOW:
-        {
+
             g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
                 MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
@@ -1789,9 +1802,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // 让主窗口重新布局
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
-        }
-        break;
+ 
+        case ID_EPUB_RELOAD:
+  
+            if (g_vd) { g_vd->reload(); }
+            break;
+   
+        case ID_FONT_BIGGER:        // Ctrl + '+'
+            g_cfg.font_size = std::min(g_cfg.font_size + 1.0f, 72.0f);   // 上限 72
+            if (g_vd) { g_vd->reload(); }   // 重新加载并排版
+            break;
 
+        case ID_FONT_SMALLER:       // Ctrl + '-'
+            g_cfg.font_size = std::max(g_cfg.font_size - 1.0f, 8.0f);    // 下限 8
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_FONT_RESET:         // Ctrl + '0'
+            g_cfg.font_size = g_cfg.default_font_size;   // 默认字号
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_LINE_HEIGHT_UP:     // Ctrl + Shift + '+'
+            g_cfg.line_height = std::min(g_cfg.line_height + 0.1f, 3.0f);
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_LINE_HEIGHT_DOWN:   // Ctrl + Shift + '-'
+            g_cfg.line_height = std::max(g_cfg.line_height - 0.1f, 1.0f);
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_LINE_HEIGHT_RESET:  // Ctrl + Shift + '0'
+            g_cfg.line_height = g_cfg.default_line_height;  // 默认行高
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_WIDTH_BIGGER:       // Alt + '→'
+            g_cfg.document_width = std::min(g_cfg.document_width + 50.0f, 2000.0f);
+            if (g_vd) { g_vd->reload(); }   // 仅重新排版即可
+            break;
+
+        case ID_WIDTH_SMALLER:      // Alt + '←'
+            g_cfg.document_width = std::max(g_cfg.document_width - 50.0f, 300.0f);
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_WIDTH_RESET:        // Alt + '0'
+            g_cfg.document_width = g_cfg.default_document_width;   // 默认宽度
+            if (g_vd) { g_vd->reload(); }
+            break;
+        break;
         }
     }
     }
@@ -1939,6 +2000,7 @@ void register_thumb_class()
     RegisterClassExW(&wc);
 }
 
+
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
@@ -1978,7 +2040,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     // 放在主窗口 CreateWindow 之后
     g_hStatus = CreateWindowEx(
         0, STATUSCLASSNAME, L"就绪",
-        WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+        WS_CHILD  | SBARS_SIZEGRIP,
         0, 0, 0, 0,           // 位置和大小由 WM_SIZE 调整
         g_hWnd, nullptr, g_hInst, nullptr);
 
@@ -2008,21 +2070,69 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
     g_hwndSplit = CreateWindowExW(
         0, WC_STATICW, nullptr,
-        WS_CHILD | WS_VISIBLE | SS_ETCHEDVERT,
+        WS_CHILD  | SS_ETCHEDVERT,
         200, 0, 2, 600,          // 2 px 宽
         g_hWnd, (HMENU)101, g_hInst, nullptr);
     g_hView = CreateWindowExW(
         0, L"EPUBView", nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
+        WS_CHILD  | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
 
     g_hTooltip = CreateWindowExW(
-         WS_EX_TOOLWINDOW | WS_EX_COMPOSITED,
+         WS_EX_COMPOSITED,
         THUMB_CLASS, nullptr,
-        WS_POPUP | WS_BORDER | WS_CLIPCHILDREN,
+        WS_POPUP  | WS_THICKFRAME | WS_CLIPCHILDREN,
         0, 0, 300, 200,
-        nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+        g_hWnd, nullptr, g_hInst, nullptr);
+
+
+
+
+    // 1. 在全局或合适位置声明
+    AccelManager gAccel(g_hWnd);
+
+    // 2. 在 WinMain 里，窗口创建完成后立刻注册
+    // 书签栏
+    gAccel.set(IDM_TOGGLE_TOC_WINDOW, FVIRTKEY, VK_TAB);   // 无修饰符的 Tab
+    
+    // 刷新
+    gAccel.set(ID_EPUB_RELOAD, FVIRTKEY, VK_F5);    // 新增 F5
+    //gAccel.set(ID_FONT_BIGGER, FCONTROL | FVIRTKEY, VK_OEM_PLUS);
+    //gAccel.set(ID_FONT_SMALLER, FCONTROL | FVIRTKEY, VK_OEM_MINUS);
+    //gAccel.set(ID_FONT_RESET, FCONTROL | FVIRTKEY, '0');
+
+    //gAccel.set(ID_LINE_HEIGHT_UP, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_PLUS);
+    //gAccel.set(ID_LINE_HEIGHT_DOWN, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_MINUS);
+    //gAccel.set(ID_LINE_HEIGHT_RESET, FCONTROL | FSHIFT | FVIRTKEY, '0');
+
+    //gAccel.set(ID_WIDTH_BIGGER, FALT | FVIRTKEY, VK_RIGHT);
+    //gAccel.set(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_LEFT);
+    //gAccel.set(ID_WIDTH_RESET, FALT | FVIRTKEY, '0');
+
+    // 字体
+    gAccel.add(ID_FONT_BIGGER, FCONTROL | FVIRTKEY, VK_OEM_PLUS);
+    gAccel.add(ID_FONT_BIGGER, FCONTROL | FVIRTKEY, VK_ADD);
+    gAccel.add(ID_FONT_SMALLER, FCONTROL | FVIRTKEY, VK_OEM_MINUS);
+    gAccel.add(ID_FONT_SMALLER, FCONTROL | FVIRTKEY, VK_SUBTRACT);
+    gAccel.add(ID_FONT_RESET, FCONTROL | FVIRTKEY, VK_OEM_3);
+
+
+    // 行高
+    gAccel.add(ID_LINE_HEIGHT_UP, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_PLUS);
+    gAccel.add(ID_LINE_HEIGHT_UP, FCONTROL | FSHIFT | FVIRTKEY, VK_ADD);
+    gAccel.add(ID_LINE_HEIGHT_DOWN, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_MINUS);
+    gAccel.add(ID_LINE_HEIGHT_DOWN, FCONTROL | FSHIFT | FVIRTKEY, VK_SUBTRACT);
+    gAccel.add(ID_LINE_HEIGHT_RESET, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_3);
+
+
+    // 文档宽度
+    gAccel.add(ID_WIDTH_BIGGER, FALT | FVIRTKEY, VK_OEM_PLUS);
+    gAccel.add(ID_WIDTH_BIGGER, FALT | FVIRTKEY, VK_ADD);
+    gAccel.add(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_SUBTRACT);
+    gAccel.add(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_OEM_MINUS);
+    gAccel.add(ID_WIDTH_RESET, FALT | FVIRTKEY, VK_OEM_3);
+  
 
 
     g_pSplashImg = LoadPngFromResource(g_hInst, IDB_PNG1);
@@ -2063,8 +2173,10 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     UpdateWindow(g_hWnd);
     MSG msg{};
     while (GetMessage(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        if (!gAccel.translate(&msg)) {   // ← 先给 AccelManager
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
     GdiplusShutdown(gdiplusToken);
     return static_cast<int>(msg.wParam);
@@ -2073,30 +2185,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 // ---------- 目录解析 ----------
 
 
-void EPUBBook::init_doc(std::string html) {
-    /* 2. 加载 HTML */
 
-
-    if (html.empty()) return;
-    if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
-    if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
-    g_container->clear();
-
-
-    g_container->m_doc =
-        litehtml::document::createFromString({ html.c_str() , litehtml::encoding::utf_8 }, g_container.get());
-
-    /* 关键：DOM 刚建好，立即回填内联脚本 */
-    if (g_cfg.enableJS) {
-        g_bootstrap->bind_host_objects();
-
-        g_bootstrap->run_pending_scripts(); // 立即执行
-        //save_document_html(g_container->m_doc);
-    }
-
-
-    g_scrollY = 0;
-}
 // ---------- 点击目录跳转 ----------
 void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 {
@@ -2116,9 +2205,7 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
         g_states.needRelayout.store(true);
         g_vd->clear();
         g_vd->load_html(file_path);
-        //std::string html = g_book->load_html(file_path.c_str());
-        //g_book->init_doc(html);
-        //g_states.needRelayout.store(true, std::memory_order_release);
+
         g_last_html_path = file_path;
         UpdateCache();
     }
@@ -2297,20 +2384,25 @@ void SimpleContainer::on_anchor_click(const char* url,
 {
     if (!url || !*url) return;
 
-    // 内部 #id
-    if (url[0] == '#')
-    {
-
+    std::string_view sv{ url };
+    if (sv.starts_with('#'))
+    { 
+        /* 锚点 */ 
         std::wstring cssSel = a2w(url + 1);   // 去掉开头的 '#'  
-        // WM_APP + 3 约定为“跳转到锚点选择器”
+
         PostMessageW(g_hView, WM_EPUB_ANCHOR,
             reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
-        return;
     }
-    g_book->OnTreeSelChanged(a2w(url).c_str());
+    else if (sv.starts_with("http") || sv.starts_with("mailto:")) { /* 外部 */ }
+    else 
+    { 
+        /* 章节跳转 */
+        std::wstring href = g_book->m_zipIndex.find(a2w(url));
+        wchar_t* url_copy = _wcsdup(href.c_str());
+        PostMessageW(g_hView, WM_EPUB_NAVIGATE,
+            reinterpret_cast<WPARAM>(url_copy), 0);
+    }
 
-    // 外部链接：交给宿主
-    //ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 bool SimpleContainer::on_element_click(const litehtml::element::ptr& el)
@@ -2319,19 +2411,43 @@ bool SimpleContainer::on_element_click(const litehtml::element::ptr& el)
     OutputDebugStringA("\n");
     return true;
 }
-void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el, litehtml::mouse_event event)
+void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
+    litehtml::mouse_event event)
 {
+    if (!g_cfg.enableHoverPreview) return;
+
     if (event == litehtml::mouse_event::mouse_event_enter)
     {
-        if (g_cfg.enableHoverPreview)
+        // 如果已存在，先杀掉
+        if (g_tooltipTimer)
         {
-
-                g_book->show_tooltip(el);
-   
+            timeKillEvent(g_tooltipTimer);
+            g_tooltipTimer = 0;
         }
+
+        // 用 new 把 element 指针传进去
+        struct Payload { litehtml::element::ptr e; };
+        auto* p = new Payload{ el };
+
+        g_tooltipTimer = timeSetEvent(
+            g_cfg.tooltip_delay_ms,          // 延迟
+            1,                         // 分辨率 1ms
+            [](UINT, UINT, DWORD_PTR dwUser, DWORD_PTR, DWORD_PTR)
+            {
+                auto* t = reinterpret_cast<Payload*>(dwUser);
+                g_book->show_tooltip(t->e);
+                delete t;
+            },
+            reinterpret_cast<DWORD_PTR>(p),
+            TIME_ONESHOT);             // 一次性
     }
     else
     {
+        if (g_tooltipTimer)
+        {
+            timeKillEvent(g_tooltipTimer);
+            g_tooltipTimer = 0;
+        }
         g_book->hide_tooltip();
     }
 }
@@ -4645,13 +4761,13 @@ std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string&
     auto p = target;
     while (p)
     {
+        if (std::strcmp(p->get_tagName(), "figure") == 0) { break; }
         const char* cls = p->get_attr("class");
         if (!cls ||
             (std::strcmp(cls, "duokan-footnote-item") != 0 &&
                 std::strcmp(cls, "fig") != 0 &&
                 std::strcmp(cls, "figimage") != 0 &&
-                std::strcmp(cls, "figure") != 0 &&
-                std::strcmp(p->get_tagName(), "figure") != 0))
+                std::strcmp(cls, "figure") != 0 ))
         {
             p = p->parent();
         }
@@ -4691,7 +4807,13 @@ std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string&
 //    return g_tootip_css + inner;
 //}
 
-
+void CALLBACK OnTooltip(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
+{
+    // 直接在工作线程/回调里刷新
+    g_tooltipTimer = 0;
+    if (g_book) { g_book->hide_tooltip(); }
+  
+}
 void EPUBBook::show_tooltip(const litehtml::element::ptr& el)
 {
     auto link = find_link_in_chain(el);
@@ -4733,21 +4855,27 @@ void EPUBBook::show_tooltip(const litehtml::element::ptr& el)
     int tip_x = pt.x - width / 2;
     int tip_y = pt.y - height - 20;
     if (tip_y < 0) { tip_y = pt.y + 20; }
-
+    DWORD style = GetWindowLong(g_hTooltip, GWL_STYLE);
+    DWORD exStyle = GetWindowLong(g_hTooltip, GWL_EXSTYLE);
+    UINT dpi = GetDpiForWindow(g_hTooltip);
+    RECT r{ 0, 0, width, height };
+    AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi);
     SetWindowPos(g_hTooltip, HWND_TOPMOST,
-        tip_x, tip_y, width + 2, height + 2,
+        tip_x, tip_y,
+        r.right - r.left, r.bottom - r.top,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
 
     g_tooltip_container->m_canvas->resize(width, height);
 
-    InvalidateRect(g_hTooltip, nullptr, false);
+    InvalidateRect(g_hTooltip, nullptr, true);
 
 }
 
 void EPUBBook::hide_tooltip()
 {
-    if (g_hTooltip)
+
+    if (g_hTooltip && !g_tooltipTimer && IsWindowVisible(g_hTooltip))
     {
         ShowWindow(g_hTooltip, SW_HIDE);
         if (g_tooltip_container && g_tooltip_container->m_doc)
@@ -5344,21 +5472,18 @@ VirtualDoc::VirtualDoc()
 VirtualDoc::~VirtualDoc()
 {
     clear();
+
 }
 
 void VirtualDoc::load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width)
 {
     m_book = book;
     m_container = container;
-    m_render_width = render_width;
+
     m_spine = book->ocf_pkg_.spine;
 }
 
-void VirtualDoc::set_render_width(int width)
-{
-    m_render_width = width;
 
-}
 // ---------- 分页 ----------
 std::wstring VirtualDoc::get_href_by_id(int id)
 {
@@ -5563,7 +5688,7 @@ std::vector<BodyBlock> VirtualDoc::get_body_blocks(std::string& html,
 
 void VirtualDoc::load_html(std::wstring& href)
 {
-    m_doc.reset();
+
     auto id = get_id_by_href(href);
     if(id < 0)
     {
@@ -5571,7 +5696,7 @@ void VirtualDoc::load_html(std::wstring& href)
         OutputDebugStringW(L" 未找到\n");
         return ;
     }
-    m_blocks.clear();
+    m_current_href = href;
     load_by_id(id, true);
     // 先渲染好加载的章节
     {
@@ -5587,20 +5712,50 @@ void VirtualDoc::load_html(std::wstring& href)
 
         text += "</body></html>";
         m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-        m_doc->render(m_render_width);
+        m_doc->render(g_cfg.document_width);
         m_blocks.back().height = m_doc->height();
     }
 
     //id -= 1;
     //load_by_id(m_top_block, id, false);
 }
+
+void VirtualDoc::reload()
+{
+    if (m_current_href.empty()) return;
+
+    // 1. 记录旧高度及当前可见区域在文档中的相对位置
+    float last_height = get_height();
+    float scroll_ratio = 0.0f;
+    if (last_height > 0.001f)
+        scroll_ratio = g_offsetY / last_height;
+
+    // 2. 重新排版
+    m_blocks.clear();
+    load_html(m_current_href);
+    UpdateCache();
+
+    // 3. 计算新高度并恢复相对位置
+    float current_height = get_height();
+    g_offsetY = scroll_ratio * current_height;
+    RECT rc;
+    GetClientRect(g_hView, &rc);
+    // 可选：限制在合法范围
+    g_offsetY = std::max(0, std::min(g_offsetY, static_cast<int>(current_height - rc.bottom-rc.top)));
+
+    // 4. 重绘
+    InvalidateRect(g_hView, nullptr, TRUE);
+    UpdateWindow(g_hView);
+}
 bool VirtualDoc::load_by_id( int spine_id, bool isPushBack)
 {
     std::wstring href = get_href_by_id(spine_id);
     if (href.empty()) { return false; }
+ 
     std::string html = m_book->load_html(href);
     if (html.empty()) { return false; }
     if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
+    html = inject_css(html);
     if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
     auto block = get_html_block(html, spine_id);
  
@@ -5658,6 +5813,7 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
 
     if (g_states.needRelayout.exchange(false)) 
     {
+
         std::string text;
         text += "<html>" + m_blocks.back().head + "<body>";
         for (auto hb: m_blocks)
@@ -5670,7 +5826,8 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
 
         text += "</body></html>";
         m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-        m_doc->render(m_render_width);
+
+        m_doc->render(g_cfg.document_width);
 
         if (m_blocks.size() == 1) { m_blocks.back().height = m_doc->height(); };
         if (m_blocks.size() > 1)
@@ -6198,7 +6355,7 @@ LRESULT TocPanel::HandleMsg(UINT m, WPARAM w, LPARAM l)
 TocPanel::TocPanel()
 {
     // 16 px 高，默认宽度，正常粗细，不斜体，不 underline，不 strikeout
-    hFont_ = CreateFontW(16, 0, 0, 0,
+    hFont_ = CreateFontW(18, 0, 0, 0,
         FW_NORMAL,
         FALSE, FALSE, FALSE,
         DEFAULT_CHARSET,
@@ -6206,7 +6363,7 @@ TocPanel::TocPanel()
         CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY,
         DEFAULT_PITCH | FF_SWISS,
-        L"Segoe UI");   // 字体名
+        L"Microsoft YaHei");   // 字体名
 
 }
 TocPanel::~TocPanel()
