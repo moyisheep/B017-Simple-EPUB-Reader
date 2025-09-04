@@ -436,7 +436,7 @@ private:
     int  m_w, m_h;
     ComPtr<ID2D1Bitmap> m_bmp;
     std::unique_ptr<D2DBackend> m_backend;
-
+    D2D1_MATRIX_3X2_F m_oldMatrix{};
     HWND m_hwnd = nullptr;
 
 };
@@ -614,6 +614,7 @@ struct AppSettings {
     float default_line_height = 1.5;
     int default_document_width = 800;
 
+    float zoom_factor = 1.0f;
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Segoe UI";
 
@@ -781,7 +782,8 @@ private:
     void serialize_node(const GumboNode* node, std::ostream& out);
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
-    std::wstring m_current_href;
+
+    float  m_height = 0.0f;
 
 
     bool insert_next_chapter();

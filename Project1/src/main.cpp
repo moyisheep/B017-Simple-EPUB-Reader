@@ -1168,7 +1168,7 @@ void CALLBACK Tick(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
     OutputDebugStringA("定时器触发\n");
     g_tickTimer = 0;
 }
-LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
+LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
@@ -1177,7 +1177,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_container && g_container->m_canvas)
         {
             RECT rcClient;
-            GetClientRect(hWnd, &rcClient);   // ← 这才是客户区
+            GetClientRect(hwnd, &rcClient);   // ← 这才是客户区
             g_container->resize(rcClient.right, rcClient.bottom);
         }
         return 0;
@@ -1265,7 +1265,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             free(sel);          // 对应 _wcsdup
         }
         UpdateCache();
-        InvalidateRect(hWnd, nullptr, FALSE);
+        InvalidateRect(hwnd, nullptr, FALSE);
         UpdateWindow(g_hView);
 
         return 0;
@@ -1287,7 +1287,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_EPUB_UPDATE_SCROLLBAR: {
         RECT rc;
-        GetClientRect(hWnd, &rc);
+        GetClientRect(hwnd, &rc);
         // 垂直滚动条
         SCROLLINFO si{ sizeof(si) };
         si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
@@ -1295,15 +1295,15 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
         si.nMax = std::max(0, g_maxScroll);
         si.nPage = rc.bottom;               // 每次滚一页
         si.nPos = g_scrollY;
-        SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+        SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
         // 水平滚动条（如果不需要可删掉）
         si.nMax = 0;
         si.nPage = rc.right;
-        SetScrollInfo(hWnd, SB_HORZ, &si, TRUE);
+        SetScrollInfo(hwnd, SB_HORZ, &si, TRUE);
         // 重新排版+缓存
         UpdateCache();
-        InvalidateRect(hWnd, nullptr, FALSE);
-        //UpdateWindow(hWnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        //UpdateWindow(hwnd);
         return 0;
     }
     case WM_MOUSELEAVE:
@@ -1320,7 +1320,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_VSCROLL:
     {
         RECT rc;
-        GetClientRect(hWnd, &rc);
+        GetClientRect(hwnd, &rc);
 
         int code = LOWORD(wp);
         int pos = HIWORD(wp);
@@ -1354,30 +1354,42 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
             g_scrollY = std::clamp(g_scrollY + delta, 0, g_maxScroll);
 
         // 统一更新
-        SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
+        SetScrollPos(hwnd, SB_VERT, g_scrollY, TRUE);
         UpdateCache();
-        InvalidateRect(hWnd, nullptr, FALSE);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_MOUSEWHEEL:
     {
+        if (GetKeyState(VK_CONTROL) & 0x8000)
+        {
+            int delta = GET_WHEEL_DELTA_WPARAM(wp);   // ±120
+            float factor = (delta > 0) ? 1.1f : 0.9f;     // 放大 / 缩小系数
+
+            // 2. 更新全局缩放
+            g_cfg.zoom_factor = std::clamp(g_cfg.zoom_factor * factor, 0.25f, 5.0f);
+            UpdateCache();
+            // 3. 重绘
+            InvalidateRect(hwnd, NULL, FALSE);
         
+            return 0;   // 已处理，不再传递
+        }
         RECT rc;
-        GetClientRect(hWnd, &rc);
+        GetClientRect(hwnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         //g_scrollY = std::clamp<int>(g_scrollY - zDelta, 0, std::max<int>(g_maxScroll - rc.bottom, 0));
         int factor = std::abs(zDelta / 120);
         if (zDelta >= 0) { g_scrollY -= g_line_height * factor; }
         else { g_scrollY += g_line_height * factor; }
-        SetScrollPos(hWnd, SB_VERT, g_scrollY, TRUE);
+        SetScrollPos(hwnd, SB_VERT, g_scrollY, TRUE);
         // 更新阅读记录
-        if (!g_tickTimer) 
+        if (!g_tickTimer)
         {
-            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT); 
+            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
 
         UpdateCache();
-        InvalidateRect(hWnd, nullptr, FALSE);
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
 
@@ -1400,7 +1412,7 @@ LRESULT CALLBACK ViewWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_ERASEBKGND:
         return 1;
     }
-    return DefWindowProc(hWnd, msg, wp, lp);
+    return DefWindowProc(hwnd, msg, wp, lp);
 }
 
 ATOM RegisterViewClass(HINSTANCE hInst)
@@ -1454,7 +1466,7 @@ void UpdateCache()
 
     g_states.isUpdate.store(true);
 
-    g_center_offset = std::max((w - g_cfg.document_width) * 0.5, 0.0);
+    g_center_offset = std::max((w - g_cfg.document_width ) * 0.5, 0.0);
 }
 
 inline void DumpBookRecord()
@@ -1696,7 +1708,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
-    case WM_MOUSEWHEEL: {
+    case WM_MOUSEWHEEL: 
+    {
 
 
         return 0;
@@ -2098,17 +2111,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     
     // 刷新
     gAccel.set(ID_EPUB_RELOAD, FVIRTKEY, VK_F5);    // 新增 F5
-    //gAccel.set(ID_FONT_BIGGER, FCONTROL | FVIRTKEY, VK_OEM_PLUS);
-    //gAccel.set(ID_FONT_SMALLER, FCONTROL | FVIRTKEY, VK_OEM_MINUS);
-    //gAccel.set(ID_FONT_RESET, FCONTROL | FVIRTKEY, '0');
-
-    //gAccel.set(ID_LINE_HEIGHT_UP, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_PLUS);
-    //gAccel.set(ID_LINE_HEIGHT_DOWN, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_MINUS);
-    //gAccel.set(ID_LINE_HEIGHT_RESET, FCONTROL | FSHIFT | FVIRTKEY, '0');
-
-    //gAccel.set(ID_WIDTH_BIGGER, FALT | FVIRTKEY, VK_RIGHT);
-    //gAccel.set(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_LEFT);
-    //gAccel.set(ID_WIDTH_RESET, FALT | FVIRTKEY, '0');
 
     // 字体
     gAccel.add(ID_FONT_BIGGER, FCONTROL | FVIRTKEY, VK_OEM_PLUS);
@@ -4564,11 +4566,34 @@ void GdiCanvas::BeginDraw() { /* GDI 无需配对调用，留空 */ }
 void GdiCanvas::EndDraw() { /* 留空或在此处 BitBlt 到窗口 DC */ }
 
 litehtml::uint_ptr D2DCanvas::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_backend->m_rt.Get()); }
-void D2DCanvas::BeginDraw() {
+void D2DCanvas::BeginDraw()
+{
     m_backend->m_rt->BeginDraw();
-    m_backend->m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));   // 先排除红色干扰
+    m_backend->m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
+
+    // 1. 保存原始矩阵
+    m_backend->m_rt->GetTransform(&m_oldMatrix);
+
+    // 2. 实时取鼠标在客户区的坐标
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(g_hView, & pt);   // 换成你自己的 HWND 获取函数
+
+    // 3. 以鼠标位置为中心整体缩放
+    m_backend->m_rt->SetTransform(
+        D2D1::Matrix3x2F::Scale(
+            g_cfg.zoom_factor,
+            g_cfg.zoom_factor,
+            D2D1::Point2F(static_cast<float>(pt.x),
+                static_cast<float>(pt.y))));
 }
-void D2DCanvas::EndDraw() { m_backend->m_rt->EndDraw(); }
+void D2DCanvas::EndDraw()
+{
+    // 恢复原始矩阵
+    m_backend->m_rt->SetTransform(m_oldMatrix);
+
+    m_backend->m_rt->EndDraw();
+}
 
 
 
@@ -5696,7 +5721,7 @@ void VirtualDoc::load_html(std::wstring& href)
         OutputDebugStringW(L" 未找到\n");
         return ;
     }
-    m_current_href = href;
+ 
     load_by_id(id, true);
     // 先渲染好加载的章节
     {
@@ -5714,6 +5739,7 @@ void VirtualDoc::load_html(std::wstring& href)
         m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
         m_doc->render(g_cfg.document_width);
         m_blocks.back().height = m_doc->height();
+        m_height = m_doc->height();
     }
 
     //id -= 1;
@@ -5722,27 +5748,18 @@ void VirtualDoc::load_html(std::wstring& href)
 
 void VirtualDoc::reload()
 {
-    if (m_current_href.empty()) return;
-
-    // 1. 记录旧高度及当前可见区域在文档中的相对位置
-    float last_height = get_height();
-    float scroll_ratio = 0.0f;
-    if (last_height > 0.001f)
-        scroll_ratio = g_offsetY / last_height;
-
+    if (m_blocks.empty()) { return; }
+    ScrollPosition p = get_scroll_position();
+    auto id = p.spine_id;
+    auto href = get_href_by_id(id);
+    if (href.empty()) { return; }
+    
     // 2. 重新排版
     m_blocks.clear();
-    load_html(m_current_href);
+    load_html(href);
     UpdateCache();
 
-    // 3. 计算新高度并恢复相对位置
-    float current_height = get_height();
-    g_offsetY = scroll_ratio * current_height;
-    RECT rc;
-    GetClientRect(g_hView, &rc);
-    // 可选：限制在合法范围
-    g_offsetY = std::max(0, std::min(g_offsetY, static_cast<int>(current_height - rc.bottom-rc.top)));
-
+    g_offsetY = p.offset;
     // 4. 重绘
     InvalidateRect(g_hView, nullptr, TRUE);
     UpdateWindow(g_hView);
@@ -5751,7 +5768,6 @@ bool VirtualDoc::load_by_id( int spine_id, bool isPushBack)
 {
     std::wstring href = get_href_by_id(spine_id);
     if (href.empty()) { return false; }
- 
     std::string html = m_book->load_html(href);
     if (html.empty()) { return false; }
     if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
@@ -5798,17 +5814,17 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
         else  { y_offset = 0; }
     
     }
-    if (y_offset > static_cast<int>(get_height() - client_h))
+    if (y_offset > static_cast<int>(m_height - client_h))
     {
         bool isOK = insert_next_chapter();
         if (isOK) { g_states.needRelayout.store(true); }
-        else { y_offset = std::min(static_cast<int>(get_height() - client_h), y_offset); }
+        else { y_offset = std::min(static_cast<int>(m_height - client_h), y_offset); }
     }
-    if(get_height() < client_h * 3)
+    if(m_height < client_h * 3)
     {
         bool isOK = insert_next_chapter();
         if (isOK) { g_states.needRelayout.store(true); }
-        else { y_offset = std::min(static_cast<int>(get_height() - client_h), y_offset); }
+        else { y_offset = std::min(static_cast<int>(m_height - client_h), y_offset); }
     }
 
     if (g_states.needRelayout.exchange(false)) 
@@ -5828,23 +5844,24 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
         m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
 
         m_doc->render(g_cfg.document_width);
-
+        m_height = get_height();
         if (m_blocks.size() == 1) { m_blocks.back().height = m_doc->height(); };
         if (m_blocks.size() > 1)
         {
             if (m_blocks.front().height == 0.0f)
             {
-                float height = std::max(m_doc->height() - get_height(), 0.0f);
+                float height = std::max(m_doc->height() - m_height, 0.0f);
                 y_offset += height;
                 m_blocks.front().height = height;
             }
             else if (m_blocks.back().height == 0.0f)
             {
-                float height = std::max(m_doc->height() - get_height(), 0.0f);
+                float height = std::max(m_doc->height() - m_height, 0.0f);
                 
                 m_blocks.back().height = height;
             }
         }
+
 
         
     }
