@@ -564,7 +564,21 @@ public:
         const std::string& opf_dir,
         std::vector<OCFNavPoint>& out);
 
-    void show_tooltip(const litehtml::element::ptr& el);
+    std::string extract_anchor(const char* href);
+
+    litehtml::element::ptr find_link_in_chain(litehtml::element::ptr start);
+
+    static bool skip_attr(const std::string& val);
+
+    static std::string get_html(litehtml::element::ptr el);
+
+    std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string& anchorId);
+
+    std::string get_html_of_image(litehtml::element::ptr start);
+
+    void show_imageview(const litehtml::element::ptr& el);
+
+    void show_tooltip(const std::string html);
     void hide_tooltip();
     static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
     void clear();
@@ -619,7 +633,7 @@ struct AppSettings {
     std::string default_font_name = "Segoe UI";
 
     float line_height_multiplier = 1.5;
-    int tooltip_width = 350;
+    int tooltip_width = 500;
 
     int split_space_height = 300; // 单位:px
     std::wstring default_serif = L"Georgia";
@@ -634,6 +648,7 @@ struct AppStates {
     std::atomic_bool needRelayout{ true };   // 是否需要重新排版
     std::atomic_bool isCaching{ false };   // 后台是否正在渲染
     std::atomic_bool isUpdate{ false };   // 后台是否正在渲染
+    std::atomic_bool isTooltipUpdate{ false };   // 后台是否正在渲染
     bool isLoaded = false;
     // 工具：生成新令牌，旧令牌立即失效
     void newCancelToken() {

@@ -62,7 +62,11 @@ std::string g_tootip_css = "<style>img{display:block;width:100%;height:auto;max-
 static HWND  g_hwndSplit = nullptr;   // 分隔条
 static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
 static bool  g_dragging = false;     // 是否正在拖动
-
+static bool  g_tooltip_dragging = false;
+static POINT g_tooltip_drag_pos{ 0,0 };
+static bool g_mouse_tracked = false;
+static bool g_isImageview = false;
+static int g_tooltipRenderW = 0;   // 当前 tooltip 渲染宽度（客户区）
 // 全局
 std::unique_ptr<TocPanel> g_toc;
 // 1. 在全局或合适位置声明
@@ -1222,15 +1226,19 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
+        if (!g_container->m_doc) break;
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
 
         int doc_x = x - g_center_offset;
         int doc_y = y + g_offsetY;
 
-        if (!g_container->m_doc) break;
+  
+
         litehtml::position::vector redraw_boxes;
         g_container->m_doc->on_mouse_over(doc_x, doc_y, 0, 0, redraw_boxes);
+
+
 
         break;
     }
@@ -1308,11 +1316,11 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_MOUSELEAVE:
     {
-        if (g_container && g_container->m_doc)
-        {
-            litehtml::position::vector redraw_box;
-            g_container->m_doc->on_mouse_leave(redraw_box);
-        }
+
+        litehtml::position::vector redraw_box;
+        g_container->m_doc->on_mouse_leave(redraw_box);
+
+  
 
         return 0;
     }
@@ -1563,7 +1571,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             });
         return 0;
     }
-
+    case WM_MOUSELEAVE:
+    {
+        litehtml::position::vector redraw_box;
+        g_container->m_doc->on_mouse_leave(redraw_box);
+        return 0;
+    }
     case WM_EPUB_PARSED: {
 
         if (!g_states.isLoaded) {
@@ -1968,6 +1981,7 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 {
     switch (m)
     {
+
     case WM_PAINT:
     {
         if (!IsWindowVisible(g_hTooltip)) { return 0; }
@@ -1977,22 +1991,120 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
             break;
         }
 
- 
-        g_tooltip_container->m_canvas->BeginDraw();
-        RECT rc;
-        GetClientRect(g_hTooltip, &rc);
-        litehtml::position clip(0, 0, rc.right, rc.bottom);
-        g_tooltip_container->m_doc->draw(
-            g_tooltip_container->m_canvas->getContext(),   // 强制转换
-            0, 0, &clip);
-        g_tooltip_container->m_canvas->EndDraw();
-
+        if (g_states.isTooltipUpdate.exchange(false))
+        {
+            g_tooltip_container->m_canvas->BeginDraw();
+            RECT rc;
+            GetClientRect(g_hTooltip, &rc);
+            litehtml::position clip(0, 0, rc.right, rc.bottom);
+            g_tooltip_container->m_doc->draw(
+                g_tooltip_container->m_canvas->getContext(),   // 强制转换
+                0, 0, &clip);
+            g_tooltip_container->m_canvas->EndDraw();
+        
+        }
         return 0;
     }
     case WM_DESTROY: {
 
         return 0;
     }
+                   // 在 TooltipProc 里
+// 在 TooltipProc 里
+    case WM_MOUSEWHEEL: {
+        static int currentW = [] {
+            RECT rc; GetClientRect(g_hTooltip, &rc);
+            return rc.right - rc.left;   // 第一次用真实客户区宽度
+            }();
+        int delta = GET_WHEEL_DELTA_WPARAM(w); 
+        float factor = (delta > 0) ? 1.1f : 0.9f; /* 1. 鼠标指针在屏幕上的位置 */ 
+        POINT pt; 
+        GetCursorPos(&pt); /* 2. 当前窗口矩形（屏幕坐标） */ 
+        RECT wr; GetWindowRect(hwnd, &wr); /* 3. 获取屏幕工作区大小（不含任务栏） */ 
+         
+        MONITORINFO mi{ sizeof(mi) }; 
+        GetMonitorInfo(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi); 
+        int scrW = mi.rcWork.right - mi.rcWork.left; 
+        int scrH = mi.rcWork.bottom - mi.rcWork.top;
+        /* 3.5 提前判断：若窗口外框已顶满屏幕，放大就忽略 */ 
+        DWORD style = GetWindowLong(hwnd, GWL_STYLE); 
+        DWORD exStyle = GetWindowLong(hwnd, GWL_EXSTYLE); 
+        UINT dpi = GetDpiForWindow(hwnd); 
+        RECT rNow{ 0, 0, currentW, 1 }; // 高度先随便填，只要算宽度 
+        AdjustWindowRectExForDpi(&rNow, style, FALSE, exStyle, dpi); 
+        int winW_now = rNow.right - rNow.left; 
+        g_tooltip_container->m_doc->render(currentW);
+        int docH_now = g_tooltip_container->m_doc->height(); RECT rH{ 0, 0, 1, docH_now };
+        AdjustWindowRectExForDpi(&rH, style, FALSE, exStyle, dpi); 
+        int winH_now = rH.bottom - rH.top; // 放大且已顶满 → 直接 return 
+        if (factor > 1.0f && (winW_now >= scrW || winH_now >= scrH)) { return 0; } /* 4. 计算新的渲染尺寸，并立即限制在屏幕内 */ 
+        int renderW = std::max(32, static_cast<int>(currentW * factor + 0.5f));
+        int renderH = 0; // 先限制宽度 
+        renderW = std::min(renderW, scrW); // 重新渲染得到高度 
+        g_tooltip_container->m_doc->render(renderW); 
+        renderH = g_tooltip_container->m_doc->height(); // 再限制高度
+        renderH = std::min(renderH, scrH); 
+        renderW = std::max(renderW, 32); // 防止极端情况宽度过小 
+        /* 5. 计算窗口外框尺寸（含标题栏/边框） */ 
+        RECT r{ 0, 0, renderW, renderH }; 
+        AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi); 
+        int winW = r.right - r.left; int winH = r.bottom - r.top; 
+        /* 6. 以鼠标位置为缩放原点，计算新左上角 */ 
+        int newX = pt.x - (pt.x - wr.left) * winW / (wr.right - wr.left); 
+        int newY = pt.y - (pt.y - wr.top) * winH / (wr.bottom - wr.top); 
+        /* 7. 最终再保证左上角也在屏幕内（简单 clamp） */ 
+        newX = std::max((long)newX, mi.rcWork.left); 
+        newY = std::max((long)newY, mi.rcWork.top); 
+        newX = std::min((long)newX, mi.rcWork.right - winW); 
+        newY = std::min((long)newY, mi.rcWork.bottom - winH); 
+        /* 8. 更新窗口 & 画布 */ 
+        g_tooltip_container->m_canvas->resize(renderW, renderH);
+        SetWindowPos(hwnd, HWND_TOPMOST, newX, newY, winW, winH, SWP_NOACTIVATE | SWP_NOZORDER); 
+
+        currentW = renderW;
+        g_states.isTooltipUpdate.store(true);
+        InvalidateRect(hwnd, nullptr, TRUE);
+
+        return 0;
+    }
+    /* 2. 左键拖动 */
+    case WM_LBUTTONDOWN:
+        g_tooltip_dragging = true;
+        SetCapture(hwnd);                     // 锁定鼠标
+        g_tooltip_drag_pos = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (g_tooltip_dragging)
+        {
+            g_tooltip_dragging = false;
+            ReleaseCapture();
+        }
+     
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (g_tooltip_dragging)
+        {
+            int dx = GET_X_LPARAM(l) - g_tooltip_drag_pos.x;
+            int dy = GET_Y_LPARAM(l) - g_tooltip_drag_pos.y;
+
+            RECT wr;
+            GetWindowRect(hwnd, &wr);
+            SetWindowPos(hwnd, nullptr,
+                wr.left + dx, wr.top + dy,
+                0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            g_states.isTooltipUpdate.store(true);
+        }
+        return 0;
+    case WM_RBUTTONUP:
+    {
+        g_isImageview = false;
+        g_book->hide_tooltip();
+        return 0;
+    }
+
     case WM_ERASEBKGND: {
         return 1;
     }
@@ -2095,7 +2207,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     g_hTooltip = CreateWindowExW(
          WS_EX_COMPOSITED,
         THUMB_CLASS, nullptr,
-        WS_POPUP  | WS_THICKFRAME | WS_CLIPCHILDREN,
+        WS_POPUP  | WS_THICKFRAME | WS_CLIPCHILDREN |WS_BORDER,
         0, 0, 300, 200,
         g_hWnd, nullptr, g_hInst, nullptr);
 
@@ -2411,6 +2523,7 @@ bool SimpleContainer::on_element_click(const litehtml::element::ptr& el)
 {
     OutputDebugStringA(el->get_tagName());
     OutputDebugStringA("\n");
+    if (std::strcmp(el->get_tagName(), "img") == 0) { g_book->show_imageview(el); }
     return true;
 }
 void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
@@ -2420,6 +2533,17 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
 
     if (event == litehtml::mouse_event::mouse_event_enter)
     {
+        auto link = g_book->find_link_in_chain(el);
+
+        std::string html;
+        if (!link) { return ; }
+        const char* href_raw = link->get_attr("href");
+        if (!href_raw) { return; }
+        std::string id = g_book->extract_anchor(href_raw);
+        if (id.empty()) { return; }
+        html = g_book->html_of_anchor_paragraph(g_container->m_doc.get(), id);
+ 
+
         // 如果已存在，先杀掉
         if (g_tooltipTimer)
         {
@@ -2428,8 +2552,8 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
         }
 
         // 用 new 把 element 指针传进去
-        struct Payload { litehtml::element::ptr e; };
-        auto* p = new Payload{ el };
+        struct Payload { std::string html; };
+        auto* p = new Payload{ std::move(html)};
 
         g_tooltipTimer = timeSetEvent(
             g_cfg.tooltip_delay_ms,          // 延迟
@@ -2437,7 +2561,7 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
             [](UINT, UINT, DWORD_PTR dwUser, DWORD_PTR, DWORD_PTR)
             {
                 auto* t = reinterpret_cast<Payload*>(dwUser);
-                g_book->show_tooltip(t->e);
+                g_book->show_tooltip(std::move(t->html));
                 delete t;
             },
             reinterpret_cast<DWORD_PTR>(p),
@@ -2454,16 +2578,7 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
     }
 }
 
-// 返回 p 指向的 UTF-8 字符所占字节数（1~4）
-inline size_t utf8_char_len(const char* p)
-{
-    unsigned char c = static_cast<unsigned char>(*p);
-    if (c < 0x80) return 1;
-    if ((c >> 5) == 0x06) return 2;
-    if ((c >> 4) == 0x0E) return 3;
-    if ((c >> 3) == 0x1E) return 4;
-    return 1; // 容错
-}
+
 
 
 void SimpleContainer::split_text(const char* text,
@@ -4699,14 +4814,14 @@ void AppBootstrap::bind_host_objects()
 
 /* ---------- 实现 ---------- */
 
-std::string extract_anchor(const char* href)
+std::string EPUBBook::extract_anchor(const char* href)
 {
     if (!href) return "";
     const char* p = std::strrchr(href, '#');
     return p ? (p + 1) : "";
 
 }
-litehtml::element::ptr find_link_in_chain(litehtml::element::ptr start)
+litehtml::element::ptr EPUBBook::find_link_in_chain(litehtml::element::ptr start)
 {
     for (auto cur = start; cur; cur = cur->parent())
     {
@@ -4717,7 +4832,7 @@ litehtml::element::ptr find_link_in_chain(litehtml::element::ptr start)
     return nullptr;
 }
 
-static bool skip_attr(const std::string& val)
+ bool EPUBBook::skip_attr(const std::string& val)
 {
     if (val.empty()) return true;
     if (val == "0")  return true;
@@ -4725,7 +4840,7 @@ static bool skip_attr(const std::string& val)
         [](unsigned char c) { return std::isspace(c); });
 }
 
-static std::string get_html(litehtml::element::ptr el)
+ std::string EPUBBook::get_html(litehtml::element::ptr el)
 {
     if (!el) return "";
     std::string out;
@@ -4773,7 +4888,7 @@ static std::string get_html(litehtml::element::ptr el)
 }
 
 // 3. 核心函数：用 select_one 找 id，再向上找 <p>
-std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string& anchorId)
+std::string EPUBBook::html_of_anchor_paragraph(litehtml::document* doc, const std::string& anchorId)
 {
     if (anchorId.empty()) return "";
     // 构造 CSS 选择器
@@ -4808,56 +4923,60 @@ std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string&
     // 包一层带 inline-block 的 <p>
 
     //return text;
-    return inner;
+    return "<style>img{display:block;width:100%;height:auto;}</style>" + inner;
 }
 
-//std::string html_of_anchor_paragraph(litehtml::document* doc, const std::string& anchorId)
-//{
-//    if (anchorId.empty()) return "";
-//    // 构造 CSS 选择器
-//    std::string sel = "[id=\"" + anchorId + "\"]";
-//    //std::string sel = "#" + anchorId;
-//    auto target = doc->root()->select_one(sel);
-//    if (!target) return "";
-//
-//    litehtml::element::ptr p;
-//    if (target->children().size() > 0){ p = target; }
-//    else{ p = target->parent(); }
-//    if (!p) p = target;          // 兜底：直接返回自身
-//
-//    std::string inner = get_html(p);
-//    // 包一层带 inline-block 的 <p>
-//
-//    //return text;
-//    return g_tootip_css + inner;
-//}
 
-void CALLBACK OnTooltip(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
+std::string EPUBBook::get_html_of_image(litehtml::element::ptr start)
 {
-    // 直接在工作线程/回调里刷新
-    g_tooltipTimer = 0;
-    if (g_book) { g_book->hide_tooltip(); }
-  
+    if (!start && std::strcmp(start->get_tagName(), "img") != 0 ) { return ""; }
+    std::string inner = get_html(start);
+    return "<style>img{display:block;width:100%;height:auto;}</style>" + inner;
+   
 }
-void EPUBBook::show_tooltip(const litehtml::element::ptr& el)
+void EPUBBook::show_imageview(const litehtml::element::ptr& el)
 {
-    auto link = find_link_in_chain(el);
-
-    std::string html;
-    if (link)
-    {
-        const char* href_raw = link->get_attr("href");
-        if (!href_raw) {return;}
-        std::string href = href_raw;
-
-        std::string id = extract_anchor(href.c_str());
-        if (!id.empty())
-            html = html_of_anchor_paragraph(g_container->m_doc.get(), id);
-    }
+    std::string html = get_html_of_image(el);
+    if (html.empty()) { return; }
+    g_isImageview = true;
+    POINT pt;
+    GetCursorPos(&pt);   // pt.x, pt.y 为屏幕坐标
+    //ScreenToClient(g_hView, &pt);   // 现在 pt.x, pt.y 是相对于窗口客户区的坐标
 
 
+    g_tooltip_container->m_doc = litehtml::document::createFromString(
+        { html.c_str(), litehtml::encoding::utf_8 }, g_tooltip_container.get());
+    int width = g_cfg.tooltip_width;
+    g_tooltip_container->m_doc->render(width);
+
+    int height = g_tooltip_container->m_doc->height();
+    auto tip_x = pt.x - width/2;
+    auto tip_y = pt.y - height/2;
+
+
+ 
+    DWORD style = GetWindowLong(g_hTooltip, GWL_STYLE);
+    DWORD exStyle = GetWindowLong(g_hTooltip, GWL_EXSTYLE);
+    UINT dpi = GetDpiForWindow(g_hTooltip);
+    RECT r{ 0, 0, width, height };
+    AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi);
+    SetWindowPos(g_hTooltip, HWND_TOPMOST,
+        tip_x, tip_y,
+        r.right - r.left, r.bottom - r.top,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+
+    g_tooltip_container->m_canvas->resize(width, height);
+    g_states.isTooltipUpdate.store(true);
+    InvalidateRect(g_hTooltip, nullptr, true);
+}
+void EPUBBook::show_tooltip(const std::string txt)
+{
+    if (g_isImageview) { g_isImageview = false; }
+    auto html = txt;
     //OutputDebugStringA(("[show_tooltip] " + std::to_string(x) + " " + std::to_string(y) + "\n").c_str());
     if (html.empty()) {  return; }
+
     if (g_vd && !g_vd->m_blocks.empty())
     {
         html = "<html>" + g_vd->m_blocks.back().head + "<body>" + html + "</body></html>";
@@ -4872,11 +4991,9 @@ void EPUBBook::show_tooltip(const litehtml::element::ptr& el)
         { html.c_str(), litehtml::encoding::utf_8 }, g_tooltip_container.get());
     int width = g_cfg.tooltip_width;
     g_tooltip_container->m_doc->render(width);
-
-
-
-
     int height = g_tooltip_container->m_doc->height();
+
+    g_tooltip_container->m_canvas->resize(width, height);
     int tip_x = pt.x - width / 2;
     int tip_y = pt.y - height - 20;
     if (tip_y < 0) { tip_y = pt.y + 20; }
@@ -4891,8 +5008,7 @@ void EPUBBook::show_tooltip(const litehtml::element::ptr& el)
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
 
-    g_tooltip_container->m_canvas->resize(width, height);
-
+    g_states.isTooltipUpdate.store(true);
     InvalidateRect(g_hTooltip, nullptr, true);
 
 }
@@ -4900,7 +5016,7 @@ void EPUBBook::show_tooltip(const litehtml::element::ptr& el)
 void EPUBBook::hide_tooltip()
 {
 
-    if (g_hTooltip && !g_tooltipTimer && IsWindowVisible(g_hTooltip))
+    if (g_hTooltip  && IsWindowVisible(g_hTooltip) && !g_isImageview)
     {
         ShowWindow(g_hTooltip, SW_HIDE);
         if (g_tooltip_container && g_tooltip_container->m_doc)
