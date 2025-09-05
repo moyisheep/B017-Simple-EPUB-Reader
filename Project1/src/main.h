@@ -174,12 +174,10 @@ public:
     virtual	void set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) = 0;
     virtual	void del_clip() = 0;
 
-    //virtual litehtml::uint_ptr create_font(const char* faceName, int size, int weight, litehtml::font_style italic, unsigned int decoration, litehtml::font_metrics* fm) = 0;
-    //virtual void draw_background(litehtml::uint_ptr, const std::vector<litehtml::background_paint>&, std::unordered_map<std::string, ImageFrame>&) = 0;
-
+ 
     virtual void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts) = 0;
-    virtual void resize(int width, int height) = 0;
-    virtual std::set<std::wstring> getCurrentFonts() = 0;
+
+
     virtual void clear() = 0;
 };
 
@@ -227,10 +225,11 @@ public:
     void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
     void	del_clip() override;
 
+
     void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
-    void resize(int width, int height) override;
+
     ~GdiBackend();
-    std::set<std::wstring> getCurrentFonts() override;
+
     void clear() override;
 private:
     HDC m_hdc;
@@ -302,7 +301,7 @@ private:
 // -------------- DirectWrite-D2D 后端 -----------------
 class D2DBackend : public IRenderBackend {
 public:
-    D2DBackend(int w, int h, HWND hwnd);
+    D2DBackend();
     //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
 
 
@@ -324,19 +323,19 @@ public:
     void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
     void	del_clip() override;
 
+
     void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
     void unload_fonts(void);
-    void resize(int width, int height) override;
+
     //std::optional<std::wstring> mapDynamic(const std::wstring& key);
     //std::wstring resolveFace(const std::wstring& raw);
     std::vector<std::wstring> split_font_list(const std::string& src);
-    ComPtr<ID2D1HwndRenderTarget> m_rt;
+    //ComPtr<ID2D1HwndRenderTarget> m_rt;
     bool is_all_zero(const litehtml::border_radiuses& r);
-    std::set<std::wstring> getCurrentFonts() override;
+
     void clear() override;
     void make_font_metrics(const ComPtr<IDWriteFont>& dwFont, const litehtml::font_description& descr, litehtml::font_metrics* fm);
  
-    ComPtr<ID2D1HwndRenderTarget> m_d2dRT = nullptr;   // ← 注意是 HwndRenderTarget 
 private:
     // 自动 AddRef/Release
 
@@ -349,11 +348,10 @@ private:
     float m_baselineY = 0;
     std::vector<ComPtr<ID2D1Layer>>  m_clipStack;  // 新增
     ComPtr<IDWriteFontCollection> m_sysFontColl;
-    int  m_w, m_h;
-    ComPtr<ID2D1SolidColorBrush> getBrush(const litehtml::web_color& c);
+    ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
 
     ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
-    void draw_decoration(const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
+    void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
 
     std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
     std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
@@ -361,9 +359,7 @@ private:
 
 
     ComPtr<IDWriteFactory>    m_dwrite;
-    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
 
-    HWND m_hwnd = nullptr;
     ComPtr<IDWriteTextAnalyzer> m_analyzer;
 };
 
@@ -373,7 +369,6 @@ public:
     virtual ~ICanvas() = default;
 
     /* 返回一个 IRenderBackend，用于 litehtml 绘制 */
-    virtual IRenderBackend* backend() = 0;
 
     /* 把画布内容贴到窗口（WM_PAINT 用）*/
     virtual void present(HDC hdc, int x, int y) = 0;
@@ -386,7 +381,7 @@ public:
     virtual void BeginDraw() = 0;
     virtual void EndDraw() = 0;
     virtual void resize(int width, int height) = 0;
-    virtual std::set<std::wstring> getCurrentFonts() = 0;
+
     virtual void clear() = 0;
 
     /* 工厂：根据当前策略创建画布 */
@@ -400,7 +395,7 @@ class GdiCanvas : public ICanvas {
 public:
     GdiCanvas(int w, int h);
     ~GdiCanvas();
-    IRenderBackend* backend() override { return m_backend.get(); }
+
     void present(HDC hdc, int x, int y) override;
     int width()  const override { return m_w; }
     int height() const override { return m_h; }
@@ -408,7 +403,7 @@ public:
     void BeginDraw() override;
     void EndDraw() override;
     void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
+
     void clear() override;
 
 private:
@@ -421,7 +416,6 @@ private:
 class D2DCanvas : public ICanvas {
 public:
     D2DCanvas(int w, int h, HWND hwnd);
-    IRenderBackend* backend() override { return m_backend.get(); }
     void present(HDC hdc, int x, int y) override;
     int width()  const override { return m_w; }
     int height() const override { return m_h; }
@@ -429,15 +423,18 @@ public:
     void BeginDraw() override;
     void EndDraw() override;
     void resize(int width, int height) override;
-    std::set<std::wstring> getCurrentFonts() override;
-    void clear() override;
 
+    void clear() override;
+    ComPtr<ID2D1HwndRenderTarget> m_rt;
+    litehtml::document::ptr m_doc;
+    float m_zoom_factor = 1.0f;
 private:
     int  m_w, m_h;
     ComPtr<ID2D1Bitmap> m_bmp;
-    std::unique_ptr<D2DBackend> m_backend;
     D2D1_MATRIX_3X2_F m_oldMatrix{};
     HWND m_hwnd = nullptr;
+    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
+
 
 };
 
@@ -579,6 +576,7 @@ public:
     void show_imageview(const litehtml::element::ptr& el);
 
     void show_tooltip(const std::string html);
+    void hide_imageview();
     void hide_tooltip();
     static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
     void clear();
@@ -592,13 +590,6 @@ public:
 
     EPUBBook() noexcept {}
     ~EPUBBook();
-
-private:
-
-
-    void BuildTree(const std::vector<OCFNavPoint>&, std::vector<TreeNode>&, std::vector<size_t>&);
-
-
 
 };
 
@@ -649,6 +640,7 @@ struct AppStates {
     std::atomic_bool isCaching{ false };   // 后台是否正在渲染
     std::atomic_bool isUpdate{ false };   // 后台是否正在渲染
     std::atomic_bool isTooltipUpdate{ false };   // 后台是否正在渲染
+    std::atomic_bool isImageviewUpdate{ false };   // 后台是否正在渲染
     bool isLoaded = false;
     // 工具：生成新令牌，旧令牌立即失效
     void newCancelToken() {
@@ -680,15 +672,14 @@ struct TVData {
 // ---------- LiteHtml 容器 ----------
 class SimpleContainer : public litehtml::document_container {
 public:
-    explicit SimpleContainer(HWND hwnd);
+    explicit SimpleContainer();
     ~SimpleContainer();
     void clear();
 
     litehtml::pixel_t	get_default_font_size() const override;
     const char* get_default_font_name() const override;
 
-    void	load_image(const char* src, const char* baseurl, bool redraw_on_ready) override;
-    void	get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
+
     void	get_viewport(litehtml::position& viewport) const override;
     void	import_css(litehtml::string& text, const litehtml::string& url, litehtml::string& baseurl) override;
 
@@ -730,21 +721,22 @@ public:
     litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
     void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
     void	del_clip() override;
+    void	load_image(const char* src, const char* baseurl, bool redraw_on_ready) override;
+    void	get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
 
 
     //自定义函数
-    void makeBackend(HWND hwnd);
-    void resize(int w, int y);
+    void makeBackend();
+
 
     std::unordered_map<std::string, ImageFrame> m_img_cache;
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
-    std::shared_ptr<litehtml::document> m_doc;
-    std::unique_ptr<ICanvas> m_canvas;
+    litehtml::document::ptr m_doc;
     void init_dpi();
+    std::unique_ptr<IRenderBackend> m_backend;
 private:
 
     float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
-    HWND m_hwnd = nullptr;
 
 };
 

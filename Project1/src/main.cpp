@@ -6,12 +6,15 @@ HWND      g_hWnd;
 HWND g_hStatus = nullptr;   // 状态栏句柄
 HWND g_hView = nullptr;
 HWND g_hTooltip = nullptr;
-
+HWND g_hImageview = nullptr;
 
 // ---------- 全局 ----------
 HINSTANCE g_hInst;
 std::shared_ptr<SimpleContainer> g_container;
-std::shared_ptr<SimpleContainer> g_tooltip_container;
+std::unique_ptr<D2DCanvas> g_canvas;
+std::unique_ptr<D2DCanvas> g_tooltip_canvas;
+std::unique_ptr<D2DCanvas> g_imageview_canvas;
+
 std::shared_ptr<EPUBBook>  g_book;
 
 Gdiplus::Image* g_pSplashImg = nullptr;
@@ -62,10 +65,10 @@ std::string g_tootip_css = "<style>img{display:block;width:100%;height:auto;max-
 static HWND  g_hwndSplit = nullptr;   // 分隔条
 static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
 static bool  g_dragging = false;     // 是否正在拖动
-static bool  g_tooltip_dragging = false;
-static POINT g_tooltip_drag_pos{ 0,0 };
+static bool  g_imageview_dragging = false;
+static POINT g_imageview_drag_pos{ 0,0 };
 static bool g_mouse_tracked = false;
-static bool g_isImageview = false;
+
 static int g_tooltipRenderW = 0;   // 当前 tooltip 渲染宽度（客户区）
 // 全局
 std::unique_ptr<TocPanel> g_toc;
@@ -1178,17 +1181,17 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_SIZE:
     {
-        if (g_container && g_container->m_canvas)
+        if ( g_canvas)
         {
             RECT rcClient;
             GetClientRect(hwnd, &rcClient);   // ← 这才是客户区
-            g_container->resize(rcClient.right, rcClient.bottom);
+            g_canvas->resize(rcClient.right, rcClient.bottom);
         }
         return 0;
     }
     case WM_LBUTTONDOWN:
     {
-        if (!g_container || !g_container->m_doc) { break; }
+        if (!g_canvas || !g_canvas->m_doc) { break; }
 
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
@@ -1197,7 +1200,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int doc_x = x - g_center_offset;
         int doc_y = y + g_offsetY;
         litehtml::position::vector redraw_boxes;
-        g_container->m_doc->on_lbutton_down(doc_x, doc_y, 0, 0, redraw_boxes);
+        g_canvas->m_doc->on_lbutton_down(doc_x, doc_y, 0, 0, redraw_boxes);
         break;
     }
     case WM_LBUTTONUP:
@@ -1210,12 +1213,12 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
         //g_book->hide_tooltip();
-        if (!g_container->m_doc) { return 0; }
+        if (!g_canvas->m_doc) { return 0; }
 
         int doc_x = x - g_center_offset;
         int doc_y = y + g_offsetY;
         litehtml::position::vector redraw_boxes;
-        g_container->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxes);
+        g_canvas->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxes);
 
         break;
     }
@@ -1226,7 +1229,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
-        if (!g_container->m_doc) break;
+        if (!g_canvas->m_doc) break;
         int x = GET_X_LPARAM(lp);
         int y = GET_Y_LPARAM(lp);
 
@@ -1236,7 +1239,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
   
 
         litehtml::position::vector redraw_boxes;
-        g_container->m_doc->on_mouse_over(doc_x, doc_y, 0, 0, redraw_boxes);
+        g_canvas->m_doc->on_mouse_over(doc_x, doc_y, 0, 0, redraw_boxes);
 
 
 
@@ -1248,7 +1251,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         litehtml::document::ptr doc(
             reinterpret_cast<litehtml::document*>(wp),
             [](litehtml::document*) {});   // 空删除器，所有权仍在 g_vd
-        g_container->m_doc = doc;
+        g_canvas->m_doc = doc;
         
         g_states.isUpdate.store(true);
         InvalidateRect(g_hView, nullptr, false);
@@ -1263,11 +1266,11 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);  
         }
  
-        if (!g_container->m_doc) { return 0; }
+        if (!g_canvas->m_doc) { return 0; }
         wchar_t* sel = reinterpret_cast<wchar_t*>(wp);
         if (sel) {
             std::string cssSel = "[id=\"" + w2a(sel) + "\"]";
-            if (auto el = g_container->m_doc->root()->select_one(cssSel.c_str())) {
+            if (auto el = g_canvas->m_doc->root()->select_one(cssSel.c_str())) {
                 g_offsetY = el->get_placement().y;
             }
             free(sel);          // 对应 _wcsdup
@@ -1318,7 +1321,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
 
         litehtml::position::vector redraw_box;
-        g_container->m_doc->on_mouse_leave(redraw_box);
+        g_canvas->m_doc->on_mouse_leave(redraw_box);
 
   
 
@@ -1375,7 +1378,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             float factor = (delta > 0) ? 1.1f : 0.9f;     // 放大 / 缩小系数
 
             // 2. 更新全局缩放
-            g_cfg.zoom_factor = std::clamp(g_cfg.zoom_factor * factor, 0.25f, 5.0f);
+            g_canvas->m_zoom_factor = std::clamp(g_canvas->m_zoom_factor * factor, 0.25f, 5.0f);
             UpdateCache();
             // 3. 重绘
             InvalidateRect(hwnd, NULL, FALSE);
@@ -1403,16 +1406,16 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_PAINT:
 
-        if (g_container && g_container->m_doc && g_container->m_canvas && g_states.isUpdate.exchange(false))
+        if (g_canvas && g_canvas->m_doc  && g_states.isUpdate.exchange(false))
         {
 
             RECT rc;
             GetClientRect(g_hView, &rc);
-            g_container->m_canvas->BeginDraw();
+            g_canvas->BeginDraw();
             litehtml::position clip(g_center_offset, 0, g_cfg.document_width, rc.bottom - rc.top);
-            g_container->m_doc->draw(g_container->m_canvas->getContext(),
+            g_canvas->m_doc->draw(g_canvas->getContext(),
                 g_center_offset, -g_offsetY, &clip);
-            g_container->m_canvas->EndDraw();
+            g_canvas->EndDraw();
         }
 
         return 0;
@@ -1461,7 +1464,7 @@ void request_doc_async(int client_h, int& scrollY, int& offsetY)
 }
 void UpdateCache()
 {
-    if (!g_container || !g_vd || !g_book) return;
+    if (!g_canvas || !g_vd || !g_book) return;
 
     RECT rc;
     GetClientRect(g_hView, &rc);
@@ -1470,7 +1473,7 @@ void UpdateCache()
     
     //request_doc_async(h, g_scrollY, g_offsetY);
     auto doc = g_vd->get_doc(h, g_scrollY, g_offsetY);
-    g_container->m_doc = doc;
+    g_canvas->m_doc = doc;
 
     g_states.isUpdate.store(true);
 
@@ -1538,7 +1541,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   
 
         g_container->clear();
-        g_container->m_canvas->clear();
+        g_canvas->clear();
         g_book->clear();
         g_toc->clear();
         InvalidateRect(g_hView, nullptr, true);
@@ -1574,7 +1577,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
     {
         litehtml::position::vector redraw_box;
-        g_container->m_doc->on_mouse_leave(redraw_box);
+        g_canvas->m_doc->on_mouse_leave(redraw_box);
         return 0;
     }
     case WM_EPUB_PARSED: {
@@ -1977,6 +1980,136 @@ bool SaveHDCAsBmp(HDC hdc, int width, int height, const wchar_t* name)
     DeleteDC(memDC);
     return true;
 }
+LRESULT CALLBACK ImageviewProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
+{
+    switch(m)
+    {
+    case WM_DESTROY: 
+        return 0;
+    case WM_PAINT:
+    {
+        if (!IsWindowVisible(g_hImageview)) { return 0; }
+        if (!g_imageview_canvas)
+        {
+            OutputDebugStringA("[TooltipProc] self or doc null\n");
+            break;
+        }
+
+        if (g_states.isImageviewUpdate.exchange(false))
+        {
+  
+
+            g_imageview_canvas->BeginDraw();
+            RECT rc;
+            GetClientRect(g_hImageview, &rc);
+            litehtml::position clip(0, 0, rc.right-rc.left, rc.bottom-rc.top);
+            g_imageview_canvas->m_doc->draw(
+                g_imageview_canvas->getContext(),   // 强制转换
+                0, 0, &clip);
+            g_imageview_canvas->EndDraw();
+
+        }
+        return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+        static int currentW = [] {
+            RECT rc; GetClientRect(g_hImageview, &rc);
+            return rc.right - rc.left;   // 第一次用真实客户区宽度
+            }();
+        int delta = GET_WHEEL_DELTA_WPARAM(w);
+        float factor = (delta > 0) ? 1.1f : 0.9f; /* 1. 鼠标指针在屏幕上的位置 */
+        POINT pt;
+        GetCursorPos(&pt); /* 2. 当前窗口矩形（屏幕坐标） */
+        RECT wr; GetWindowRect(hwnd, &wr); /* 3. 获取屏幕工作区大小（不含任务栏） */
+
+        MONITORINFO mi{ sizeof(mi) };
+        GetMonitorInfo(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi);
+        int scrW = mi.rcWork.right - mi.rcWork.left;
+        int scrH = mi.rcWork.bottom - mi.rcWork.top;
+        /* 3.5 提前判断：若窗口外框已顶满屏幕，放大就忽略 */
+        DWORD style = GetWindowLong(hwnd, GWL_STYLE);
+        DWORD exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        UINT dpi = GetDpiForWindow(hwnd);
+        RECT rNow{ 0, 0, currentW, 1 }; // 高度先随便填，只要算宽度 
+        AdjustWindowRectExForDpi(&rNow, style, FALSE, exStyle, dpi);
+        int winW_now = rNow.right - rNow.left;
+        g_imageview_canvas->m_doc->render(currentW);
+        int docH_now = g_imageview_canvas->m_doc->height(); RECT rH{ 0, 0, 1, docH_now };
+        AdjustWindowRectExForDpi(&rH, style, FALSE, exStyle, dpi);
+        int winH_now = rH.bottom - rH.top; // 放大且已顶满 → 直接 return 
+        if (factor > 1.0f && (winW_now >= scrW || winH_now >= scrH)) { return 0; } /* 4. 计算新的渲染尺寸，并立即限制在屏幕内 */
+        int renderW = std::max(32, static_cast<int>(currentW * factor + 0.5f));
+        int renderH = 0; // 先限制宽度 
+        renderW = std::min(renderW, scrW); // 重新渲染得到高度 
+        g_imageview_canvas->m_doc->render(renderW);
+        renderH = g_imageview_canvas->m_doc->height(); // 再限制高度
+        renderH = std::min(renderH, scrH);
+        renderW = std::max(renderW, 32); // 防止极端情况宽度过小 
+        /* 5. 计算窗口外框尺寸（含标题栏/边框） */
+        RECT r{ 0, 0, renderW, renderH };
+        AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi);
+        int winW = r.right - r.left; int winH = r.bottom - r.top;
+        /* 6. 以鼠标位置为缩放原点，计算新左上角 */
+        int newX = pt.x - (pt.x - wr.left) * winW / (wr.right - wr.left);
+        int newY = pt.y - (pt.y - wr.top) * winH / (wr.bottom - wr.top);
+        /* 7. 最终再保证左上角也在屏幕内（简单 clamp） */
+        newX = std::max((long)newX, mi.rcWork.left);
+        newY = std::max((long)newY, mi.rcWork.top);
+        newX = std::min((long)newX, mi.rcWork.right - winW);
+        newY = std::min((long)newY, mi.rcWork.bottom - winH);
+        /* 8. 更新窗口 & 画布 */
+        g_imageview_canvas->resize(renderW, renderH);
+        SetWindowPos(hwnd, HWND_TOPMOST, newX, newY, winW, winH, SWP_NOACTIVATE | SWP_NOZORDER);
+
+        currentW = renderW;
+        g_states.isImageviewUpdate.store(true);
+        InvalidateRect(hwnd, nullptr, false);
+
+        return 0;
+    }
+                      /* 2. 左键拖动 */
+    case WM_LBUTTONDOWN:
+        g_imageview_dragging = true;
+        SetCapture(hwnd);                     // 锁定鼠标
+        g_imageview_drag_pos = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (g_imageview_dragging)
+        {
+            g_imageview_dragging = false;
+            ReleaseCapture();
+        }
+
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (g_imageview_dragging)
+        {
+            int dx = GET_X_LPARAM(l) - g_imageview_drag_pos.x;
+            int dy = GET_Y_LPARAM(l) - g_imageview_drag_pos.y;
+
+            RECT wr;
+            GetWindowRect(hwnd, &wr);
+            SetWindowPos(hwnd, nullptr,
+                wr.left + dx, wr.top + dy,
+                0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            g_states.isImageviewUpdate.store(true);
+        }
+        return 0;
+    case WM_RBUTTONUP:
+    {
+        g_book->hide_imageview();
+        return 0;
+    }
+    case WM_ERASEBKGND: {
+        return 1;
+    }
+    }
+    return DefWindowProc(hwnd, m, w, l);
+}
 LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 {
     switch (m)
@@ -1985,7 +2118,7 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
     case WM_PAINT:
     {
         if (!IsWindowVisible(g_hTooltip)) { return 0; }
-        if (!g_tooltip_container || !g_tooltip_container->m_canvas)
+        if (!g_tooltip_canvas)
         {
             OutputDebugStringA("[TooltipProc] self or doc null\n");
             break;
@@ -1993,14 +2126,14 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 
         if (g_states.isTooltipUpdate.exchange(false))
         {
-            g_tooltip_container->m_canvas->BeginDraw();
+            g_tooltip_canvas->BeginDraw();
             RECT rc;
             GetClientRect(g_hTooltip, &rc);
             litehtml::position clip(0, 0, rc.right, rc.bottom);
-            g_tooltip_container->m_doc->draw(
-                g_tooltip_container->m_canvas->getContext(),   // 强制转换
+            g_tooltip_canvas->m_doc->draw(
+                g_tooltip_canvas->getContext(),   // 强制转换
                 0, 0, &clip);
-            g_tooltip_container->m_canvas->EndDraw();
+            g_tooltip_canvas->EndDraw();
         
         }
         return 0;
@@ -2009,101 +2142,7 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 
         return 0;
     }
-                   // 在 TooltipProc 里
-// 在 TooltipProc 里
-    case WM_MOUSEWHEEL: {
-        static int currentW = [] {
-            RECT rc; GetClientRect(g_hTooltip, &rc);
-            return rc.right - rc.left;   // 第一次用真实客户区宽度
-            }();
-        int delta = GET_WHEEL_DELTA_WPARAM(w); 
-        float factor = (delta > 0) ? 1.1f : 0.9f; /* 1. 鼠标指针在屏幕上的位置 */ 
-        POINT pt; 
-        GetCursorPos(&pt); /* 2. 当前窗口矩形（屏幕坐标） */ 
-        RECT wr; GetWindowRect(hwnd, &wr); /* 3. 获取屏幕工作区大小（不含任务栏） */ 
-         
-        MONITORINFO mi{ sizeof(mi) }; 
-        GetMonitorInfo(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi); 
-        int scrW = mi.rcWork.right - mi.rcWork.left; 
-        int scrH = mi.rcWork.bottom - mi.rcWork.top;
-        /* 3.5 提前判断：若窗口外框已顶满屏幕，放大就忽略 */ 
-        DWORD style = GetWindowLong(hwnd, GWL_STYLE); 
-        DWORD exStyle = GetWindowLong(hwnd, GWL_EXSTYLE); 
-        UINT dpi = GetDpiForWindow(hwnd); 
-        RECT rNow{ 0, 0, currentW, 1 }; // 高度先随便填，只要算宽度 
-        AdjustWindowRectExForDpi(&rNow, style, FALSE, exStyle, dpi); 
-        int winW_now = rNow.right - rNow.left; 
-        g_tooltip_container->m_doc->render(currentW);
-        int docH_now = g_tooltip_container->m_doc->height(); RECT rH{ 0, 0, 1, docH_now };
-        AdjustWindowRectExForDpi(&rH, style, FALSE, exStyle, dpi); 
-        int winH_now = rH.bottom - rH.top; // 放大且已顶满 → 直接 return 
-        if (factor > 1.0f && (winW_now >= scrW || winH_now >= scrH)) { return 0; } /* 4. 计算新的渲染尺寸，并立即限制在屏幕内 */ 
-        int renderW = std::max(32, static_cast<int>(currentW * factor + 0.5f));
-        int renderH = 0; // 先限制宽度 
-        renderW = std::min(renderW, scrW); // 重新渲染得到高度 
-        g_tooltip_container->m_doc->render(renderW); 
-        renderH = g_tooltip_container->m_doc->height(); // 再限制高度
-        renderH = std::min(renderH, scrH); 
-        renderW = std::max(renderW, 32); // 防止极端情况宽度过小 
-        /* 5. 计算窗口外框尺寸（含标题栏/边框） */ 
-        RECT r{ 0, 0, renderW, renderH }; 
-        AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi); 
-        int winW = r.right - r.left; int winH = r.bottom - r.top; 
-        /* 6. 以鼠标位置为缩放原点，计算新左上角 */ 
-        int newX = pt.x - (pt.x - wr.left) * winW / (wr.right - wr.left); 
-        int newY = pt.y - (pt.y - wr.top) * winH / (wr.bottom - wr.top); 
-        /* 7. 最终再保证左上角也在屏幕内（简单 clamp） */ 
-        newX = std::max((long)newX, mi.rcWork.left); 
-        newY = std::max((long)newY, mi.rcWork.top); 
-        newX = std::min((long)newX, mi.rcWork.right - winW); 
-        newY = std::min((long)newY, mi.rcWork.bottom - winH); 
-        /* 8. 更新窗口 & 画布 */ 
-        g_tooltip_container->m_canvas->resize(renderW, renderH);
-        SetWindowPos(hwnd, HWND_TOPMOST, newX, newY, winW, winH, SWP_NOACTIVATE | SWP_NOZORDER); 
-
-        currentW = renderW;
-        g_states.isTooltipUpdate.store(true);
-        InvalidateRect(hwnd, nullptr, TRUE);
-
-        return 0;
-    }
-    /* 2. 左键拖动 */
-    case WM_LBUTTONDOWN:
-        g_tooltip_dragging = true;
-        SetCapture(hwnd);                     // 锁定鼠标
-        g_tooltip_drag_pos = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
-        return 0;
-
-    case WM_LBUTTONUP:
-        if (g_tooltip_dragging)
-        {
-            g_tooltip_dragging = false;
-            ReleaseCapture();
-        }
      
-        return 0;
-
-    case WM_MOUSEMOVE:
-        if (g_tooltip_dragging)
-        {
-            int dx = GET_X_LPARAM(l) - g_tooltip_drag_pos.x;
-            int dy = GET_Y_LPARAM(l) - g_tooltip_drag_pos.y;
-
-            RECT wr;
-            GetWindowRect(hwnd, &wr);
-            SetWindowPos(hwnd, nullptr,
-                wr.left + dx, wr.top + dy,
-                0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            g_states.isTooltipUpdate.store(true);
-        }
-        return 0;
-    case WM_RBUTTONUP:
-    {
-        g_isImageview = false;
-        g_book->hide_tooltip();
-        return 0;
-    }
 
     case WM_ERASEBKGND: {
         return 1;
@@ -2125,6 +2164,18 @@ void register_thumb_class()
     RegisterClassExW(&wc);
 }
 
+const wchar_t IMAGEVIEW_CLASS[] = L"Imageview";
+
+void register_imageview_class()
+{
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = ImageviewProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = IMAGEVIEW_CLASS;
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    RegisterClassExW(&wc);
+}
 
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
@@ -2145,6 +2196,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     RegisterViewClass(g_hInst);
     start_css_watcher();
     register_thumb_class();
+    register_imageview_class();
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_TREEVIEW_CLASSES };
     InitCommonControlsEx(&icc);
     // 在 CreateWindow 之前
@@ -2209,10 +2261,15 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         THUMB_CLASS, nullptr,
         WS_POPUP  | WS_THICKFRAME | WS_CLIPCHILDREN |WS_BORDER,
         0, 0, 300, 200,
-        g_hWnd, nullptr, g_hInst, nullptr);
+        g_hView, nullptr, g_hInst, nullptr);
 
 
-
+    g_hImageview = CreateWindowExW(
+        WS_EX_COMPOSITED,
+        IMAGEVIEW_CLASS, nullptr,
+        WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_BORDER,
+        0, 0, 300, 200,
+        g_hView, nullptr, g_hInst, nullptr);
 
     // 1. 在全局或合适位置声明
     AccelManager gAccel(g_hWnd);
@@ -2372,7 +2429,7 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 
 litehtml::pixel_t SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont)
 {
-    return m_canvas->backend()->text_width(text, hFont);
+    return m_backend->text_width(text, hFont);
 }
 
 
@@ -2389,18 +2446,18 @@ void SimpleContainer::get_viewport(litehtml::position& client) const
 {
     // 1. 取客户区物理像素
     RECT rc{};
-    GetClientRect(m_hwnd, &rc);
+    GetClientRect(g_hView, &rc);
 
     // 2. 计算滚动条宽度（垂直滚动条存在时）
     int scrollW = 0;
-    if (GetWindowLongPtr(m_hwnd, GWL_STYLE) & WS_VSCROLL)
+    if (GetWindowLongPtr(g_hView, GWL_STYLE) & WS_VSCROLL)
         scrollW = GetSystemMetrics(SM_CXVSCROLL);
 
     // 3. DPI 缩放因子
-    HDC hdc = GetDC(m_hwnd);
+    HDC hdc = GetDC(g_hView);
     int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
     int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(m_hwnd, hdc);
+    ReleaseDC(g_hView, hdc);
 
     float scaleX = 96.0f / dpiX;
     float scaleY = 96.0f / dpiY;
@@ -2541,7 +2598,7 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
         if (!href_raw) { return; }
         std::string id = g_book->extract_anchor(href_raw);
         if (id.empty()) { return; }
-        html = g_book->html_of_anchor_paragraph(g_container->m_doc.get(), id);
+        html = g_book->html_of_anchor_paragraph(g_canvas->m_doc.get(), id);
  
 
         // 如果已存在，先杀掉
@@ -2837,32 +2894,32 @@ void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     litehtml::uint_ptr hFont,
     litehtml::web_color color,
     const litehtml::position& pos) {
-    m_canvas->backend()->draw_text(hdc, text, hFont, color, pos);
+    m_backend->draw_text(hdc, text, hFont, color, pos);
 }
 
 void SimpleContainer::draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url)
 {
-    m_canvas->backend()->draw_image(hdc, layer, url, base_url);
+    m_backend->draw_image(hdc, layer, url, base_url);
 }
 
 void SimpleContainer::draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color)
 {
-    m_canvas->backend()->draw_solid_fill(hdc, layer, color);
+    m_backend->draw_solid_fill(hdc, layer, color);
 }
 
 void SimpleContainer::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient)
 {
-    m_canvas->backend()->draw_linear_gradient(hdc, layer, gradient);
+    m_backend->draw_linear_gradient(hdc, layer, gradient);
 }
 
 void SimpleContainer::draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient)
 {
-    m_canvas->backend()->draw_radial_gradient(hdc, layer, gradient);
+    m_backend->draw_radial_gradient(hdc, layer, gradient);
 }
 
 void SimpleContainer::draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient)
 {
-    m_canvas->backend()->draw_conic_gradient(hdc, layer, gradient);
+    m_backend->draw_conic_gradient(hdc, layer, gradient);
 }
 
 void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
@@ -2870,18 +2927,18 @@ void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
     const litehtml::position& pos,
     bool root)
 {
-    m_canvas->backend()->draw_borders(hdc, borders, pos, root);
+    m_backend->draw_borders(hdc, borders, pos, root);
 }
 
 
 litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm)
 {
-    return m_canvas->backend()->create_font(descr, doc, fm);
+    return m_backend->create_font(descr, doc, fm);
 }
 
 void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 {
-    m_canvas->backend()->delete_font(hFont);
+    m_backend->delete_font(hFont);
 }
 
 
@@ -2889,19 +2946,19 @@ void SimpleContainer::delete_font(litehtml::uint_ptr hFont)
 void SimpleContainer::draw_list_marker(litehtml::uint_ptr hdc,
     const litehtml::list_marker& marker)
 {
-    m_canvas->backend()->draw_list_marker(hdc, marker);
+    m_backend->draw_list_marker(hdc, marker);
 }
 
 
 void SimpleContainer::set_clip(const litehtml::position& pos,
     const litehtml::border_radiuses& radius)
 {
-    m_canvas->backend()->set_clip(pos, radius);
+    m_backend->set_clip(pos, radius);
 }
 
 void SimpleContainer::del_clip()
 {
-    m_canvas->backend()->del_clip();
+    m_backend->del_clip();
 }
 
 // DirectWrite backend
@@ -2910,19 +2967,40 @@ D2DCanvas::D2DCanvas(int w, int h, HWND hwnd)
     : m_w(w), m_h(h), m_hwnd(hwnd) {
 
 
-    //// 创建完 m_d2dRT 后立即加
-    //ComPtr<IDWriteFactory> dwf;
-    //DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-    //    __uuidof(IDWriteFactory),
-    //    reinterpret_cast<IUnknown**>(dwf.GetAddressOf()));
-    //ComPtr<IDWriteRenderingParams> rp;
-    //dwf->CreateCustomRenderingParams(1.0f, 1.0f, 1.0f,
-    //    DWRITE_PIXEL_GEOMETRY_RGB,
-    //    DWRITE_RENDERING_MODE_CLEARTYPE_GDI_CLASSIC,
-    //    &rp);
-    //m_d2dRT->SetTextRenderingParams(rp.Get());
+    /* 1) D2D 工厂（1.0 足够） */
+    HRESULT hr = D2D1CreateFactory(
+        D2D1_FACTORY_TYPE_SINGLE_THREADED,
+        __uuidof(ID2D1Factory),
+        nullptr,
+        reinterpret_cast<void**>(m_d2dFactory.GetAddressOf()));
+    if (FAILED(hr)) {
+        OutputDebugStringA("D2D1CreateFactory failed\n");
+        return;
+    }
 
-    m_backend = std::make_unique<D2DBackend>(w, h, m_hwnd);
+    /* 2) 计算窗口 DPI 缩放 */
+    float dpiX = 96.0f, dpiY = 96.0f;
+    m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);
+    const float scale = dpiX / 96.0f;
+
+    /* 3) 创建 HwndRenderTarget（直接画到窗口） */
+    hr = m_d2dFactory->CreateHwndRenderTarget(
+        D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                D2D1_ALPHA_MODE_PREMULTIPLIED),
+            dpiX, dpiY),
+        D2D1::HwndRenderTargetProperties(
+            m_hwnd,
+            D2D1::SizeU(
+                static_cast<UINT>(m_w * scale),
+                static_cast<UINT>(m_h * scale))),
+        &m_rt);
+    if (FAILED(hr)) {
+        OutputDebugStringA("CreateHwndRenderTarget failed\n");
+        return;
+    }
+
 
 }
 /* ---------- 把缓存位图贴到窗口 ---------- */
@@ -2942,20 +3020,49 @@ void D2DCanvas::present(HDC hdc, int x, int y)
 
 }
 
+void D2DCanvas::BeginDraw()
+{
+
+    m_rt->BeginDraw();
+    m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
+
+    // 1. 保存原始矩阵
+    m_rt->GetTransform(&m_oldMatrix);
+
+    // 2. 实时取鼠标在客户区的坐标
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(m_hwnd, &pt);   // 换成你自己的 HWND 获取函数
+
+    // 3. 以鼠标位置为中心整体缩放
+    m_rt->SetTransform(
+        D2D1::Matrix3x2F::Scale(
+            m_zoom_factor,
+            m_zoom_factor,
+            D2D1::Point2F(static_cast<float>(pt.x),
+                static_cast<float>(pt.y))));
+}
+void D2DCanvas::EndDraw()
+{
+    // 恢复原始矩阵
+    m_rt->SetTransform(m_oldMatrix);
+
+    m_rt->EndDraw();
+}
 
 // ---------- 辅助：UTF-8 ↔ UTF-16 ----------
 
 
 
 // ---------- 实现 ----------
-ComPtr<ID2D1SolidColorBrush> D2DBackend::getBrush(const litehtml::web_color& c)
+ComPtr<ID2D1SolidColorBrush> D2DBackend::getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c)
 {
     uint32_t key = (c.alpha << 24) | (c.red << 16) | (c.green << 8) | c.blue;
     auto it = m_brushPool.find(key);
     if (it != m_brushPool.end()) return it->second;
-
+    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
     ComPtr<ID2D1SolidColorBrush> brush;
-    m_rt->CreateSolidColorBrush(
+    rt->CreateSolidColorBrush(
         D2D1::ColorF(c.red / 255.f, c.green / 255.f, c.blue / 255.f, c.alpha / 255.f),
         &brush);
     m_brushPool[key] = brush;
@@ -2994,11 +3101,12 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     const litehtml::position& pos)
 {
     if (!text || !*text || !hFont) return;
+    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
     FontPair* fp = reinterpret_cast<FontPair*>(hFont);
     if (!fp) return;
 
     // 1. 画刷
-    auto brush = getBrush(color);
+    auto brush = getBrush(hdc, color);
     if (!brush) return;
 
     // 2. 文本
@@ -3010,21 +3118,21 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     if (!layout) return;
 
     // 3. 绘制文本
-    m_rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
+    rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
         static_cast<float>(pos.y)),
         layout.Get(), brush.Get());
 
     // 4. 绘制装饰线（下划线 / 删除线 / 上划线）
-    draw_decoration(fp, color, pos, layout.Get());
+    draw_decoration(hdc, fp, color, pos, layout.Get());
 }
-void D2DBackend::draw_decoration(const FontPair* fp,
+void D2DBackend::draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp,
     litehtml::web_color color,
     const litehtml::position& pos,
     IDWriteTextLayout* layout)
 {
     if (fp->descr.decoration_line == litehtml::text_decoration_line_none)
         return;
-
+    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
     /* 1. 文本整体尺寸 */
     DWRITE_TEXT_METRICS tm{};
     layout->GetMetrics(&tm);
@@ -3042,7 +3150,7 @@ void D2DBackend::draw_decoration(const FontPair* fp,
     const float yBase = static_cast<float>(pos.y) + baseline;
 
     /* 3. 画刷 */
-    auto brush = getBrush(fp->descr.decoration_color.is_current_color
+    auto brush = getBrush(hdc, fp->descr.decoration_color.is_current_color
         ? color
         : fp->descr.decoration_color);
     if (!brush) return;
@@ -3058,21 +3166,21 @@ void D2DBackend::draw_decoration(const FontPair* fp,
     if (fp->descr.decoration_line & litehtml::text_decoration_line_underline)
     {
         const float y = yBase + 1.0f;   // 可根据字体度量再微调
-        m_rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
+        rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
     }
 
     /* 删除线 */
     if (fp->descr.decoration_line & litehtml::text_decoration_line_line_through)
     {
         const float y = yBase - lineMetrics[0].height * 0.35f;
-        m_rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
+        rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
     }
 
     /* 上划线 */
     if (fp->descr.decoration_line & litehtml::text_decoration_line_overline)
     {
         const float y = yBase - lineMetrics[0].height;
-        m_rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
+        rt->DrawLine({ x0, y }, { x1, y }, brush.Get(), thick);
     }
 }
 // ----------------------------------------------------------
@@ -3106,6 +3214,7 @@ void D2DBackend::draw_image(litehtml::uint_ptr hdc,
     const std::string& base_url)
 {
     if (url.empty()) return;
+    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
 
     /* ---------- 1. 取缓存位图 ---------- */
     auto it = g_container->m_img_cache.find(url);
@@ -3114,27 +3223,38 @@ void D2DBackend::draw_image(litehtml::uint_ptr hdc,
     if (frame.rgba.empty()) return;
 
     ComPtr<ID2D1Bitmap> bmp;
-    auto d2d_it = m_d2dBitmapCache.find(url);
-    if (d2d_it != m_d2dBitmapCache.end())
-    {
-        bmp = d2d_it->second;
-    }
-    else
-    {
-        D2D1_BITMAP_PROPERTIES bp =
-            D2D1::BitmapProperties(
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                    D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if (SUCCEEDED(m_rt->CreateBitmap(
-            D2D1::SizeU(frame.width, frame.height),
-            frame.rgba.data(),
-            frame.stride,
-            bp,
-            &bmp)))
-        {
-            m_d2dBitmapCache.emplace(url, bmp);
-        }
-    }
+
+    D2D1_BITMAP_PROPERTIES bp =
+        D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                D2D1_ALPHA_MODE_PREMULTIPLIED));
+    rt->CreateBitmap(
+        D2D1::SizeU(frame.width, frame.height),
+        frame.rgba.data(),
+        frame.stride,
+        bp,
+        &bmp);
+    //auto d2d_it = m_d2dBitmapCache.find(url);
+    //if (d2d_it != m_d2dBitmapCache.end() && false)
+    //{
+    //    bmp = d2d_it->second;
+    //}
+    //else
+    //{
+    //    D2D1_BITMAP_PROPERTIES bp =
+    //        D2D1::BitmapProperties(
+    //            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+    //                D2D1_ALPHA_MODE_PREMULTIPLIED));
+    //    if (SUCCEEDED(rt->CreateBitmap(
+    //        D2D1::SizeU(frame.width, frame.height),
+    //        frame.rgba.data(),
+    //        frame.stride,
+    //        bp,
+    //        &bmp)))
+    //    {
+    //        m_d2dBitmapCache.emplace(url, bmp);
+    //    }
+    //}
     if (!bmp) return;
 
     /* ---------- 2. 计算目标矩形 ---------- */
@@ -3162,7 +3282,7 @@ void D2DBackend::draw_image(litehtml::uint_ptr hdc,
     D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
 
     /* ---------- 4. 绘制 ---------- */
-    m_rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
+    rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
         D2D1::RectF(0, 0, imgW, imgH));
 }
@@ -3581,8 +3701,8 @@ void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
     const litehtml::position& draw_pos,
     bool root)
 {
-    if (!m_rt) return;
-
+    if (!hdc) return;
+    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
     // 1. 收集四边
     std::array<SideInfo, 4> sides = {
         SideInfo{ (float)borders.top.width,    borders.top.color,    borders.top.style },
@@ -3597,7 +3717,7 @@ void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
 
     // 2. 建立工厂
     ComPtr<ID2D1Factory> factory;
-    m_rt->GetFactory(&factory);
+    rt->GetFactory(&factory);
 
     // 3. 构造外轮廓
     auto build_rounded_rect = [&](float l, float t, float r, float b,
@@ -3699,7 +3819,7 @@ void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
                 side.color.blue / 255.0f,
                 side.color.alpha / 255.0f);
         }
-        m_rt->CreateSolidColorBrush(clr, &brush);
+        rt->CreateSolidColorBrush(clr, &brush);
 
         // 为每条边单独构造路径（略繁琐，但保证独立颜色）
         ComPtr<ID2D1PathGeometry> sidePath;
@@ -3730,7 +3850,7 @@ void D2DBackend::draw_borders(litehtml::uint_ptr hdc,
         sideSink->Close();
 
         // 描边
-        m_rt->DrawGeometry(sidePath.Get(), brush.Get(), side.width);
+        rt->DrawGeometry(sidePath.Get(), brush.Get(), side.width);
     }
 }
 // 工具：转小写
@@ -3933,48 +4053,48 @@ void D2DBackend::build_rounded_rect_path(
 void D2DBackend::set_clip(const litehtml::position& pos,
     const litehtml::border_radiuses& bdr)
 {
-    if (!m_rt) return;
+    //if (!m_rt) return;
 
-    // 无圆角 → 矩形裁剪
-    if (is_all_zero(bdr))
-    {
-        m_rt->PushAxisAlignedClip(
-            D2D1::RectF(float(pos.left()), float(pos.top()),
-                float(pos.right()), float(pos.bottom())),
-            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        m_clipStack.emplace_back(nullptr);          // 标记为矩形
-        return;
-    }
+    //// 无圆角 → 矩形裁剪
+    //if (is_all_zero(bdr))
+    //{
+    //    m_rt->PushAxisAlignedClip(
+    //        D2D1::RectF(float(pos.left()), float(pos.top()),
+    //            float(pos.right()), float(pos.bottom())),
+    //        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    //    m_clipStack.emplace_back(nullptr);          // 标记为矩形
+    //    return;
+    //}
 
-    // 有圆角 → 用 PathGeometry + Layer
-    ComPtr<ID2D1Factory> factory;
-    m_rt->GetFactory(&factory);
+    //// 有圆角 → 用 PathGeometry + Layer
+    //ComPtr<ID2D1Factory> factory;
+    //m_rt->GetFactory(&factory);
 
-    ComPtr<ID2D1PathGeometry> path;
-    factory->CreatePathGeometry(&path);
-    ComPtr<ID2D1GeometrySink> sink;
-    path->Open(&sink);
-    build_rounded_rect_path(sink, pos, bdr);        // 见下
-    sink->Close();
+    //ComPtr<ID2D1PathGeometry> path;
+    //factory->CreatePathGeometry(&path);
+    //ComPtr<ID2D1GeometrySink> sink;
+    //path->Open(&sink);
+    //build_rounded_rect_path(sink, pos, bdr);        // 见下
+    //sink->Close();
 
-    ComPtr<ID2D1Layer> layer;
-    if (SUCCEEDED(m_rt->CreateLayer(nullptr, &layer)))
-    {
-        m_rt->PushLayer(
-            D2D1::LayerParameters(D2D1::InfiniteRect(), path.Get()),
-            layer.Get());
-        m_clipStack.emplace_back(std::move(layer));
-    }
+    //ComPtr<ID2D1Layer> layer;
+    //if (SUCCEEDED(m_rt->CreateLayer(nullptr, &layer)))
+    //{
+    //    m_rt->PushLayer(
+    //        D2D1::LayerParameters(D2D1::InfiniteRect(), path.Get()),
+    //        layer.Get());
+    //    m_clipStack.emplace_back(std::move(layer));
+    //}
 }
 
 void D2DBackend::del_clip()
 {
-    if (m_clipStack.empty()) return;
-    if (m_clipStack.back())
-        m_rt->PopLayer();           // 圆角
-    else
-        m_rt->PopAxisAlignedClip(); // 矩形
-    m_clipStack.pop_back();
+    //if (m_clipStack.empty()) return;
+    //if (m_clipStack.back())
+    //    m_rt->PopLayer();           // 圆角
+    //else
+    //    m_rt->PopAxisAlignedClip(); // 矩形
+    //m_clipStack.pop_back();
 }
 
 // GDI backend
@@ -4131,7 +4251,7 @@ void GdiBackend::del_clip()
 
 
 void EPUBBook::load_all_fonts() {
-    if (g_container && g_container->m_canvas)
+    if (g_container && g_container->m_backend)
     {
         auto fonts = collect_epub_fonts();
         FontKey key{ L"serif", 400, false, 0 };
@@ -4142,7 +4262,7 @@ void EPUBBook::load_all_fonts() {
         m_fontBin[key] = g_cfg.default_monospace;
         build_epub_font_index(g_book->ocf_pkg_, g_book.get());
 
-        g_container->m_canvas->backend()->load_all_fonts(fonts);
+        g_container->m_backend->load_all_fonts(fonts);
     }
 }
 
@@ -4150,25 +4270,20 @@ void EPUBBook::load_all_fonts() {
 
 /* ---------- 1. 静态工厂 ---------- */
 
-void SimpleContainer::makeBackend(HWND hwnd)
+void SimpleContainer::makeBackend()
 {
-    std::unique_ptr<ICanvas> canvas = nullptr;
-    RECT rc;
-    GetClientRect(g_hView, &rc);
-    int w = rc.right;
-    int h = rc.bottom;
+
     switch (g_cfg.fontRenderer) {
     case Renderer::GDI: {
-        canvas = std::make_unique<GdiCanvas>(w, h);
+        m_backend = std::make_unique<GdiBackend>(0, 0);
         break;
     }
     case Renderer::D2D: {
-        canvas = std::make_unique<D2DCanvas>(w, h, m_hwnd);
+        m_backend =  std::make_unique<D2DBackend>();
         break;
     }
 
     }
-    m_canvas = std::move(canvas);
 }
 
 
@@ -4639,10 +4754,7 @@ AppBootstrap::AppBootstrap() {
     //make_tooltip_backend();
     if (g_cfg.enableJS) { enableJS(); }
     if (!g_container) {
-        g_container = std::make_shared<SimpleContainer>(g_hView);
-    }
-    if (!g_tooltip_container) {
-        g_tooltip_container = std::make_shared<SimpleContainer>(g_hTooltip);
+        g_container = std::make_shared<SimpleContainer>();
     }
     if (!g_book)
     {
@@ -4661,6 +4773,9 @@ AppBootstrap::AppBootstrap() {
         g_toc = std::make_unique<TocPanel>(); 
         g_toc->GetWindow(g_hwndToc);
     }
+    if (!g_canvas) { g_canvas = std::make_unique<D2DCanvas>(10, 10, g_hView); }
+    if(!g_tooltip_canvas){ g_tooltip_canvas = std::make_unique<D2DCanvas>(10, 10, g_hTooltip); }
+    if(!g_imageview_canvas){ g_imageview_canvas = std::make_unique<D2DCanvas>(10, 10, g_hImageview); }
     // 绑定目录点击 -> 章节跳转
     g_toc->SetOnNavigate([](const std::wstring& href) {
         g_book->OnTreeSelChanged(href.c_str());
@@ -4680,35 +4795,7 @@ litehtml::uint_ptr GdiCanvas::getContext()
 void GdiCanvas::BeginDraw() { /* GDI 无需配对调用，留空 */ }
 void GdiCanvas::EndDraw() { /* 留空或在此处 BitBlt 到窗口 DC */ }
 
-litehtml::uint_ptr D2DCanvas::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_backend->m_rt.Get()); }
-void D2DCanvas::BeginDraw()
-{
-    m_backend->m_rt->BeginDraw();
-    m_backend->m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
-
-    // 1. 保存原始矩阵
-    m_backend->m_rt->GetTransform(&m_oldMatrix);
-
-    // 2. 实时取鼠标在客户区的坐标
-    POINT pt;
-    GetCursorPos(&pt);
-    ScreenToClient(g_hView, & pt);   // 换成你自己的 HWND 获取函数
-
-    // 3. 以鼠标位置为中心整体缩放
-    m_backend->m_rt->SetTransform(
-        D2D1::Matrix3x2F::Scale(
-            g_cfg.zoom_factor,
-            g_cfg.zoom_factor,
-            D2D1::Point2F(static_cast<float>(pt.x),
-                static_cast<float>(pt.y))));
-}
-void D2DCanvas::EndDraw()
-{
-    // 恢复原始矩阵
-    m_backend->m_rt->SetTransform(m_oldMatrix);
-
-    m_backend->m_rt->EndDraw();
-}
+litehtml::uint_ptr D2DCanvas::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_rt.Get()); }
 
 
 
@@ -4716,20 +4803,40 @@ void D2DCanvas::EndDraw()
 void GdiCanvas::resize(int width, int height) {
     m_w = width;
     m_h = height;
-    m_backend->resize(width, height);
 }
 
 
-void D2DCanvas::resize(int width, int height)
+void D2DCanvas::resize(int w, int h)
 {
-    if (width <= 0 || height <= 0) return;
+    if (w <= 0 || h <= 0) return;
 
-    m_w = width;
-    m_h = height;
-    m_backend->resize(m_w, m_h);
+    m_w = w;
+    m_h = h;
 
+    if (m_rt) {
+        D2D1_SIZE_U size{ static_cast<UINT32>(w), static_cast<UINT32>(h) };
+        if (SUCCEEDED(m_rt->Resize(size))) return;   // DPI 不变时直接 Resize
+        m_rt.Reset();                               // 失败就重建
+    }
+
+    /* 重新创建 HwndRenderTarget */
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    D2D1_RENDER_TARGET_PROPERTIES rtp =
+        D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0, D2D1_RENDER_TARGET_USAGE_NONE,
+            D2D1_FEATURE_LEVEL_DEFAULT);
+
+    D2D1_HWND_RENDER_TARGET_PROPERTIES hrtp =
+        D2D1::HwndRenderTargetProperties(
+            m_hwnd,
+            D2D1::SizeU(rc.right, rc.bottom),
+            D2D1_PRESENT_OPTIONS_IMMEDIATELY);
+
+    m_d2dFactory->CreateHwndRenderTarget(&rtp, &hrtp, &m_rt);
 }
-
 
 
 
@@ -4763,12 +4870,6 @@ HBITMAP GdiBackend::create_dib_from_frame(const ImageFrame& frame)
 
 
 
-void GdiBackend::resize(int width, int height) {
-    m_w = width;
-    m_h = height;
-
-
-}
 
 
 
@@ -4938,62 +5039,61 @@ void EPUBBook::show_imageview(const litehtml::element::ptr& el)
 {
     std::string html = get_html_of_image(el);
     if (html.empty()) { return; }
-    g_isImageview = true;
     POINT pt;
     GetCursorPos(&pt);   // pt.x, pt.y 为屏幕坐标
     //ScreenToClient(g_hView, &pt);   // 现在 pt.x, pt.y 是相对于窗口客户区的坐标
 
 
-    g_tooltip_container->m_doc = litehtml::document::createFromString(
-        { html.c_str(), litehtml::encoding::utf_8 }, g_tooltip_container.get());
+    g_imageview_canvas->m_doc = litehtml::document::createFromString(
+        { html.c_str(), litehtml::encoding::utf_8 }, g_container.get());
     int width = g_cfg.tooltip_width;
-    g_tooltip_container->m_doc->render(width);
+    g_imageview_canvas->m_doc->render(width);
 
-    int height = g_tooltip_container->m_doc->height();
+    int height = g_imageview_canvas->m_doc->height();
     auto tip_x = pt.x - width/2;
     auto tip_y = pt.y - height/2;
 
 
  
-    DWORD style = GetWindowLong(g_hTooltip, GWL_STYLE);
-    DWORD exStyle = GetWindowLong(g_hTooltip, GWL_EXSTYLE);
-    UINT dpi = GetDpiForWindow(g_hTooltip);
+    DWORD style = GetWindowLong(g_hImageview, GWL_STYLE);
+    DWORD exStyle = GetWindowLong(g_hImageview, GWL_EXSTYLE);
+    UINT dpi = GetDpiForWindow(g_hImageview);
     RECT r{ 0, 0, width, height };
     AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi);
-    SetWindowPos(g_hTooltip, HWND_TOPMOST,
+    g_imageview_canvas->resize(width, height);
+    SetWindowPos(g_hImageview, HWND_TOPMOST,
         tip_x, tip_y,
         r.right - r.left, r.bottom - r.top,
         SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
 
-    g_tooltip_container->m_canvas->resize(width, height);
-    g_states.isTooltipUpdate.store(true);
-    InvalidateRect(g_hTooltip, nullptr, true);
+
+    g_states.isImageviewUpdate.store(true);
+    InvalidateRect(g_hImageview, nullptr, true);
 }
 void EPUBBook::show_tooltip(const std::string txt)
 {
-    if (g_isImageview) { g_isImageview = false; }
     auto html = txt;
     //OutputDebugStringA(("[show_tooltip] " + std::to_string(x) + " " + std::to_string(y) + "\n").c_str());
     if (html.empty()) {  return; }
 
-    if (g_vd && !g_vd->m_blocks.empty())
-    {
-        html = "<html>" + g_vd->m_blocks.back().head + "<body>" + html + "</body></html>";
-    }
+    //if (g_vd && !g_vd->m_blocks.empty())
+    //{
+    //    html = "<html>" + g_vd->m_blocks.back().head + "<body>" + html + "</body></html>";
+    //}
     POINT pt;
     GetCursorPos(&pt);   // pt.x, pt.y 为屏幕坐标
     //ScreenToClient(g_hView, &pt);   // 现在 pt.x, pt.y 是相对于窗口客户区的坐标
 
 
 
-    g_tooltip_container->m_doc = litehtml::document::createFromString(
-        { html.c_str(), litehtml::encoding::utf_8 }, g_tooltip_container.get());
+    g_tooltip_canvas->m_doc = litehtml::document::createFromString(
+        { html.c_str(), litehtml::encoding::utf_8 }, g_container.get());
     int width = g_cfg.tooltip_width;
-    g_tooltip_container->m_doc->render(width);
-    int height = g_tooltip_container->m_doc->height();
+    g_tooltip_canvas->m_doc->render(width);
+    int height = g_tooltip_canvas->m_doc->height();
 
-    g_tooltip_container->m_canvas->resize(width, height);
+    g_tooltip_canvas->resize(width, height);
     int tip_x = pt.x - width / 2;
     int tip_y = pt.y - height - 20;
     if (tip_y < 0) { tip_y = pt.y + 20; }
@@ -5012,16 +5112,28 @@ void EPUBBook::show_tooltip(const std::string txt)
     InvalidateRect(g_hTooltip, nullptr, true);
 
 }
+void EPUBBook::hide_imageview()
+{
 
+    if (g_hImageview && IsWindowVisible(g_hImageview))
+    {
+        ShowWindow(g_hImageview, SW_HIDE);
+        if (g_imageview_canvas && g_imageview_canvas->m_doc)
+        {
+            g_imageview_canvas->m_doc.reset();
+        }
+
+    }
+}
 void EPUBBook::hide_tooltip()
 {
 
-    if (g_hTooltip  && IsWindowVisible(g_hTooltip) && !g_isImageview)
+    if (g_hTooltip  && IsWindowVisible(g_hTooltip) )
     {
         ShowWindow(g_hTooltip, SW_HIDE);
-        if (g_tooltip_container && g_tooltip_container->m_doc)
+        if (g_tooltip_canvas && g_tooltip_canvas->m_doc)
         {
-            g_tooltip_container->m_doc.reset();
+            g_tooltip_canvas->m_doc.reset();
         }
 
     }
@@ -5095,54 +5207,12 @@ std::string EPUBBook::get_anchor_html(litehtml::document* doc,
 
 
 
-std::set<std::wstring> D2DBackend::getCurrentFonts() {
-    std::set<std::wstring> out;
 
 
-    if (m_privateFonts)
-    {
-        UINT32 n = m_privateFonts->GetFontFamilyCount();
-        //OutputDebugStringW(L"【字体数量】 ");
-        //OutputDebugStringW(std::to_wstring(n).c_str());
-        //OutputDebugStringW(L"\n");
-
-        for (UINT32 i = 0; i < n; ++i)
-        {
-            ComPtr<IDWriteFontFamily> f;
-            m_privateFonts->GetFontFamily(i, &f);
-            IDWriteLocalizedStrings* names;
-            f->GetFamilyNames(&names);
-            UINT32 idx; BOOL exists;
-            names->FindLocaleName(L"en-us", &idx, &exists);
-            UINT32 len;
-            names->GetStringLength(idx, &len);
-            std::wstring buf(len + 1, 0);
-            names->GetString(idx, buf.data(), len + 1);
-            //wprintf(L"%u: %s\n", i, buf.c_str());
-            //OutputDebugStringW(buf.c_str());
-            //OutputDebugStringW(L" ");
-            out.emplace(std::move(buf));
-        }
-        //OutputDebugStringW(L"\n");
-    }
-    return out;
-}
-
-std::set<std::wstring> GdiCanvas::getCurrentFonts()
-{
-    return m_backend->getCurrentFonts();
-}
-
-std::set<std::wstring> GdiBackend::getCurrentFonts()
-{
-    return {};
-}
 
 
-std::set<std::wstring> D2DCanvas::getCurrentFonts()
-{
-    return m_backend->getCurrentFonts();
-}
+
+
 
 
 
@@ -5260,9 +5330,9 @@ GdiBackend::~GdiBackend() {
     }
 }
 
-SimpleContainer::SimpleContainer(HWND hwnd)
-    : m_hwnd(hwnd) {
-    if (hwnd) { makeBackend(m_hwnd); }
+SimpleContainer::SimpleContainer()
+ {
+    makeBackend(); 
     init_dpi();
 }
 
@@ -5271,13 +5341,6 @@ SimpleContainer::~SimpleContainer()
     clear();
 }
 
-void SimpleContainer::resize(int w, int h)
-{
-    if (m_canvas) {
-        m_canvas->resize(w, h);
-    }
-
-}
 
 
 ZipIndexW::ZipIndexW(mz_zip_archive& zip)
@@ -5341,7 +5404,7 @@ void SimpleContainer::clear()
 
     m_anchor_map.clear();
     m_doc.reset();
-    //m_canvas->clear();
+    m_backend->clear();
 }
 
 litehtml::pixel_t SimpleContainer::get_default_font_size() const
@@ -5368,7 +5431,7 @@ void EPUBBook::clear()
 
 void D2DCanvas::clear()
 {
-    m_backend->clear();
+    
 }
 
 void D2DBackend::clear()
@@ -5388,46 +5451,12 @@ void GdiBackend::clear() {}
 
 
 // ---------- 实现 ----------
-D2DBackend::D2DBackend(int w, int h, HWND hwnd)
-    : m_w(w), m_h(h), m_hwnd(hwnd)
+D2DBackend::D2DBackend()
 {
-    /* 1) D2D 工厂（1.0 足够） */
-    HRESULT hr = D2D1CreateFactory(
-        D2D1_FACTORY_TYPE_SINGLE_THREADED,
-        __uuidof(ID2D1Factory),
-        nullptr,
-        reinterpret_cast<void**>(m_d2dFactory.GetAddressOf()));
-    if (FAILED(hr)) {
-        OutputDebugStringA("D2D1CreateFactory failed\n");
-        return;
-    }
-
-    /* 2) 计算窗口 DPI 缩放 */
-    float dpiX = 96.0f, dpiY = 96.0f;
-    m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);
-    const float scale = dpiX / 96.0f;
-
-    /* 3) 创建 HwndRenderTarget（直接画到窗口） */
-    hr = m_d2dFactory->CreateHwndRenderTarget(
-        D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX, dpiY),
-        D2D1::HwndRenderTargetProperties(
-            m_hwnd,
-            D2D1::SizeU(
-                static_cast<UINT>(m_w * scale),
-                static_cast<UINT>(m_h * scale))),
-        &m_rt);
-    if (FAILED(hr)) {
-        OutputDebugStringA("CreateHwndRenderTarget failed\n");
-        return;
-    }
 
     /* 4) DirectWrite 工厂 */
     IDWriteFactory* pRaw = nullptr;
-    hr = DWriteCreateFactory(
+    HRESULT hr = DWriteCreateFactory(
         DWRITE_FACTORY_TYPE_SHARED,
         __uuidof(IDWriteFactory),
         reinterpret_cast<IUnknown**>(&pRaw));   // OK
@@ -5588,16 +5617,6 @@ void FontCache::clear() {
 
 
 
-
-void D2DBackend::resize(int width, int height) {
-    m_w = width;
-    m_h = height;
-    //m_rt.Reset();
-    D2D1_SIZE_U size{ m_w, m_h };
-    m_rt->Resize(size);   // HwndRenderTarget 专用
-
-
-}
 
 
 
