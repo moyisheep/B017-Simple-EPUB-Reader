@@ -2286,7 +2286,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     gAccel.add(ID_FONT_BIGGER, FCONTROL | FVIRTKEY, VK_ADD);
     gAccel.add(ID_FONT_SMALLER, FCONTROL | FVIRTKEY, VK_OEM_MINUS);
     gAccel.add(ID_FONT_SMALLER, FCONTROL | FVIRTKEY, VK_SUBTRACT);
-    gAccel.add(ID_FONT_RESET, FCONTROL | FVIRTKEY, VK_OEM_3);
+    gAccel.add(ID_FONT_RESET, FCONTROL | FVIRTKEY, VK_BACK);
 
 
     // 行高
@@ -2294,7 +2294,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     gAccel.add(ID_LINE_HEIGHT_UP, FCONTROL | FSHIFT | FVIRTKEY, VK_ADD);
     gAccel.add(ID_LINE_HEIGHT_DOWN, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_MINUS);
     gAccel.add(ID_LINE_HEIGHT_DOWN, FCONTROL | FSHIFT | FVIRTKEY, VK_SUBTRACT);
-    gAccel.add(ID_LINE_HEIGHT_RESET, FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_3);
+    gAccel.add(ID_LINE_HEIGHT_RESET, FCONTROL | FSHIFT | FVIRTKEY, VK_BACK);
 
 
     // 文档宽度
@@ -2302,7 +2302,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     gAccel.add(ID_WIDTH_BIGGER, FALT | FVIRTKEY, VK_ADD);
     gAccel.add(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_SUBTRACT);
     gAccel.add(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_OEM_MINUS);
-    gAccel.add(ID_WIDTH_RESET, FALT | FVIRTKEY, VK_OEM_3);
+    gAccel.add(ID_WIDTH_RESET, FALT | FVIRTKEY, VK_BACK);
   
 
 
@@ -5881,21 +5881,41 @@ void VirtualDoc::load_html(std::wstring& href)
     //load_by_id(m_top_block, id, false);
 }
 
+float VirtualDoc::get_height_by_id(int spine_id)
+{
+    for (auto b: m_blocks)
+    {
+        if(b.spine_id == spine_id)
+        {
+            return b.height;
+        }
+    }
+    return 0;
+}
 void VirtualDoc::reload()
 {
-    if (m_blocks.empty()) { return; }
-    ScrollPosition p = get_scroll_position();
-    auto id = p.spine_id;
-    auto href = get_href_by_id(id);
-    if (href.empty()) { return; }
-    
-    // 2. 重新排版
+    if (m_blocks.empty()) return;
+
+    // 1. 记录当前滚动百分比
+    ScrollPosition old = get_scroll_position();
+    double percent = 0.0;
+    auto old_height = get_height_by_id(old.spine_id);
+    auto href = get_href_by_id(old.spine_id);
+    if ( old_height > 0)          // 旧文档高度
+        percent = double(old.offset) / old_height;
+
+    // 2. 重新加载
     m_blocks.clear();
     load_html(href);
     UpdateCache();
 
-    g_offsetY = p.offset;
-    // 4. 重绘
+    // 3. 把百分比换算成新的像素值
+    int newOffset = static_cast<int>(std::round(percent * get_height_by_id(old.spine_id)));
+
+
+    g_offsetY = newOffset;
+
+
     InvalidateRect(g_hView, nullptr, TRUE);
     UpdateWindow(g_hView);
 }

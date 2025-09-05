@@ -778,6 +778,7 @@ public:
     void clear();
     ScrollPosition get_scroll_position();
     std::vector<HtmlBlock> m_blocks;
+    float get_height_by_id(int spine_id);
     void reload();
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
