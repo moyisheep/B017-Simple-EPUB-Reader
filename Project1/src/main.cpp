@@ -7,7 +7,7 @@ HWND g_hStatus = nullptr;   // 状态栏句柄
 HWND g_hView = nullptr;
 HWND g_hTooltip = nullptr;
 HWND g_hImageview = nullptr;
-
+HWND g_hViewScroll = nullptr;
 // ---------- 全局 ----------
 HINSTANCE g_hInst;
 std::shared_ptr<SimpleContainer> g_container;
@@ -37,7 +37,9 @@ constexpr UINT WM_EPUB_NAVIGATE = WM_APP + 7;
 
 constexpr UINT TB_SETBUTTONTEXT(WM_USER + 8);
 constexpr UINT WM_LOAD_ERROR(WM_USER + 9);
-
+constexpr UINT WM_USER_SCROLL(WM_USER + 10);
+constexpr UINT SBM_SETSPINECOUNT(WM_USER + 11);
+constexpr UINT SBM_SETPOSITION(WM_USER + 12);
 // 可随时改
 
 
@@ -72,8 +74,8 @@ static bool g_mouse_tracked = false;
 static int g_tooltipRenderW = 0;   // 当前 tooltip 渲染宽度（客户区）
 // 全局
 std::unique_ptr<TocPanel> g_toc;
+std::unique_ptr<ScrollBarEx> g_scrollbar;
 // 1. 在全局或合适位置声明
-
 
 
 static bool isWin10OrLater()
@@ -831,7 +833,7 @@ static std::string inject_css(std::string html)
     std::ostringstream style;
     style << "<style>\n"
         << ":root{font-size:" << g_cfg.font_size << "px;}\n"
-        << "body,p,li,div,h1,h2,h3,h4,h5,h6{line-height:" << g_cfg.line_height << ";}\n"
+        << "body,p,li,div,h1,h2,h3,h4,h5,h6,span, ul{line-height:" << g_cfg.line_height << ";}\n"
         << "</style>\n";
 
     const std::string& block = style.str();
@@ -1258,6 +1260,13 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         return 0;
     }
+    case WM_USER_SCROLL:
+    {
+        int offset = (int)wp;
+        int spine = (int)lp;
+        //scroll_to(offset);   // 你自己的函数
+        return 0;
+    }
     case WM_EPUB_ANCHOR:
     {
         // 更新阅读记录
@@ -1385,6 +1394,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         
             return 0;   // 已处理，不再传递
         }
+ 
         RECT rc;
         GetClientRect(hwnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
@@ -1401,6 +1411,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         UpdateCache();
         InvalidateRect(hwnd, nullptr, FALSE);
+
         return 0;
     }
 
@@ -1597,7 +1608,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DumpBookRecord();
         auto spine_id = record.lastSpineId;
         g_offsetY = record.lastOffset;
+        // 设置 5 章
+        SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, g_book->ocf_pkg_.spine.size(), 0);
 
+        // 设置第 2 章，高 800 px，当前偏移 120 px
+ 
         g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
         g_states.needRelayout.store(true);
         g_vd->load_book(g_book, g_container, g_cfg.document_width);
@@ -1628,7 +1643,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         /* 1. 工具栏高度 */
         int cyTB = 0;
 
-
         /* 2. 状态栏高度 */
         int cySB = 0;
         if (g_cfg.displayStatusBar && g_hStatus)
@@ -1654,10 +1668,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ShowWindow(g_hwndToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
         ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
 
-        /* 5. 摆放子窗口（Y 起点统一为 cyTB） */
+        /* 5. 滚动条宽度 */
+        const int sbW = g_cfg.displayScrollBar ? 20 : 0;
+        ShowWindow(g_hViewScroll, g_cfg.displayScrollBar ? SW_SHOW : SW_HIDE);
+
+        /* 6. 摆放子窗口（Y 起点统一为 cyTB） */
         MoveWindow(g_hwndToc, 0, cyTB, tocW, cy, TRUE);
         MoveWindow(g_hwndSplit, tocW, cyTB, 2, cy, TRUE);
-        MoveWindow(g_hView, tocW + 2, cyTB, cx - tocW - 2, cy, TRUE);
+        MoveWindow(g_hView, tocW + 2, cyTB,
+            cx - tocW - 2 - sbW, cy, TRUE);      // 正文让出滚动条
+        MoveWindow(g_hViewScroll,
+            cx - sbW, cyTB, sbW, cy, TRUE);      // 滚动条贴最右
 
         UpdateCache();
         SendMessage(g_hView, WM_EPUB_UPDATE_SCROLLBAR, 0, 0);
@@ -2129,7 +2150,7 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
             g_tooltip_canvas->BeginDraw();
             RECT rc;
             GetClientRect(g_hTooltip, &rc);
-            litehtml::position clip(0, 0, rc.right, rc.bottom);
+            litehtml::position clip(0, 0, rc.right-rc.left, rc.bottom-rc.top);
             g_tooltip_canvas->m_doc->draw(
                 g_tooltip_canvas->getContext(),   // 强制转换
                 0, 0, &clip);
@@ -2177,6 +2198,18 @@ void register_imageview_class()
     RegisterClassExW(&wc);
 }
 
+const wchar_t SCROLLBAR_CLASS_NAME[] = L"ScrollBarEx";
+
+void register_scrollbar_class()
+{
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = ScrollBarEx::WndProc;
+    wc.hInstance = g_hInst;
+    wc.lpszClassName = SCROLLBAR_CLASS_NAME;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    RegisterClassExW(&wc);
+}
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
@@ -2197,8 +2230,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     start_css_watcher();
     register_thumb_class();
     register_imageview_class();
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_TREEVIEW_CLASSES };
-    InitCommonControlsEx(&icc);
+    register_scrollbar_class();
+
     // 在 CreateWindow 之前
     HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MENU_MAIN));
 
@@ -2252,7 +2285,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         g_hWnd, (HMENU)101, g_hInst, nullptr);
     g_hView = CreateWindowExW(
         0, L"EPUBView", nullptr,
-        WS_CHILD  | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS,
+        WS_CHILD   | WS_CLIPSIBLINGS,
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
 
@@ -2270,6 +2303,14 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_BORDER,
         0, 0, 300, 200,
         g_hView, nullptr, g_hInst, nullptr);
+
+  
+
+    g_hViewScroll = CreateWindowExW(0, SCROLLBAR_CLASS_NAME, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0, 0, 0, 0, g_hWnd, nullptr,
+        g_hInst, nullptr);
+
 
     // 1. 在全局或合适位置声明
     AccelManager gAccel(g_hWnd);
@@ -2543,6 +2584,8 @@ void SimpleContainer::set_base_url(const char* base)
 void SimpleContainer::link(const std::shared_ptr<litehtml::document>& doc,
     const litehtml::element::ptr& el)
 {
+    OutputDebugStringA(el->get_tagName());
+    OutputDebugStringA("\n");
     // 简单做法：把锚点 id -> 元素 存起来，点击时滚动
     const char* id = el->get_attr("id");
     if (id && *id)
@@ -4366,6 +4409,7 @@ std::wstring url_decode(const std::wstring& in)
 std::wstring EPUBBook::get_font_family_name(const std::vector<uint8_t>& data)
 {
     stbtt_fontinfo info;
+
     if (!stbtt_InitFont(&info, data.data(), 0))
         return L"";
 
@@ -4448,11 +4492,12 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
 
             MemFile font_file = book->read_zip(book->m_zipIndex.find(font_path).c_str());
             if (font_file.data.empty()) continue;
-
-
+  
+  
             std::wstring real_name = get_font_family_name(font_file.data);
 
-            // 5. 填充索引
+   
+                // 5. 填充索引
             FontKey key{ family, weight, italic , 0 };
             g_book->m_fontBin[key] = std::move(real_name);
         }
@@ -4756,18 +4801,9 @@ AppBootstrap::AppBootstrap() {
     if (!g_container) {
         g_container = std::make_shared<SimpleContainer>();
     }
-    if (!g_book)
-    {
-        g_book = std::make_unique<EPUBBook>();   // 保险：用新实例
-    }
-    if (!g_vd)
-    {
-        g_vd = std::make_unique<VirtualDoc>();
-    }
-    if(!g_recorder)
-    {
-        g_recorder = std::make_unique<ReadingRecorder>();
-    }
+    if (!g_book){ g_book = std::make_unique<EPUBBook>(); }
+    if (!g_vd){g_vd = std::make_unique<VirtualDoc>();}
+    if(!g_recorder){g_recorder = std::make_unique<ReadingRecorder>();}
     if (!g_toc) 
     { 
         g_toc = std::make_unique<TocPanel>(); 
@@ -4776,6 +4812,11 @@ AppBootstrap::AppBootstrap() {
     if (!g_canvas) { g_canvas = std::make_unique<D2DCanvas>(10, 10, g_hView); }
     if(!g_tooltip_canvas){ g_tooltip_canvas = std::make_unique<D2DCanvas>(10, 10, g_hTooltip); }
     if(!g_imageview_canvas){ g_imageview_canvas = std::make_unique<D2DCanvas>(10, 10, g_hImageview); }
+    if(!g_scrollbar) 
+    {
+        g_scrollbar = std::make_unique<ScrollBarEx>();
+        g_scrollbar->GetWindow(g_hViewScroll);
+    }
     // 绑定目录点击 -> 章节跳转
     g_toc->SetOnNavigate([](const std::wstring& href) {
         g_book->OnTreeSelChanged(href.c_str());
@@ -5479,8 +5520,6 @@ FontCache::FontCache() {
         DWRITE_FACTORY_TYPE_SHARED,
         __uuidof(IDWriteFactory),
         reinterpret_cast<IUnknown**>(m_dw.GetAddressOf()));   // ✅
-    m_defaultFamily = std::wstring(g_cfg.default_font_name.begin(),
-        g_cfg.default_font_name.end());
 }
 
 /* ---------------------------------------------------------- */
@@ -5489,8 +5528,8 @@ FontCache::get(std::wstring& familyName, const litehtml::font_description& descr
     IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl) {
     // 1. 构造键
     FontKey key{
-        familyName.empty() ? m_defaultFamily
-                             : std::wstring(familyName.begin(), familyName.end()),
+        
+        std::wstring(familyName.begin(), familyName.end()),
         descr.weight,
         descr.style == litehtml::font_style_italic,
         descr.size
@@ -5947,6 +5986,7 @@ ScrollPosition VirtualDoc::get_scroll_position()
     for (auto hb: m_blocks)
     {
         pos.spine_id = hb.spine_id;
+        pos.height = hb.height;
         if ((pos.offset - hb.height) < 0) {break; }
         pos.offset -= hb.height;
     }
@@ -6023,12 +6063,14 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
     scrollY = 0;
 
     ScrollPosition p = get_scroll_position();
-    if (p.spine_id != m_current_id)
-    {
-        m_current_id = p.spine_id;
-        std::wstring href = get_href_by_id(m_current_id);
+
+    m_current_id = p.spine_id;
+    //std::wstring href = get_href_by_id(m_current_id);
+    
+    SendMessage(g_hViewScroll, SBM_SETPOSITION,
+        p.spine_id, MAKELPARAM(p.height, p.offset));
         //g_toc->SetHighlightByHref(href);
-    }
+
     return m_doc;
 }
 
@@ -7075,4 +7117,214 @@ std::wstring EPUBBook::get_chapter_name_by_id(int spine_id)
 
     // 遍历到 id=0 仍未找到
     return L"";
+}
+
+
+
+
+// ---------- 静态 ----------
+
+
+
+void ScrollBarEx::GetWindow(HWND hwnd)
+{
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)this);
+    m_hwnd = hwnd;
+}
+// ---------- API ----------
+void ScrollBarEx::SetSpineCount(int n)
+{
+    m_count = n;
+    m_pos = {};
+    InvalidateRect(m_hwnd, nullptr, false);
+    UpdateWindow(m_hwnd);
+}
+
+
+
+void ScrollBarEx::SetPosition(int spineId, int totalHeightPx, int offsetPx)
+{
+    if (spineId >= 0 && spineId < m_count)
+    {
+        m_pos.spine_id = spineId;
+        m_pos.height = totalHeightPx;
+        m_pos.offset = offsetPx;
+        InvalidateRect(m_hwnd, nullptr, false);
+        UpdateWindow(m_hwnd);
+    }
+}
+
+// ---------- 内部 ----------
+LRESULT CALLBACK ScrollBarEx::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    ScrollBarEx* self = (ScrollBarEx*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    switch (msg)
+    {
+    case WM_PAINT:          self->OnPaint(); return 0;
+    case WM_LBUTTONDOWN:  self->OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_MOUSEMOVE:      self->OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_LBUTTONUP:    self->OnLButtonUp(); return 0;
+    case WM_RBUTTONUP:    self->OnRButtonUp() ; return 0;
+    case SBM_SETSPINECOUNT:
+        if (self) self->SetSpineCount((int)wp);
+
+        return 0;
+
+    case SBM_SETPOSITION:
+        if (self) self->SetPosition((int)wp, (int)LOWORD(lp), (int)HIWORD(lp));
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wp, lp);
+}
+
+void ScrollBarEx::OnPaint()
+{
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(m_hwnd, &ps);
+
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+    const int W = rc.right - rc.left;
+    const int H = rc.bottom - rc.top;
+    const int CX = W / 2;
+
+    /* ---- 双缓冲 ---- */
+    HDC memDC = CreateCompatibleDC(hdc);
+    BITMAPINFO bi{ 0 };
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = W;
+    bi.bmiHeader.biHeight = -H;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits;
+    HBITMAP bmp = CreateDIBSection(memDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ oldBmp = SelectObject(memDC, bmp);
+    FillRect(memDC, &rc, (HBRUSH)(COLOR_BTNFACE + 1));
+
+    if (H > 0 && m_count > 0)
+    {
+        Gdiplus::Graphics g(memDC);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+        if (m_mouseIn)          // ── 滚动条模式 ──
+        {
+            /* 竖线 */
+            Gdiplus::Pen linePen(Gdiplus::Color(220, 220, 220), 3);
+            g.DrawLine(&linePen, CX, 0, CX, H);
+
+            /* 滑块 */
+            const double ratio = (m_pos.height > 0)
+                ? std::max(0.0f, std::min(1.0f, m_pos.offset / m_pos.height))
+                : 0.0;
+            const int thumbH = 24;
+            int thumbY = static_cast<int>(ratio * (H - thumbH));
+            thumbY = std::max(0, std::min(thumbY, H - thumbH));
+
+            Gdiplus::Rect r(CX - 6, thumbY, 12, thumbH);
+            Gdiplus::GraphicsPath path;
+            path.AddArc(r.X, r.Y, 6, 6, 180, 90);
+            path.AddArc(r.X + r.Width - 6, r.Y, 6, 6, 270, 90);
+            path.AddArc(r.X + r.Width - 6, r.Y + r.Height - 6, 6, 6, 0, 90);
+            path.AddArc(r.X, r.Y + r.Height - 6, 6, 6, 90, 90);
+            path.CloseFigure();
+            Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(0, 120, 215));
+            g.FillPath(&thumbBrush, &path);
+        }
+        else                    // ── 圆点模式 ──
+        {
+            const double step = static_cast<double>(H) / m_count;
+            for (int i = 0; i < m_count; ++i)
+            {
+                const int y = static_cast<int>((i + 0.5) * step);
+                const bool cur = (i == m_pos.spine_id);
+
+                const int r = cur ? 6 : 4;
+                Gdiplus::Color c = cur ? Gdiplus::Color(0, 120, 215)
+                    : Gdiplus::Color(180, 180, 180);
+
+                Gdiplus::SolidBrush br(c);
+                g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
+            }
+        }
+    }
+
+    BitBlt(hdc, 0, 0, W, H, memDC, 0, 0, SRCCOPY);
+    SelectObject(memDC, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(memDC);
+    EndPaint(m_hwnd, &ps);
+}
+bool ScrollBarEx::HitThumb(const POINT& pt) const
+{
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    if (m_count <= 0) return false;
+    double step = static_cast<double>(rc.bottom) / (m_count + 1);
+    int thumbY = static_cast<int>((m_pos.spine_id + 0.5) * step - THUMB_H / 2);
+    RECT thumbRc{ rc.right / 2 - 6, thumbY, rc.right / 2 + 6, thumbY + THUMB_H };
+    return PtInRect(&thumbRc, pt);
+}
+
+void ScrollBarEx::OnLButtonDown(int x, int y)
+{
+    POINT pt{ x, y };
+    if (HitThumb(pt))
+    {
+        SetCapture(m_hwnd);
+        m_thumb.drag = true;
+        m_thumb.dragY = y;              // 记录按下时鼠标 y（相对于窗口）
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+}
+
+
+void ScrollBarEx::OnMouseMove(int x, int y)
+{
+    POINT pt{ x, y };
+    bool in = HitThumb(pt);
+    if (in != m_thumb.hot)
+    {
+        m_thumb.hot = in;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+
+    if (m_thumb.drag)
+    {
+        RECT rc; GetClientRect(m_hwnd, &rc);
+
+        // 计算滑块新顶边（限制在客户区内）
+        int newTop = y - THUMB_H / 2;
+        newTop = std::max(0, std::min((newTop), static_cast<int>(rc.bottom - THUMB_H)));
+
+        // 根据滑块中心位置反推章节
+        double step = static_cast<double>(rc.bottom) / (m_count + 1);
+        int newId = static_cast<int>(std::round((newTop + THUMB_H / 2) / step) - 1);
+        newId = std::max(0, std::min(newId, m_count - 1));
+
+        if (newId != m_pos.spine_id)
+        {
+            m_pos.spine_id = newId;
+            //NotifyParent();   // 通知父窗口
+        }
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+}
+
+void ScrollBarEx::OnLButtonUp()
+{
+    if (!m_mouseIn) { m_mouseIn = true; InvalidateRect(m_hwnd, nullptr, false);     UpdateWindow(m_hwnd); }
+    if (m_thumb.drag)
+    {
+        ReleaseCapture();
+        m_thumb.drag = false;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+
+}
+
+void ScrollBarEx::OnRButtonUp()
+{
+     m_mouseIn = false; 
+     InvalidateRect(m_hwnd, nullptr, false);     
+     UpdateWindow(m_hwnd); 
 }

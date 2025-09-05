@@ -295,7 +295,6 @@ private:
     std::unordered_map<FontKey, FontCachePair> m_map;
     mutable std::shared_mutex              m_mtx;
     Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
-    std::wstring           m_defaultFamily;
 
 };
 // -------------- DirectWrite-D2D 后端 -----------------
@@ -621,7 +620,7 @@ struct AppSettings {
 
     float zoom_factor = 1.0f;
     Renderer fontRenderer = Renderer::D2D;
-    std::string default_font_name = "Segoe UI";
+    std::string default_font_name = "Microsoft YaHei";
 
     float line_height_multiplier = 1.5;
     int tooltip_width = 500;
@@ -746,6 +745,7 @@ struct ScrollPosition
 {
     int spine_id = 0;
     int offset = 0;
+    float height = 0.0f;
 };
 
 
@@ -1094,4 +1094,48 @@ private:
     std::vector<ACCEL> m_entries;
     HACCEL m_hAccel = nullptr;
     HWND m_hwnd;
+};
+
+
+class ScrollBarEx
+{
+public:
+
+    void GetWindow(HWND hwnd);
+    // API
+    void SetSpineCount(int n);
+
+    void SetPosition(int spineId, int totalHeightPx, int offsetPx);
+    static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+private:
+
+
+    void OnPaint();
+    bool HitThumb(const POINT& pt) const;
+    void OnLButtonDown(int x, int y);
+    void OnMouseMove(int x, int y);
+    void OnLButtonUp();
+
+    void OnRButtonUp();
+
+    int m_count = 0;
+    ScrollPosition m_pos;
+
+    bool m_dragging = false;
+    int  m_dragAnchor = 0;
+    int DOT_R = 3;      // 普通圆点半径
+    int ACTIVE_R = 5;      // 当前圆点半径
+    int THUMB_H = 28;     // 滑块高度
+    int LINE_W = 2;      // 竖线宽
+    int GUTTER_W = 14;     // 整个滚动条宽
+
+    bool m_mouseIn = false;
+    struct ThumbState
+    {
+        bool hot = false;
+        bool drag = false;
+        int  dragY = 0;     // 鼠标按下时相对滑块顶部的偏移
+    };
+    ThumbState m_thumb;
+    HWND m_hwnd = nullptr;
 };
