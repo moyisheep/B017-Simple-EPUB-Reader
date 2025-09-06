@@ -1261,23 +1261,10 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             OutputDebugStringA("redraw_boxes not empty!\n"); 
         }
 
-
   
         break;
     }
-    case WM_EPUB_CACHE_UPDATED:
-    {
 
-        litehtml::document::ptr doc(
-            reinterpret_cast<litehtml::document*>(wp),
-            [](litehtml::document*) {});   // 空删除器，所有权仍在 g_vd
-        g_canvas->m_doc = doc;
-        
-        g_states.isUpdate.store(true);
-        InvalidateRect(g_hView, nullptr, false);
-
-        return 0;
-    }
     case WM_USER_SCROLL:
     {
         int offset = (int)wp;
@@ -1429,7 +1416,6 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         UpdateCache();
         InvalidateRect(hwnd, nullptr, FALSE);
-
         return 0;
     }
 
@@ -1446,13 +1432,9 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int h = rc.bottom - rc.top;
             litehtml::position clip(x, 0, w, h);
             g_canvas->present(x, y, &clip);
-            //g_canvas->BeginDraw();
-            //litehtml::position clip(g_center_offset, 0, g_cfg.document_width, rc.bottom - rc.top);
-            //g_canvas->m_doc->draw(g_canvas->getContext(),
-            //    g_center_offset, -g_offsetY, &clip);
-            //g_canvas->EndDraw();
-        }
 
+        }
+   
         return 0;
 
     case WM_ERASEBKGND:
@@ -1474,30 +1456,8 @@ ATOM RegisterViewClass(HINSTANCE hInst)
 }
 
 
-DWORD WINAPI GetDocThread(LPVOID lp)
-{
-    auto* p = static_cast<GetDocParam*>(lp);
 
-    // 真正耗时的操作
-    litehtml::document::ptr doc = g_vd->get_doc(
-        p->client_h,
-        p->scrollY,
-        p->offsetY);
 
-    // 把结果 Post 回主线程
-    PostMessageW(p->notify_hwnd,
-        WM_EPUB_CACHE_UPDATED,
-        reinterpret_cast<WPARAM>(doc.get()),   // doc*
-        0);
-
-    delete p;
-    return 0;
-}
-void request_doc_async(int client_h, int& scrollY, int& offsetY)
-{
-    auto* param = new GetDocParam{ client_h, scrollY, offsetY, g_hView };
-    CloseHandle(CreateThread(nullptr, 0, GetDocThread, param, 0, nullptr));
-}
 void UpdateCache()
 {
     if (!g_canvas || !g_vd || !g_book) return;
@@ -2406,7 +2366,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     // =====初始化隐藏=====
     PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
     PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
-
+    
     ShowWindow(g_hView, SW_HIDE);
     ShowWindow(g_hTooltip, SW_HIDE);
     // ====================
@@ -3086,18 +3046,13 @@ void D2DCanvas::BeginDraw()
     // 1. 保存原始矩阵
     m_rt->GetTransform(&m_oldMatrix);
 
-    // 2. 实时取鼠标在客户区的坐标
-    POINT pt;
-    GetCursorPos(&pt);
-    ScreenToClient(m_hwnd, &pt);   // 换成你自己的 HWND 获取函数
-
     // 3. 以鼠标位置为中心整体缩放
     m_rt->SetTransform(
         D2D1::Matrix3x2F::Scale(
             m_zoom_factor,
             m_zoom_factor,
-            D2D1::Point2F(static_cast<float>(pt.x),
-                static_cast<float>(pt.y))));
+            D2D1::Point2F(static_cast<float>(0),
+                static_cast<float>(0))));
 }
 void D2DCanvas::EndDraw()
 {
@@ -7494,6 +7449,7 @@ void D2DCanvas::on_lbutton_down(int x, int y)
 {
     m_selecting = true;
     m_selStart = m_selEnd = hit_test((float)x, (float)y);
+    UpdateCache();
 }
 
 void D2DCanvas::on_mouse_move(int x, int y)
@@ -7503,8 +7459,11 @@ void D2DCanvas::on_mouse_move(int x, int y)
         auto result = hit_test((float)x, (float)y);
         if (result >= 0) 
         { 
+            if (m_selStart < 0) { m_selStart = result; }
             m_selEnd = result; 
             UpdateCache();
+            InvalidateRect(m_hwnd, nullptr, false);
+            UpdateWindow(m_hwnd);
         }
  
 
@@ -7553,54 +7512,68 @@ void D2DCanvas::copy_to_clipboard()
     }
 }
 
-// 返回“若干行矩形”而不是一个大矩形
 std::vector<RECT> D2DCanvas::get_selection_rows() const
 {
     std::vector<RECT> rows;
     if (m_selStart == m_selEnd) return rows;
 
-    size_t start = std::min(m_selStart, m_selEnd);
-    size_t end = std::max(m_selStart, m_selEnd);
+    const size_t start = std::min(m_selStart, m_selEnd);
+    const size_t end = std::max(m_selStart, m_selEnd);
 
+    /* 1. 先按原逻辑收集每一“词”的矩形 */
     for (const auto& line : g_lines)
     {
         if (line.empty()) continue;
 
-        // 行首、行尾字符的偏移
-        size_t lineFirst = line.front().offset;
-        size_t lineLast = line.back().offset;
-
-        // 本行与选区无交集 → 跳过
+        const size_t lineFirst = line.front().offset;
+        const size_t lineLast = line.back().offset;
         if (lineLast < start || lineFirst >= end) continue;
 
-        // 行内首尾字符索引
         size_t idx0 = 0;
-        if (lineFirst < start) {
-            // 找到行内第一个 >= start 的字符
-            for (; idx0 < line.size() && line[idx0].offset < start; ++idx0) {}
-        }
+        while (idx0 < line.size() && line[idx0].offset < start) ++idx0;
 
         size_t idx1 = line.size() - 1;
-        if (lineLast >= end) {
-            for (; idx1 != static_cast<size_t>(-1) && line[idx1].offset >= end; --idx1) {}
-        }
+        while (idx1 != static_cast<size_t>(-1) && line[idx1].offset >= end) --idx1;
 
-        if (idx0 > idx1) continue;   // 本行没有字符被选中
+        if (idx0 > idx1) continue;
 
-        // 行矩形
         const D2D1_RECT_F& r0 = line[idx0].rect;
         const D2D1_RECT_F& r1 = line[idx1].rect;
 
         RECT row;
-        row.left = r0.left;
-        row.top = r0.top;
-        row.right = r1.right;
-        row.bottom = std::max(r0.bottom, r1.bottom); // 防止不同字体高度差异
+        row.left = static_cast<LONG>(r0.left);
+        row.top = static_cast<LONG>(r0.top);
+        row.right = static_cast<LONG>(r1.right);
+        row.bottom = static_cast<LONG>(std::max(r0.bottom, r1.bottom));
         rows.push_back(row);
     }
-    return rows;
+
+    /* 2. 把同一水平行的矩形横向合并（最小改动） */
+    if (rows.empty()) return rows;
+
+    std::vector<RECT> merged;
+    RECT cur = rows.front();
+
+    for (size_t i = 1; i < rows.size(); ++i)
+    {
+        const RECT& r = rows[i];
+        // 同一行：top 差值 ≤ 1 像素
+        if (std::abs(r.top - cur.top) <= 1)
+        {
+            cur.left = std::min(cur.left, r.left);
+            cur.right = std::max(cur.right, r.right);
+            cur.bottom = std::max(cur.bottom, r.bottom);
+        }
+        else
+        {
+            merged.push_back(cur);
+            cur = r;
+        }
+    }
+    merged.push_back(cur);
+    return merged;
 }
-/* ---------- 把缓存位图贴到窗口 ---------- */
+
 void D2DCanvas::present(int x, int y, litehtml::position* clip)
 {
 
@@ -7620,7 +7593,7 @@ void D2DCanvas::present(int x, int y, litehtml::position* clip)
             D2D1::ColorF(0.2f, 0.5f, 1.0f, 0.4f),   // 半透明蓝
             &m_selBrush);
     }
-    if (m_selStart != m_selEnd && m_selBrush)
+    if (m_selStart != m_selEnd && m_selBrush && m_selStart >= 0 && m_selEnd >= 0)
     {
         m_rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         for (const auto& row : get_selection_rows())

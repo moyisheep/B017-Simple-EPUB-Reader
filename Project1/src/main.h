@@ -457,6 +457,7 @@ public:
     ComPtr<ID2D1HwndRenderTarget> m_rt;
     litehtml::document::ptr m_doc;
     float m_zoom_factor = 1.0f;
+
 private:
     int  m_w, m_h;
     ComPtr<ID2D1Bitmap> m_bmp;
@@ -466,14 +467,14 @@ private:
 
     int64_t hit_test(float x, float y);
 
-
+    bool   m_selecting = false;
 
 
 
     // 当前选区
-    size_t m_selStart = 0;   // 字符级偏移
-    size_t m_selEnd = 0;   // 同上
-    bool   m_selecting = false;
+    int64_t m_selStart = -1;   // 字符级偏移
+    int64_t m_selEnd = -1;   // 同上
+
 
     ComPtr<ID2D1SolidColorBrush> m_selBrush;
 };
