@@ -27,7 +27,7 @@
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
-
+#include <litehtml\render_item.h>
 
 
 #pragma comment(lib, "comctl32.lib")
@@ -145,7 +145,16 @@ namespace std {
     };
 }
 
+// 一个字符在窗口坐标系中的包围盒
+struct CharBox
+{
+    wchar_t  ch;
+    D2D1_RECT_F rect;   // 左上角 (x,y) 右下角 (x+width,y+height)
+    size_t   offset; // 在整篇纯文本中的偏移
+};
 
+// 一行文本的所有字符
+using LineBoxes = std::vector<CharBox>;
 
 // ---------- 字体缓存 ----------
 struct FontPair {
@@ -304,6 +313,12 @@ public:
     //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
 
 
+
+
+    void record_char_boxes(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, const std::wstring& wtxt, const litehtml::position& pos);
+
+
+
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
 
     void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
@@ -350,6 +365,7 @@ private:
     ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
 
     ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
+
     void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
 
     std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
@@ -360,6 +376,7 @@ private:
     ComPtr<IDWriteFactory>    m_dwrite;
 
     ComPtr<IDWriteTextAnalyzer> m_analyzer;
+
 };
 
 
@@ -370,7 +387,7 @@ public:
     /* 返回一个 IRenderBackend，用于 litehtml 绘制 */
 
     /* 把画布内容贴到窗口（WM_PAINT 用）*/
-    virtual void present(HDC hdc, int x, int y) = 0;
+    virtual void present(int x, int y, litehtml::position* clip) = 0;
 
     /* 尺寸 */
     virtual int  width()  const = 0;
@@ -395,7 +412,7 @@ public:
     GdiCanvas(int w, int h);
     ~GdiCanvas();
 
-    void present(HDC hdc, int x, int y) override;
+    void present(int x, int y, litehtml::position* clip) override {};
     int width()  const override { return m_w; }
     int height() const override { return m_h; }
     litehtml::uint_ptr getContext() override;
@@ -404,6 +421,7 @@ public:
     void resize(int width, int height) override;
 
     void clear() override;
+
 
 private:
     int  m_w, m_h;
@@ -415,13 +433,17 @@ private:
 class D2DCanvas : public ICanvas {
 public:
     D2DCanvas(int w, int h, HWND hwnd);
-    void present(HDC hdc, int x, int y) override;
+
+    void present(int x, int y, litehtml::position* clip) override;
     int width()  const override { return m_w; }
     int height() const override { return m_h; }
     litehtml::uint_ptr getContext() override;
     void BeginDraw() override;
     void EndDraw() override;
     void resize(int width, int height) override;
+
+
+
 
     void clear() override;
     ComPtr<ID2D1HwndRenderTarget> m_rt;
@@ -432,9 +454,7 @@ private:
     ComPtr<ID2D1Bitmap> m_bmp;
     D2D1_MATRIX_3X2_F m_oldMatrix{};
     HWND m_hwnd = nullptr;
-    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
-
-
+    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   
 };
 
 
@@ -599,6 +619,7 @@ struct AppSettings {
     bool enableGlobalCSS = false;
     bool enablePreprocessHTML = true;
     bool enableHoverPreview = true;
+    bool enableImagePreview = true;
 
     bool displayTOC = true;
     bool displayStatusBar = true;
@@ -1123,9 +1144,9 @@ private:
 
     bool m_dragging = false;
     int  m_dragAnchor = 0;
-    int DOT_R = 3;      // 普通圆点半径
-    int ACTIVE_R = 5;      // 当前圆点半径
-    int THUMB_H = 28;     // 滑块高度
+    int dot_r;      // 普通圆点半径
+    int ACTIVE_R = 6;      // 当前圆点半径
+    int thumbH = 24;     // 滑块高度
     int LINE_W = 2;      // 竖线宽
     int GUTTER_W = 14;     // 整个滚动条宽
 

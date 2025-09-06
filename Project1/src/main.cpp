@@ -76,7 +76,9 @@ static int g_tooltipRenderW = 0;   // 当前 tooltip 渲染宽度（客户区）
 std::unique_ptr<TocPanel> g_toc;
 std::unique_ptr<ScrollBarEx> g_scrollbar;
 // 1. 在全局或合适位置声明
-
+    // 整篇文档的所有行
+std::vector<LineBoxes> g_lines;
+std::wstring           g_plainText;       // 整篇纯文本
 
 static bool isWin10OrLater()
 {
@@ -1166,7 +1168,11 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 
 
 
-
+void convert_coordinate(POINT& pt)
+{
+    pt.x = pt.x - g_center_offset;
+    pt.y = pt.y + g_offsetY;
+}
 
 
 
@@ -1195,14 +1201,11 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         if (!g_canvas || !g_canvas->m_doc) { break; }
 
-        int x = GET_X_LPARAM(lp);
-        int y = GET_Y_LPARAM(lp);
-
-  
-        int doc_x = x - g_center_offset;
-        int doc_y = y + g_offsetY;
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        convert_coordinate(pt);
         litehtml::position::vector redraw_boxes;
-        g_canvas->m_doc->on_lbutton_down(doc_x, doc_y, 0, 0, redraw_boxes);
+        g_canvas->m_doc->on_lbutton_down(pt.x, pt.y, 0, 0, redraw_boxes);
+
         break;
     }
     case WM_LBUTTONUP:
@@ -1212,15 +1215,14 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
-        int x = GET_X_LPARAM(lp);
-        int y = GET_Y_LPARAM(lp);
+
         //g_book->hide_tooltip();
         if (!g_canvas->m_doc) { return 0; }
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        convert_coordinate(pt);
 
-        int doc_x = x - g_center_offset;
-        int doc_y = y + g_offsetY;
         litehtml::position::vector redraw_boxes;
-        g_canvas->m_doc->on_lbutton_up(doc_x, doc_y, 0, 0, redraw_boxes);
+        g_canvas->m_doc->on_lbutton_up(pt.x, pt.y, 0, 0, redraw_boxes);
 
         break;
     }
@@ -1232,19 +1234,27 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
         if (!g_canvas->m_doc) break;
-        int x = GET_X_LPARAM(lp);
-        int y = GET_Y_LPARAM(lp);
-
-        int doc_x = x - g_center_offset;
-        int doc_y = y + g_offsetY;
-
+   
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        convert_coordinate(pt);
   
-
+        
+        
         litehtml::position::vector redraw_boxes;
-        g_canvas->m_doc->on_mouse_over(doc_x, doc_y, 0, 0, redraw_boxes);
+        g_canvas->m_doc->on_mouse_over(pt.x, pt.y, 0, 0, redraw_boxes);
+        if (!redraw_boxes.empty()) {
+            for(auto r :redraw_boxes)
+            {
+                RECT rc{ r.left(), r.top(), r.right(), r.bottom()};
+                UpdateCache();
+                InvalidateRect(hwnd, &rc, true);
 
+            }
+            OutputDebugStringA("redraw_boxes not empty!\n"); 
+        }
 
-
+ 
+  
         break;
     }
     case WM_EPUB_CACHE_UPDATED:
@@ -1422,11 +1432,17 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             RECT rc;
             GetClientRect(g_hView, &rc);
-            g_canvas->BeginDraw();
-            litehtml::position clip(g_center_offset, 0, g_cfg.document_width, rc.bottom - rc.top);
-            g_canvas->m_doc->draw(g_canvas->getContext(),
-                g_center_offset, -g_offsetY, &clip);
-            g_canvas->EndDraw();
+            int x = g_center_offset;
+            int y = -g_offsetY;
+            int w = g_cfg.document_width;
+            int h = rc.bottom - rc.top;
+            litehtml::position clip(x, 0, w, h);
+            g_canvas->present(x, y, &clip);
+            //g_canvas->BeginDraw();
+            //litehtml::position clip(g_center_offset, 0, g_cfg.document_width, rc.bottom - rc.top);
+            //g_canvas->m_doc->draw(g_canvas->getContext(),
+            //    g_center_offset, -g_offsetY, &clip);
+            //g_canvas->EndDraw();
         }
 
         return 0;
@@ -2012,22 +2028,24 @@ LRESULT CALLBACK ImageviewProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
         if (!IsWindowVisible(g_hImageview)) { return 0; }
         if (!g_imageview_canvas)
         {
-            OutputDebugStringA("[TooltipProc] self or doc null\n");
+            OutputDebugStringA("[ImageviewProc] self or doc null\n");
             break;
         }
 
         if (g_states.isImageviewUpdate.exchange(false))
         {
-  
-
-            g_imageview_canvas->BeginDraw();
             RECT rc;
             GetClientRect(g_hImageview, &rc);
-            litehtml::position clip(0, 0, rc.right-rc.left, rc.bottom-rc.top);
-            g_imageview_canvas->m_doc->draw(
-                g_imageview_canvas->getContext(),   // 强制转换
-                0, 0, &clip);
-            g_imageview_canvas->EndDraw();
+            litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
+            g_imageview_canvas->present(0, 0, &clip);
+            //g_imageview_canvas->BeginDraw();
+            //RECT rc;
+            //GetClientRect(g_hImageview, &rc);
+            //litehtml::position clip(0, 0, rc.right-rc.left, rc.bottom-rc.top);
+            //g_imageview_canvas->m_doc->draw(
+            //    g_imageview_canvas->getContext(),   // 强制转换
+            //    0, 0, &clip);
+            //g_imageview_canvas->EndDraw();
 
         }
         return 0;
@@ -2147,27 +2165,26 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 
         if (g_states.isTooltipUpdate.exchange(false))
         {
-            g_tooltip_canvas->BeginDraw();
             RECT rc;
             GetClientRect(g_hTooltip, &rc);
-            litehtml::position clip(0, 0, rc.right-rc.left, rc.bottom-rc.top);
-            g_tooltip_canvas->m_doc->draw(
-                g_tooltip_canvas->getContext(),   // 强制转换
-                0, 0, &clip);
-            g_tooltip_canvas->EndDraw();
-        
+            litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
+            g_tooltip_canvas->present(0, 0, &clip);
+            //g_tooltip_canvas->BeginDraw();
+            //RECT rc;
+            //GetClientRect(g_hTooltip, &rc);
+            //litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
+            //g_tooltip_canvas->m_doc->draw(
+            //    g_tooltip_canvas->getContext(),   // 强制转换
+            //    0, 0, &clip);
+            //g_tooltip_canvas->EndDraw();
+
         }
         return 0;
     }
-    case WM_DESTROY: {
-
+    case WM_DESTROY:
         return 0;
-    }
-     
-
-    case WM_ERASEBKGND: {
+    case WM_ERASEBKGND:
         return 1;
-    }
     }
     return DefWindowProc(hwnd, m, w, l);
 }
@@ -2623,7 +2640,8 @@ bool SimpleContainer::on_element_click(const litehtml::element::ptr& el)
 {
     OutputDebugStringA(el->get_tagName());
     OutputDebugStringA("\n");
-    if (std::strcmp(el->get_tagName(), "img") == 0) { g_book->show_imageview(el); }
+    el->set_pseudo_class(litehtml::_hover_, true);
+    if (std::strcmp(el->get_tagName(), "img") == 0 && g_cfg.enableImagePreview) { g_book->show_imageview(el); }
     return true;
 }
 void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
@@ -2642,9 +2660,8 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
         std::string id = g_book->extract_anchor(href_raw);
         if (id.empty()) { return; }
         html = g_book->html_of_anchor_paragraph(g_canvas->m_doc.get(), id);
- 
-
-        // 如果已存在，先杀掉
+  
+         //如果已存在，先杀掉
         if (g_tooltipTimer)
         {
             timeKillEvent(g_tooltipTimer);
@@ -3047,17 +3064,19 @@ D2DCanvas::D2DCanvas(int w, int h, HWND hwnd)
 
 }
 /* ---------- 把缓存位图贴到窗口 ---------- */
-void D2DCanvas::present(HDC hdc, int x, int y)
+void D2DCanvas::present(int x, int y, litehtml::position* clip)
 {
 
 
-    //m_backend->m_rt->GetBitmap(&m_bmp);
 
-    // 2. 开始绘制
-    //m_backend->m_d2dRT->BeginDraw();
-    ////m_devCtx->Clear(D2D1::ColorF(D2D1::ColorF::White));
-    //m_backend->m_d2dRT->DrawBitmap(m_bmp.Get());
-    //m_backend->m_d2dRT->EndDraw();
+    BeginDraw();
+
+    m_doc->draw(getContext(),   // 强制转换
+        x, y, clip);
+
+
+
+    EndDraw();
 
 
 
@@ -3136,6 +3155,7 @@ ComPtr<IDWriteTextLayout> D2DBackend::getLayout(const std::wstring& txt,
     m_layoutCache[k] = layout;
     return layout;
 }
+
 
 void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     const char* text,
@@ -3328,6 +3348,7 @@ void D2DBackend::draw_image(litehtml::uint_ptr hdc,
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
         D2D1::RectF(0, 0, imgW, imgH));
+
 }
 
 inline bool D2DBackend::is_all_zero(const litehtml::border_radiuses& r)
@@ -4155,10 +4176,6 @@ GdiCanvas::~GdiCanvas()
     if (m_memDC) DeleteDC(m_memDC);
 }
 
-void GdiCanvas::present(HDC hdc, int x, int y)
-{
-    BitBlt(hdc, x, y, m_w, m_h, m_memDC, 0, 0, SRCCOPY);
-}
 
 
 
@@ -5029,6 +5046,67 @@ litehtml::element::ptr EPUBBook::find_link_in_chain(litehtml::element::ptr start
     return out;
 }
 
+ static void gumbo_serialize(const GumboNode* node, std::string& out)
+ {
+     if (node->type == GUMBO_NODE_TEXT)
+     {
+         out.append(node->v.text.text);
+         return;
+     }
+     if (node->type != GUMBO_NODE_ELEMENT) return;
+
+     const GumboElement& elem = node->v.element;
+     out.push_back('<');
+     out.append(gumbo_normalized_tagname(elem.tag));
+
+     // 属性
+     for (unsigned int i = 0; i < elem.attributes.length; ++i)
+     {
+         auto* attr = static_cast<GumboAttribute*>(elem.attributes.data[i]);
+         out.append(" ").append(attr->name).append("=\"")
+             .append(attr->value).append("\"");
+     }
+
+     if (elem.tag == GUMBO_TAG_IMG || elem.tag == GUMBO_TAG_BR)
+     {
+         // 自闭合
+         out.append(" />");
+     }
+     else
+     {
+         out.push_back('>');
+         for (unsigned int i = 0; i < elem.children.length; ++i)
+             gumbo_serialize(static_cast<GumboNode*>(elem.children.data[i]), out);
+         out.append("</").append(gumbo_normalized_tagname(elem.tag)).push_back('>');
+     }
+ }
+
+ // 从一段 HTML 中提取第一个 <img> 的 outerHTML；没有则返回空串
+ static std::string extract_first_img(const std::string& html)
+ {
+     GumboOutput* out = gumbo_parse(html.c_str());
+     std::string result;
+
+     // 深度优先找 <img>
+     std::function<void(const GumboNode*)> dfs = [&](const GumboNode* node)
+         {
+             if (!result.empty()) return;           // 已找到
+             if (node->type != GUMBO_NODE_ELEMENT) return;
+
+             const GumboElement& elem = node->v.element;
+             if (elem.tag == GUMBO_TAG_IMG)
+             {
+                 gumbo_serialize(node, result);
+                 return;
+             }
+             for (unsigned int i = 0; i < elem.children.length; ++i)
+                 dfs(static_cast<GumboNode*>(elem.children.data[i]));
+         };
+     dfs(out->root);
+
+     gumbo_destroy_output(&kGumboDefaultOptions, out);
+     return result;
+ }
 // 3. 核心函数：用 select_one 找 id，再向上找 <p>
 std::string EPUBBook::html_of_anchor_paragraph(litehtml::document* doc, const std::string& anchorId)
 {
@@ -5062,10 +5140,17 @@ std::string EPUBBook::html_of_anchor_paragraph(litehtml::document* doc, const st
     if (!p) return "";          // 兜底：直接返回自身
 
     std::string inner = get_html(p);
-    // 包一层带 inline-block 的 <p>
 
-    //return text;
-    return "<style>img{display:block;width:100%;height:auto;}</style>" + inner;
+    // 用 gumbo 处理
+    std::string imgOnly = extract_first_img(inner);
+    if (!imgOnly.empty())
+    {
+        return "<style>img{display:block;width:100%;height:auto;}</style>" + imgOnly;
+    }
+    else
+    {
+        return "<style>img{display:block;width:100%;height:auto;}</style>" + inner;
+    }
 }
 
 
@@ -5123,8 +5208,8 @@ void EPUBBook::show_tooltip(const std::string txt)
     //    html = "<html>" + g_vd->m_blocks.back().head + "<body>" + html + "</body></html>";
     //}
     POINT pt;
-    GetCursorPos(&pt);   // pt.x, pt.y 为屏幕坐标
-    //ScreenToClient(g_hView, &pt);   // 现在 pt.x, pt.y 是相对于窗口客户区的坐标
+    GetCursorPos(&pt);   
+
 
 
 
@@ -5134,7 +5219,7 @@ void EPUBBook::show_tooltip(const std::string txt)
     g_tooltip_canvas->m_doc->render(width);
     int height = g_tooltip_canvas->m_doc->height();
 
-    g_tooltip_canvas->resize(width, height);
+
     int tip_x = pt.x - width / 2;
     int tip_y = pt.y - height - 20;
     if (tip_y < 0) { tip_y = pt.y + 20; }
@@ -5143,6 +5228,7 @@ void EPUBBook::show_tooltip(const std::string txt)
     UINT dpi = GetDpiForWindow(g_hTooltip);
     RECT r{ 0, 0, width, height };
     AdjustWindowRectExForDpi(&r, style, FALSE, exStyle, dpi);
+    g_tooltip_canvas->resize(width, height);
     SetWindowPos(g_hTooltip, HWND_TOPMOST,
         tip_x, tip_y,
         r.right - r.left, r.bottom - r.top,
@@ -7207,17 +7293,18 @@ void ScrollBarEx::OnPaint()
         Gdiplus::Graphics g(memDC);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-        if (m_mouseIn)          // ── 滚动条模式 ──
+        /* ---------- 滚动条模式 ---------- */
+        if (m_mouseIn)
         {
-            /* 竖线 */
+            /* 1. 竖线 */
             Gdiplus::Pen linePen(Gdiplus::Color(220, 220, 220), 3);
             g.DrawLine(&linePen, CX, 0, CX, H);
 
-            /* 滑块 */
+            /* 2. 滑块 */
             const double ratio = (m_pos.height > 0)
                 ? std::max(0.0f, std::min(1.0f, m_pos.offset / m_pos.height))
                 : 0.0;
-            const int thumbH = 24;
+
             int thumbY = static_cast<int>(ratio * (H - thumbH));
             thumbY = std::max(0, std::min(thumbY, H - thumbH));
 
@@ -7230,25 +7317,61 @@ void ScrollBarEx::OnPaint()
             path.CloseFigure();
             Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(0, 120, 215));
             g.FillPath(&thumbBrush, &path);
+
+            /* 3. 顶部/底部横线 */
+            const int aboveCnt = m_pos.spine_id;
+            const int belowCnt = m_count - aboveCnt - 1;
+
+            const int maxHalfW = W / 2 - 10;          // 最大半长，留边距
+            const int topW = std::min(maxHalfW, aboveCnt * 3);   // 3px/章
+            const int bottomW = std::min(maxHalfW, belowCnt * 3);
+
+            Gdiplus::Pen markPen(Gdiplus::Color(160, 160, 160), 2);
+            if (aboveCnt > 0) g.DrawLine(&markPen, CX - topW, 2, CX + topW, 2);
+            if (belowCnt > 0) g.DrawLine(&markPen, CX - bottomW, H - 2, CX + bottomW, H - 2);
         }
-        else                    // ── 圆点模式 ──
+        /* ---------- 圆点模式 ---------- */
+        else
         {
+            const bool crowded = (m_count > 500);
+            if (m_count >= 1 && m_count < 30) dot_r = 3;
+            else if (m_count >= 30 && m_count < 100) dot_r = 2;
+            else if (m_count >= 100) dot_r = 1;
             const double step = static_cast<double>(H) / m_count;
+
+            /* 串起所有点的浅色细线 */
+            if (m_count > 1)
+            {
+                Gdiplus::Pen linkPen(Gdiplus::Color(220, 220, 220), 1);
+                g.DrawLine(&linkPen, CX, step, CX, H - step);
+            }
+
             for (int i = 0; i < m_count; ++i)
             {
+                /* 拥挤时只画当前点 */
+                if (i == m_pos.spine_id) continue;
+     
+
                 const int y = static_cast<int>((i + 0.5) * step);
-                const bool cur = (i == m_pos.spine_id);
+    
 
-                const int r = cur ? 6 : 4;
-                Gdiplus::Color c = cur ? Gdiplus::Color(0, 120, 215)
-                    : Gdiplus::Color(180, 180, 180);
+                const int r = dot_r;
+                Gdiplus::Color c =  Gdiplus::Color(200, 200, 200);
 
+                Gdiplus::SolidBrush br(c);
+                g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
+            }
+            /* 画当前章节的点 */
+            {
+                Gdiplus::Color c = Gdiplus::Color(0, 120, 215);
+               
+                int r = ACTIVE_R;
+                int y = (m_pos.spine_id + 0.5) * step;
                 Gdiplus::SolidBrush br(c);
                 g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
             }
         }
     }
-
     BitBlt(hdc, 0, 0, W, H, memDC, 0, 0, SRCCOPY);
     SelectObject(memDC, oldBmp);
     DeleteObject(bmp);
@@ -7257,12 +7380,19 @@ void ScrollBarEx::OnPaint()
 }
 bool ScrollBarEx::HitThumb(const POINT& pt) const
 {
-    RECT rc; GetClientRect(m_hwnd, &rc);
+
     if (m_count <= 0) return false;
-    double step = static_cast<double>(rc.bottom) / (m_count + 1);
-    int thumbY = static_cast<int>((m_pos.spine_id + 0.5) * step - THUMB_H / 2);
-    RECT thumbRc{ rc.right / 2 - 6, thumbY, rc.right / 2 + 6, thumbY + THUMB_H };
-    return PtInRect(&thumbRc, pt);
+    if (!m_mouseIn)return false;
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    int H = rc.bottom - rc.top;
+    const double ratio = (m_pos.height > 0)
+        ? std::max(0.0f, std::min(1.0f, m_pos.offset / m_pos.height))
+        : 0.0;
+
+    int thumbY = static_cast<int>(ratio * (H - thumbH));
+    thumbY = std::max(0, std::min(thumbY, H - thumbH));
+    if (pt.y >= thumbY && (pt.y) <= (thumbY + thumbH))return true;
+    return false;
 }
 
 void ScrollBarEx::OnLButtonDown(int x, int y)
@@ -7272,14 +7402,14 @@ void ScrollBarEx::OnLButtonDown(int x, int y)
     {
         SetCapture(m_hwnd);
         m_thumb.drag = true;
-        m_thumb.dragY = y;              // 记录按下时鼠标 y（相对于窗口）
-        InvalidateRect(m_hwnd, nullptr, FALSE);
+
+
     }
 }
 
-
 void ScrollBarEx::OnMouseMove(int x, int y)
 {
+    /* 悬停高亮（可选） */
     POINT pt{ x, y };
     bool in = HitThumb(pt);
     if (in != m_thumb.hot)
@@ -7290,29 +7420,22 @@ void ScrollBarEx::OnMouseMove(int x, int y)
 
     if (m_thumb.drag)
     {
-        RECT rc; GetClientRect(m_hwnd, &rc);
+        //ScreenToClient(m_hwnd, &pt);
+        //RECT rc; GetClientRect(m_hwnd, &rc);
+        //int h = rc.bottom - rc.top;
+        //float ratio = static_cast<float>(pt.y / h);
+        ///* 用偏移修正后的新顶边 */
+        //int newTop = m_pos.height * ratio ;
 
-        // 计算滑块新顶边（限制在客户区内）
-        int newTop = y - THUMB_H / 2;
-        newTop = std::max(0, std::min((newTop), static_cast<int>(rc.bottom - THUMB_H)));
 
-        // 根据滑块中心位置反推章节
-        double step = static_cast<double>(rc.bottom) / (m_count + 1);
-        int newId = static_cast<int>(std::round((newTop + THUMB_H / 2) / step) - 1);
-        newId = std::max(0, std::min(newId, m_count - 1));
-
-        if (newId != m_pos.spine_id)
-        {
-            m_pos.spine_id = newId;
-            //NotifyParent();   // 通知父窗口
-        }
-        InvalidateRect(m_hwnd, nullptr, FALSE);
+        //g_offsetY = newTop;
+        //UpdateCache();
+        //InvalidateRect(m_hwnd, nullptr, FALSE);
     }
 }
 
 void ScrollBarEx::OnLButtonUp()
 {
-    if (!m_mouseIn) { m_mouseIn = true; InvalidateRect(m_hwnd, nullptr, false);     UpdateWindow(m_hwnd); }
     if (m_thumb.drag)
     {
         ReleaseCapture();
@@ -7324,7 +7447,8 @@ void ScrollBarEx::OnLButtonUp()
 
 void ScrollBarEx::OnRButtonUp()
 {
-     m_mouseIn = false; 
+     m_mouseIn = !m_mouseIn;
      InvalidateRect(m_hwnd, nullptr, false);     
      UpdateWindow(m_hwnd); 
 }
+
