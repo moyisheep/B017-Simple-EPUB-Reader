@@ -31,6 +31,7 @@
 #define ID_WIDTH_BIGGER         40018
 #define ID_WIDTH_SMALLER        40019
 #define ID_WIDTH_RESET          40020
+#define ID_EDIT_COPY            40021
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED

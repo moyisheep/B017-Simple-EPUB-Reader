@@ -310,6 +310,7 @@ private:
 class D2DBackend : public IRenderBackend {
 public:
     D2DBackend();
+  
     //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
 
 
@@ -434,6 +435,8 @@ class D2DCanvas : public ICanvas {
 public:
     D2DCanvas(int w, int h, HWND hwnd);
 
+    std::vector<RECT> get_selection_rows() const;
+
     void present(int x, int y, litehtml::position* clip) override;
     int width()  const override { return m_w; }
     int height() const override { return m_h; }
@@ -442,7 +445,12 @@ public:
     void EndDraw() override;
     void resize(int width, int height) override;
 
-
+    void on_lbutton_dblclk(int x, int y);
+    void on_lbutton_up();
+    void on_lbutton_down(int x, int y);
+    void on_mouse_move(int x, int y);
+    void copy_to_clipboard();
+  
 
 
     void clear() override;
@@ -454,7 +462,20 @@ private:
     ComPtr<ID2D1Bitmap> m_bmp;
     D2D1_MATRIX_3X2_F m_oldMatrix{};
     HWND m_hwnd = nullptr;
-    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   
+    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
+
+    int64_t hit_test(float x, float y);
+
+
+
+
+
+    // 当前选区
+    size_t m_selStart = 0;   // 字符级偏移
+    size_t m_selEnd = 0;   // 同上
+    bool   m_selecting = false;
+
+    ComPtr<ID2D1SolidColorBrush> m_selBrush;
 };
 
 

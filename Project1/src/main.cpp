@@ -1202,6 +1202,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_canvas || !g_canvas->m_doc) { break; }
 
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        g_canvas->on_lbutton_down(pt.x, pt.y);
         convert_coordinate(pt);
         litehtml::position::vector redraw_boxes;
         g_canvas->m_doc->on_lbutton_down(pt.x, pt.y, 0, 0, redraw_boxes);
@@ -1223,8 +1224,14 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         litehtml::position::vector redraw_boxes;
         g_canvas->m_doc->on_lbutton_up(pt.x, pt.y, 0, 0, redraw_boxes);
-
+        g_canvas->on_lbutton_up();
         break;
+    }
+    case WM_LBUTTONDBLCLK:
+    {
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        g_canvas->on_lbutton_dblclk(pt.x, pt.y);
+        return 0;
     }
     case WM_MOUSEMOVE:
     {
@@ -1236,6 +1243,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_canvas->m_doc) break;
    
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        g_canvas->on_mouse_move(pt.x, pt.y);
         convert_coordinate(pt);
   
         
@@ -1253,7 +1261,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             OutputDebugStringA("redraw_boxes not empty!\n"); 
         }
 
- 
+
   
         break;
     }
@@ -1456,6 +1464,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 ATOM RegisterViewClass(HINSTANCE hInst)
 {
     WNDCLASSW wc{};
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
     wc.lpfnWndProc = ViewWndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
@@ -1918,6 +1927,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_cfg.document_width = g_cfg.default_document_width;   // 默认宽度
             if (g_vd) { g_vd->reload(); }
             break;
+        case ID_EDIT_COPY:
+            g_canvas->copy_to_clipboard();
+            break;
         break;
         }
     }
@@ -2292,8 +2304,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         0, 0, 200, 600,
         g_hWnd, (HMENU)100, g_hInst, nullptr);
 
-    // 2. 创建
-     // 代替 g_hwndTV = CreateWindowExW(...)
+
 
     g_hwndSplit = CreateWindowExW(
         0, WC_STATICW, nullptr,
@@ -2302,7 +2313,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         g_hWnd, (HMENU)101, g_hInst, nullptr);
     g_hView = CreateWindowExW(
         0, L"EPUBView", nullptr,
-        WS_CHILD   | WS_CLIPSIBLINGS,
+        WS_CHILD   | WS_CLIPSIBLINGS ,
         0, 0, 1, 1,
         g_hWnd, (HMENU)101, g_hInst, nullptr);
 
@@ -2362,7 +2373,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     gAccel.add(ID_WIDTH_SMALLER, FALT | FVIRTKEY, VK_OEM_MINUS);
     gAccel.add(ID_WIDTH_RESET, FALT | FVIRTKEY, VK_BACK);
   
-
+    // 新增：复制文本（Ctrl + C）
+    gAccel.add(ID_EDIT_COPY, FCONTROL | FVIRTKEY, 'C');
 
     g_pSplashImg = LoadPngFromResource(g_hInst, IDB_PNG1);
 
@@ -3063,24 +3075,7 @@ D2DCanvas::D2DCanvas(int w, int h, HWND hwnd)
 
 
 }
-/* ---------- 把缓存位图贴到窗口 ---------- */
-void D2DCanvas::present(int x, int y, litehtml::position* clip)
-{
 
-
-
-    BeginDraw();
-
-    m_doc->draw(getContext(),   // 强制转换
-        x, y, clip);
-
-
-
-    EndDraw();
-
-
-
-}
 
 void D2DCanvas::BeginDraw()
 {
@@ -3156,6 +3151,37 @@ ComPtr<IDWriteTextLayout> D2DBackend::getLayout(const std::wstring& txt,
     return layout;
 }
 
+void D2DBackend::record_char_boxes(ID2D1RenderTarget* rt,
+    IDWriteTextLayout* layout,
+    const std::wstring& wtxt,
+    const litehtml::position& pos)
+{
+    LineBoxes line;
+    float originX = static_cast<float>(pos.x);
+    float originY = static_cast<float>(pos.y);
+
+    for (size_t i = 0; i < wtxt.size(); ++i)
+    {
+        DWRITE_HIT_TEST_METRICS htm;
+        float left, top;
+        layout->HitTestTextPosition(i, FALSE, &left, &top, &htm);
+
+        CharBox cb;
+        cb.ch = wtxt[i];
+        cb.rect = D2D1::RectF(
+            originX + left,
+            originY + top,
+            originX + left + htm.width,
+            originY + top + htm.height);
+        cb.offset = g_plainText.size() + i;
+        line.push_back(cb);
+    }
+    g_lines.emplace_back(std::move(line));
+
+    // 同时累积纯文本
+    g_plainText += wtxt;
+}
+
 
 void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     const char* text,
@@ -3179,7 +3205,7 @@ void D2DBackend::draw_text(litehtml::uint_ptr hdc,
     float maxW = 8192.0f;
     auto layout = getLayout(wtxt, fp, maxW);
     if (!layout) return;
-
+    record_char_boxes(rt, layout.Get(), wtxt, pos);
     // 3. 绘制文本
     rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
         static_cast<float>(pos.y)),
@@ -7452,3 +7478,204 @@ void ScrollBarEx::OnRButtonUp()
      UpdateWindow(m_hwnd); 
 }
 
+int64_t D2DCanvas::hit_test(float x, float y)
+{
+
+    for (const auto& line : g_lines)
+        for (const auto& cb : line)
+            if (x >= cb.rect.left && x <= cb.rect.right &&
+                y >= cb.rect.top && y <= cb.rect.bottom)
+                return cb.offset;
+
+    return -1;
+}
+
+void D2DCanvas::on_lbutton_down(int x, int y)
+{
+    m_selecting = true;
+    m_selStart = m_selEnd = hit_test((float)x, (float)y);
+}
+
+void D2DCanvas::on_mouse_move(int x, int y)
+{
+    if (m_selecting)
+    {
+        auto result = hit_test((float)x, (float)y);
+        if (result >= 0) 
+        { 
+            m_selEnd = result; 
+            UpdateCache();
+        }
+ 
+
+
+
+    }
+}
+
+void D2DCanvas::on_lbutton_up()
+{
+    m_selecting = false;
+    UpdateCache();
+    //copy_to_clipboard();
+}
+void D2DCanvas::copy_to_clipboard()
+{
+    if (m_selStart == m_selEnd) return;
+
+    // 确保选区不越界
+    size_t start = std::min(m_selStart, m_selEnd);
+    size_t end = std::max(m_selStart, m_selEnd);
+    end = std::min(end, g_plainText.size());
+    if (start >= end) return;
+
+    size_t len = end - start;
+
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
+    if (!hMem) return;                       // 内存不足
+    wchar_t* dst = (wchar_t*)GlobalLock(hMem);
+    if (!dst) { GlobalFree(hMem); return; }  // 锁失败
+
+    memcpy(dst, g_plainText.c_str() + start, len * sizeof(wchar_t));
+    dst[len] = L'\0';
+
+    GlobalUnlock(hMem);
+
+    if (OpenClipboard(g_hWnd))
+    {
+        EmptyClipboard();
+        SetClipboardData(CF_UNICODETEXT, hMem);
+        CloseClipboard();
+    }
+    else
+    {
+        GlobalFree(hMem);
+    }
+}
+
+// 返回“若干行矩形”而不是一个大矩形
+std::vector<RECT> D2DCanvas::get_selection_rows() const
+{
+    std::vector<RECT> rows;
+    if (m_selStart == m_selEnd) return rows;
+
+    size_t start = std::min(m_selStart, m_selEnd);
+    size_t end = std::max(m_selStart, m_selEnd);
+
+    for (const auto& line : g_lines)
+    {
+        if (line.empty()) continue;
+
+        // 行首、行尾字符的偏移
+        size_t lineFirst = line.front().offset;
+        size_t lineLast = line.back().offset;
+
+        // 本行与选区无交集 → 跳过
+        if (lineLast < start || lineFirst >= end) continue;
+
+        // 行内首尾字符索引
+        size_t idx0 = 0;
+        if (lineFirst < start) {
+            // 找到行内第一个 >= start 的字符
+            for (; idx0 < line.size() && line[idx0].offset < start; ++idx0) {}
+        }
+
+        size_t idx1 = line.size() - 1;
+        if (lineLast >= end) {
+            for (; idx1 != static_cast<size_t>(-1) && line[idx1].offset >= end; --idx1) {}
+        }
+
+        if (idx0 > idx1) continue;   // 本行没有字符被选中
+
+        // 行矩形
+        const D2D1_RECT_F& r0 = line[idx0].rect;
+        const D2D1_RECT_F& r1 = line[idx1].rect;
+
+        RECT row;
+        row.left = r0.left;
+        row.top = r0.top;
+        row.right = r1.right;
+        row.bottom = std::max(r0.bottom, r1.bottom); // 防止不同字体高度差异
+        rows.push_back(row);
+    }
+    return rows;
+}
+/* ---------- 把缓存位图贴到窗口 ---------- */
+void D2DCanvas::present(int x, int y, litehtml::position* clip)
+{
+
+    g_lines.clear();
+    g_plainText.clear();
+
+    BeginDraw();
+
+    m_doc->draw(getContext(),   // 强制转换
+        x, y, clip);
+
+
+    // 高亮选中行
+    if (!m_selBrush)
+    {
+        m_rt->CreateSolidColorBrush(
+            D2D1::ColorF(0.2f, 0.5f, 1.0f, 0.4f),   // 半透明蓝
+            &m_selBrush);
+    }
+    if (m_selStart != m_selEnd && m_selBrush)
+    {
+        m_rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        for (const auto& row : get_selection_rows())
+        {
+            D2D1_RECT_F r = D2D1::RectF(
+                row.left ,
+                row.top ,
+                row.right ,
+                row.bottom );
+            m_rt->FillRectangle(r, m_selBrush.Get());
+        }
+    }
+
+    EndDraw();
+
+
+
+}
+// 判断是否为单词边界（空格、标点、换行）
+static bool is_word_boundary(wchar_t ch)
+{
+    return iswspace(ch) || iswpunct(ch) || ch == L'\r' || ch == L'\n';
+}
+
+void D2DCanvas::on_lbutton_dblclk(int x, int y)
+{
+    if (g_plainText.empty()) return;
+
+    // 1. 把鼠标坐标转成逻辑字符偏移（UTF-16 code unit）
+    size_t clickPos = hit_test(x, y);
+    if (clickPos == static_cast<size_t>(-1) ||
+        clickPos >= g_plainText.size())
+        return;
+
+    // 2. 用 ICU 的 BreakIterator 找“单词”边界
+    UErrorCode err = U_ZERO_ERROR;
+    icu::UnicodeString us(g_plainText.data(), g_plainText.size());
+    UBreakIterator* bi = ubrk_open(UBRK_WORD, nullptr,
+        us.getBuffer(), us.length(),
+        &err);
+    if (U_FAILURE(err)) return;
+
+    // 3. 把 clickPos 之前最近的单词起点
+    int32_t start = ubrk_preceding(bi, static_cast<int32_t>(clickPos));
+    if (start == UBRK_DONE) start = 0;
+
+    // 4. 把 clickPos 之后最近的单词终点
+    int32_t end = ubrk_following(bi, static_cast<int32_t>(clickPos));
+    if (end == UBRK_DONE) end = static_cast<int32_t>(g_plainText.size());
+
+    ubrk_close(bi);
+
+    // 5. 赋给选区
+    m_selStart = static_cast<size_t>(start);
+    m_selEnd = static_cast<size_t>(end);
+
+    UpdateCache();
+}
