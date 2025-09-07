@@ -109,12 +109,16 @@ using namespace Gdiplus;
 #include <unicode/utypes.h>
 #include <unicode/uchar.h>
 #include <unicode/utf8.h>
+#include <unicode/rbbi.h>
+#include <unicode/ubrk.h>
+#include <unicode/ustring.h>
 #include <string>
 #include <functional>
 #include <gumbo.h>
 #include <cstring>
 #include <stack>
 #include <sstream>
+
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -256,6 +260,81 @@ private:
     HBITMAP create_dib_from_frame(const ImageFrame& frame);
 };
 
+class FileCollectionLoader : public IDWriteFontCollectionLoader
+{
+    LONG ref_ = 1;
+public:
+    // IUnknown
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFontCollectionLoader))
+        {
+            *ppv = this; AddRef(); return S_OK;
+        }
+        *ppv = nullptr; return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&ref_); }
+    IFACEMETHODIMP_(ULONG) Release() override
+    {
+        ULONG r = InterlockedDecrement(&ref_);
+        if (r == 0) delete this;
+        return r;
+    }
+
+    // IDWriteFontCollectionLoader
+    IFACEMETHODIMP CreateEnumeratorFromKey(
+        IDWriteFactory* factory,
+        void const* key, UINT32 keySize,
+        IDWriteFontFileEnumerator** ppEnumerator) override
+    {
+        *ppEnumerator = new FileEnumerator(
+            factory,
+            reinterpret_cast<IDWriteFontFile* const*>(key),
+            keySize / sizeof(IDWriteFontFile*));
+        return *ppEnumerator ? S_OK : E_OUTOFMEMORY;
+    }
+
+private:
+    class FileEnumerator : public IDWriteFontFileEnumerator
+    {
+        IDWriteFactory* fac_;
+        std::vector<ComPtr<IDWriteFontFile>> files_;
+        UINT32 idx_ = 0;
+        LONG ref_ = 1;
+    public:
+        FileEnumerator(IDWriteFactory* f, IDWriteFontFile* const* files, UINT32 n)
+            : fac_(f), files_(files, files + n) {
+        }
+
+        IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFontFileEnumerator))
+            {
+                *ppv = this; AddRef(); return S_OK;
+            }
+            *ppv = nullptr; return E_NOINTERFACE;
+        }
+        IFACEMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&ref_); }
+        IFACEMETHODIMP_(ULONG) Release() override
+        {
+            ULONG r = InterlockedDecrement(&ref_);
+            if (r == 0) delete this;
+            return r;
+        }
+
+        IFACEMETHODIMP MoveNext(BOOL* hasCurrent) override
+        {
+            *hasCurrent = idx_ < files_.size();
+            return S_OK;
+        }
+        IFACEMETHODIMP GetCurrentFontFile(IDWriteFontFile** file) override
+        {
+            *file = idx_ < files_.size() ? files_[idx_++].Get() : nullptr;
+            if (*file) (*file)->AddRef();
+            return S_OK;
+        }
+    };
+};
 // 全局缓存（也可放 D2DBackend 内）
 struct LayoutKey {
     std::wstring txt;
@@ -277,7 +356,7 @@ namespace std {
 struct FontCachePair 
 {
     ComPtr<IDWriteTextFormat> fmt;
-    ComPtr<IDWriteFont> dwFont;
+    litehtml::font_metrics fm ;
 };
 class FontCache {
 public:
@@ -285,15 +364,16 @@ public:
     ~FontCache() = default;
     // 主入口：根据 litehtml 描述 + 可选私有集合，返回 TextFormat
     FontCachePair
-        get(std::wstring& familyName, const litehtml::font_description& descr,
-            IDWriteFontCollection* privateColl = nullptr, IDWriteFontCollection* sysColl = nullptr);
+        get(std::wstring& familyName, const litehtml::font_description& descr, IDWriteFontCollection* sysColl = nullptr);
+    ComPtr<IDWriteFontCollection> CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* path);
+
     void clear();
 private:
 
 
     // 内部：真正创建
     FontCachePair
-        create(const FontKey& key, IDWriteFontCollection* privateColl, IDWriteFontCollection* sysColl);
+        create(const FontKey& key, IDWriteFontCollection* sysColl);
 
     // 工具：在指定集合里找家族
     bool findFamily(IDWriteFontCollection* coll,
@@ -304,6 +384,8 @@ private:
     std::unordered_map<FontKey, FontCachePair> m_map;
     mutable std::shared_mutex              m_mtx;
     Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
+    std::unordered_map<std::wstring_view, ComPtr<IDWriteFontCollection>> collCache;
+    FileCollectionLoader* m_loader;
 
 };
 // -------------- DirectWrite-D2D 后端 -----------------
@@ -444,6 +526,8 @@ public:
     void BeginDraw() override;
     void EndDraw() override;
     void resize(int width, int height) override;
+
+    void clear_selection();
 
     void on_lbutton_dblclk(int x, int y);
     void on_lbutton_up();
@@ -586,7 +670,7 @@ public:
     std::string load_html(const std::wstring& path) const;
 
     void load_all_fonts(void);
-    void init_doc(std::string html);
+
 
 
     static std::wstring extract_text(const tinyxml2::XMLElement* a);
@@ -625,9 +709,9 @@ public:
     HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
     std::wstring           m_tooltip_url;          // 缓存当前 url
     std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
-    std::wstring get_font_family_name(const std::vector<uint8_t>& data);
+
     void build_epub_font_index(const OCFPackage& pkg, EPUBBook* book);
-    std::unordered_map<FontKey, std::wstring> m_fontBin;
+    std::unordered_map<FontKey, std::vector<std::wstring>> m_fontBin;
 
     EPUBBook() noexcept {}
     ~EPUBBook();
@@ -651,7 +735,7 @@ struct AppSettings {
 
     int record_update_interval_ms = 1000;
     int record_flush_interval_ms = 10 * 1000;
-    int tooltip_delay_ms = 200;
+    int tooltip_delay_ms = 300;
 
     int font_size = 16;
     float line_height = 1.5f; //倍数
@@ -823,6 +907,7 @@ public:
     std::vector<HtmlBlock> m_blocks;
     float get_height_by_id(int spine_id);
     void reload();
+    bool exists(int spine_id);
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -838,6 +923,7 @@ private:
 
 
     bool insert_next_chapter();
+
     float get_height();
     bool insert_prev_chapter();
 
