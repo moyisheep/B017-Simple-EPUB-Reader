@@ -90,8 +90,7 @@ using namespace Gdiplus;
 #define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
 #endif
 
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "3rdParty/stb_truetype.h"
+
 #include <atomic>
 #include <thread>
 #include <queue>
@@ -749,7 +748,7 @@ struct AppSettings {
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Microsoft YaHei";
 
-    float line_height_multiplier = 1.5;
+
     int tooltip_width = 500;
 
     int split_space_height = 300; // 单位:px
@@ -1242,6 +1241,7 @@ private:
     void OnPaint();
     bool HitThumb(const POINT& pt) const;
     void OnLButtonDown(int x, int y);
+    void OnMouseLeave(int x, int y);
     void OnMouseMove(int x, int y);
     void OnLButtonUp();
 

@@ -20,9 +20,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\3rdParty\stb_truetype.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="src\main.h">
       <Filter>头文件</Filter>
     </ClInclude>
