@@ -27,8 +27,9 @@
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
-#include <litehtml\render_item.h>
-
+#include <litehtml/render_item.h>
+#include <litehtml/html_tag.h>
+#include <litehtml/render_image.h>
 
 #pragma comment(lib, "comctl32.lib")
 #include <objidl.h>
@@ -117,7 +118,7 @@ using namespace Gdiplus;
 #include <cstring>
 #include <stack>
 #include <sstream>
-
+#include <blake3.h>
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -748,6 +749,7 @@ struct AppSettings {
     Renderer fontRenderer = Renderer::D2D;
     std::string default_font_name = "Microsoft YaHei";
 
+    std::wstring temp_dir = L"epub_book";
 
     int tooltip_width = 500;
 
@@ -1267,4 +1269,57 @@ private:
     };
     ThumbState m_thumb;
     HWND m_hwnd = nullptr;
+};
+namespace litehtml {
+
+    class el_svg : public html_tag
+    {
+    public:
+        explicit el_svg(const document::ptr& doc);
+
+        /* litehtml::element 接口 */
+        void            parse_attributes() override;
+        void            compute_styles(bool recursive) override;
+        void            draw(uint_ptr hdc,
+            pixel_t x,
+            pixel_t y,
+            const position* clip,
+            const std::shared_ptr<render_item>& ri) override;
+        void            get_content_size(size& sz, pixel_t max_width) override;
+        bool            is_replaced() const override { return true; }
+        string          dump_get_name() override { return "svg"; }
+        std::shared_ptr<render_item>
+            create_render_item(const std::shared_ptr<render_item>& parent) override;
+
+    private:
+        std::string  m_src;        // 外链地址
+        std::string  m_data_uri;   // 内联 SVG 的 data URI
+        bool         m_inline = false;
+        std::string m_raw_svg;   // 原始 <svg>...</svg> 文本
+        /* 简单 base64 实现（头文件里放声明，cpp 里放实现） */
+        static std::string base64_encode(const unsigned char* data, size_t len);
+        void set_data(const char* data) override;
+    };
+
+} // namespace litehtml
+
+struct BmpHeader {
+    uint16_t bfType = 0x4D42;          // 'BM'
+    uint32_t bfSize = 0;
+    uint16_t bfReserved1 = 0;
+    uint16_t bfReserved2 = 0;
+    uint32_t bfOffBits = 54;           // 54 = sizeof(BmpHeader) + sizeof(BmpInfo)
+};
+struct BmpInfo {
+    uint32_t biSize = 40;
+    int32_t  biWidth = 0;
+    int32_t  biHeight = 0;
+    uint16_t biPlanes = 1;
+    uint16_t biBitCount = 32;
+    uint32_t biCompression = 0;      // BI_RGB
+    uint32_t biSizeImage = 0;
+    int32_t  biXPelsPerMeter = 0;
+    int32_t  biYPelsPerMeter = 0;
+    uint32_t biClrUsed = 0;
+    uint32_t biClrImportant = 0;
 };

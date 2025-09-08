@@ -94,7 +94,32 @@ static bool isWin10OrLater()
 
 
 // HTML 转义辅助函数
+inline bool save_rgba_as_bmp(const std::wstring& path,
+    const uint8_t* rgba,
+    int width,
+    int height)
+{
+    if (!rgba || width <= 0 || height <= 0) return false;
 
+    const int rowBytes = width * 4;
+    const int imageSize = rowBytes * height;
+    const int fileSize = sizeof(BmpHeader) + sizeof(BmpInfo) + imageSize;
+
+    BmpHeader hdr;
+    hdr.bfSize = fileSize;
+
+    BmpInfo info;
+    info.biWidth = width;
+    info.biHeight = -height;  // 负值 ⇒ 顶-下像素顺序（与 RGBA 顺序一致）
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return false;
+
+    ofs.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    ofs.write(reinterpret_cast<const char*>(&info), sizeof(info));
+    ofs.write(reinterpret_cast<const char*>(rgba), imageSize);
+    return !!ofs;
+}
 void DumpHex(const wchar_t* tag, const std::wstring& s)
 {
     std::wostringstream oss;
@@ -198,7 +223,49 @@ std::string generate_html(litehtml::element::ptr elem) {
 
     return oss.str();
 }
+static void gumbo_serialize(const GumboNode* node, std::string& out)
+{
+    if (node->type == GUMBO_NODE_TEXT)
+    {
+        out.append(node->v.text.text);
+        return;
+    }
+    if (node->type != GUMBO_NODE_ELEMENT) return;
 
+    const GumboElement& elem = node->v.element;
+    out.push_back('<');
+    out.append(gumbo_normalized_tagname(elem.tag));
+
+    // 属性
+    for (unsigned int i = 0; i < elem.attributes.length; ++i)
+    {
+        auto* attr = static_cast<GumboAttribute*>(elem.attributes.data[i]);
+        out.append(" ").append(attr->name).append("=\"")
+            .append(attr->value).append("\"");
+    }
+
+    if (elem.tag == GUMBO_TAG_IMG || elem.tag == GUMBO_TAG_BR)
+    {
+        // 自闭合
+        out.append(" />");
+    }
+    else
+    {
+        out.push_back('>');
+        for (unsigned int i = 0; i < elem.children.length; ++i)
+            gumbo_serialize(static_cast<GumboNode*>(elem.children.data[i]), out);
+        out.append("</").append(gumbo_normalized_tagname(elem.tag)).push_back('>');
+    }
+}
+// 生成临时目录，返回路径（带反斜杠）
+static std::wstring make_temp_dir()
+{
+    wchar_t tmp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring dir = std::wstring(tmp) + g_cfg.temp_dir + L"\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
 // 完整的文档导出函数
 std::string get_document_html(litehtml::document::ptr doc) {
     if (!doc) return "";
@@ -763,6 +830,33 @@ static std::wstring a2w(const std::string& s)
     return out;
 }
 
+static const char* B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+inline std::string base64_encode(const std::vector<uint8_t>& in) {
+    std::string out;
+    int val = 0, valb = -6;
+    for (uint8_t c : in) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out.push_back(B64[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out.push_back(B64[((val << 8) >> (valb + 8)) & 0x3F]);
+    while (out.size() % 4) out.push_back('=');
+    return out;
+}
+
+static std::vector<unsigned char> base64_decode(const std::string& in)
+{
+    static const int tbl[256] = {
+        /* 略：把 base64 字符映射到 0-63，非法字符为 -1 */
+    };
+    std::vector<unsigned char> out;
+    /* 标准 Base64 解码实现，略 */
+    return out;
+}
 static inline std::string trim_any(const std::string& s,
     const char* ws = " \t\"'")
 {
@@ -1318,54 +1412,19 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         litehtml::position::vector redraw_box;
         g_canvas->m_doc->on_mouse_leave(redraw_box);
 
-  
+        if (!redraw_box.empty())
+        {
+            for (auto box : redraw_box)
+            {
+                RECT r(box.left(), box.top(), box.right(), box.bottom());
+                InvalidateRect(hwnd, &r, false);
+            }
+            UpdateCache();
+        }
 
         return 0;
     }
 
-    case WM_VSCROLL:
-    {
-        if (g_canvas) { g_canvas->clear_selection(); }
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-
-        int code = LOWORD(wp);
-        int pos = HIWORD(wp);
-        int delta = 0;
-
-        // 启动一次性计时器（用于阅读记录）
-        if (!g_tickTimer)
-        {
-            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms,
-                0, Tick, 0, TIME_ONESHOT);
-        }
-
-        switch (code)
-        {
-        case SB_LINEUP:   delta = -30;          break;   // 3 行
-        case SB_LINEDOWN: delta = 30;          break;
-        case SB_PAGEUP:   delta = -rc.bottom;   break;
-        case SB_PAGEDOWN: delta = rc.bottom;   break;
-
-        case SB_THUMBPOSITION:
-        case SB_THUMBTRACK:
-            g_scrollY = std::clamp(pos, 0, g_maxScroll);
-            break;                                   // 直接定位后跳出 switch
-
-        default:
-            return 0;                                // 不处理
-        }
-
-        // 普通滚动（非 THUMB*）才累加 delta
-        if (code != SB_THUMBPOSITION && code != SB_THUMBTRACK)
-            g_scrollY = std::clamp(g_scrollY + delta, 0, g_maxScroll);
-
-        // 统一更新
-        SetScrollPos(hwnd, SB_VERT, g_scrollY, TRUE);
-        UpdateCache();
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    }
     case WM_MOUSEWHEEL:
     {
         if (g_canvas) { g_canvas->clear_selection(); }
@@ -1395,6 +1454,18 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_tickTimer)
         {
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
+        }
+        litehtml::position::vector redraw_box;
+        g_canvas->m_doc->on_mouse_leave(redraw_box);
+
+        if (!redraw_box.empty())
+        {
+            for (auto box : redraw_box)
+            {
+                RECT r(box.left(), box.top(), box.right(), box.bottom());
+                InvalidateRect(hwnd, &r, false);
+            }
+
         }
 
         UpdateCache();
@@ -1557,6 +1628,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     {
         litehtml::position::vector redraw_box;
         g_canvas->m_doc->on_mouse_leave(redraw_box);
+        if (!redraw_box.empty())
+        {
+            for (auto box: redraw_box)
+            {
+                RECT r(box.left(), box.top(), box.right(), box.bottom());
+                InvalidateRect(hwnd, &r, false);
+            }
+            UpdateCache();
+        }
+ 
         return 0;
     }
     case WM_EPUB_PARSED: {
@@ -2409,10 +2490,36 @@ void EPUBBook::OnTreeSelChanged(const wchar_t* href)
 }
 
 // SimpleContainer.cpp
+
 void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
     if (m_img_cache.contains(src)) return;
 
+
+    /* ---------- 1. 绝对路径优先 ---------- */
+    if (fs::path(src).is_absolute())
+    {
+        std::error_code ec;
+        size_t sz = fs::file_size(src, ec);
+        if (ec) return;                       // 文件不存在
+        std::ifstream ifs(src, std::ios::binary);
+        if (!ifs) return;
+
+        std::vector<uint8_t> buf(sz);
+        ifs.read(reinterpret_cast<char*>(buf.data()), sz);
+
+        MemFile mf{ std::move(buf) };
+        fs::path p(src);
+        std::wstring ext = p.extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+        ImageFrame frame = decode_img(mf, ext.empty() ? nullptr : ext.c_str());
+        if (!frame.rgba.empty())
+            m_img_cache.emplace(src, std::move(frame));
+        return;
+    }
+
+    /* 2. 普通文件路径分支 -------------------------------------------------- */
     std::wstring wpath = g_book->m_zipIndex.find(a2w(src));
     MemFile mf = g_book->read_zip(wpath.c_str());
     if (mf.data.empty())
@@ -2439,6 +2546,36 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
         OutputDebugStringA(("EPUB decode failed: " + std::string(src) + "\n").c_str());
     }
 }
+//void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
+//{
+//    if (m_img_cache.contains(src)) return;
+//
+//    std::wstring wpath = g_book->m_zipIndex.find(a2w(src));
+//    MemFile mf = g_book->read_zip(wpath.c_str());
+//    if (mf.data.empty())
+//    {
+//        OutputDebugStringW((L"EPUB not found: " + wpath + L"\n").c_str());
+//        return;
+//    }
+//
+//    auto dot = wpath.find_last_of(L'.');
+//    std::wstring ext;
+//    if (dot != std::wstring::npos && dot + 1 < wpath.size())
+//    {
+//        ext = wpath.substr(dot + 1);
+//        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+//    }
+//
+//    ImageFrame frame = decode_img(mf, ext.empty() ? nullptr : ext.c_str());
+//    if (!frame.rgba.empty())
+//    {
+//        m_img_cache.emplace(src, std::move(frame));
+//    }
+//    else
+//    {
+//        OutputDebugStringA(("EPUB decode failed: " + std::string(src) + "\n").c_str());
+//    }
+//}
 
 litehtml::pixel_t SimpleContainer::text_width(const char* text, litehtml::uint_ptr hFont)
 {
@@ -2482,11 +2619,13 @@ void SimpleContainer::get_viewport(litehtml::position& client) const
     client = litehtml::position(0, 0, width, height);
 }
 
+
 litehtml::element::ptr
 SimpleContainer::create_element(const char* tag,
     const litehtml::string_map& attrs,
     const std::shared_ptr<litehtml::document>& doc)
 {
+
     if (litehtml::t_strcasecmp(tag, "script") != 0)
         return nullptr;   // 让 litehtml 自己建别的节点
     if (!g_cfg.enableJS) { return nullptr; }
@@ -2920,7 +3059,185 @@ std::string preprocess_js(std::string html)
     }
 }
 
+namespace fs = std::filesystem;
 
+inline std::string blade16(std::string_view data)
+{
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+    blake3_hasher_update(&hasher, data.data(), data.size());
+
+    std::array<uint8_t, 16> out;
+    blake3_hasher_finalize(&hasher, out.data(), out.size());
+
+    char hex[33];
+    for (size_t i = 0; i < out.size(); ++i)
+        std::sprintf(hex + i * 2, "%02x", out[i]);
+    return std::string(hex, 32);   // 32 个十六进制字符
+}
+
+static std::wstring blake3_hex(const std::vector<uint8_t>& data)
+{
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+    blake3_hasher_update(&hasher, data.data(), data.size());
+
+    std::array<uint8_t, BLAKE3_OUT_LEN> hash;          // 32 字节
+    blake3_hasher_finalize(&hasher, hash.data(), hash.size());
+
+    std::wostringstream oss;
+    for (uint8_t b : hash)
+        oss << std::hex << std::setw(2) << std::setfill(L'0') << (b & 0xFF);
+    return oss.str();                                  // 64 个十六进制字符
+}
+std::string inline_and_rasterize_svgs_gumbo(std::string_view html,
+    const fs::path& tempDir)
+{
+    fs::create_directories(tempDir);
+
+    // 1. 用 Gumbo 解析
+    GumboOutput* output = gumbo_parse(html.data());
+    std::string newHtml;
+    newHtml.reserve(html.size() * 2);
+
+    // 2. 递归遍历 DOM
+    std::function<void(GumboNode*, std::ostringstream&)> walk;
+    walk = [&](GumboNode* node, std::ostringstream& out)
+        {
+            if (node->type == GUMBO_NODE_TEXT)
+            {
+                out << node->v.text.text;
+                return;
+            }
+            if (node->type != GUMBO_NODE_ELEMENT) return;
+
+            GumboElement& elem = node->v.element;
+            const std::string tag = gumbo_normalized_tagname(elem.tag);
+
+            if (tag == "svg")
+            {
+                // 2.1 重新序列化 <svg>...</svg>
+
+                GumboNode fakeNode{};
+                fakeNode.type = GUMBO_NODE_ELEMENT;
+                fakeNode.v.element = elem;          // 拷贝 GumboElement
+                std::string svgBlock;
+                gumbo_serialize(&fakeNode, svgBlock);   // 现在完全匹配函数签名
+
+
+                std::string hash = blade16(svgBlock);
+                fs::path bmpPath = tempDir / (hash + ".bmp");
+
+                if (!fs::exists(bmpPath))
+                {
+                    // 2.2 扫描 <image> 并解压
+                    std::string patchedSvg = svgBlock;
+                    std::regex imgRe("<(image|img)\\b[^>]*\\b(href|xlink:href)\\s*=\\s*\"([^\"]+)\"",
+                        std::regex::icase);
+                        std::sregex_iterator it(patchedSvg.begin(), patchedSvg.end(), imgRe), end;
+                        for (; it != end; ++it)
+                        {
+                            std::string imgRel = (*it)[3].str();
+                            std::wstring wRel = a2w(imgRel);
+
+                            fs::path diskPath = tempDir / fs::path(imgRel).relative_path();
+                            fs::create_directories(diskPath.parent_path());
+
+                            std::wstring path = g_book->m_zipIndex.find(wRel);
+                            MemFile mf = g_book->read_zip(path.c_str());
+                            if (!mf.data.empty())
+                            {
+                                std::ofstream ofs(diskPath, std::ios::binary);
+                                ofs.write(reinterpret_cast<const char*>(mf.data.data()),
+                                    mf.data.size());
+                            }
+                            // 替换为绝对路径
+                            patchedSvg = std::regex_replace(
+                                patchedSvg,
+                                std::regex(R"(()" + std::regex_replace(imgRel, std::regex(R"([.^$*+?()\[\]{}|\\])"), R"(\$&)") + R"())"),
+                                diskPath.generic_string());
+                        }
+
+                        // 2.3 渲染
+                        MemFile mfSvg;
+                        mfSvg.data.assign(patchedSvg.begin(), patchedSvg.end());
+                        ImageFrame frame = decode_img(mfSvg, L"svg");
+                        if (!frame.rgba.empty())
+                        {
+                            const int w = frame.width;
+                            const int h = frame.height;
+                            const int rowBytes = w * 4;
+                            const int imgSize = rowBytes * h;
+                            const int fileSize = 54 + imgSize;   // 54 = 14 + 40
+
+                            std::ofstream ofs(bmpPath, std::ios::binary);
+                            if (ofs)
+                            {
+                                // BITMAPFILEHEADER (14 bytes)
+                                uint16_t bfType = 0x4D42;        // 'BM'
+                                uint32_t bfSize = fileSize;
+                                uint32_t bfOffBits = 54;
+                                ofs.write(reinterpret_cast<const char*>(&bfType), 2);
+                                ofs.write(reinterpret_cast<const char*>(&bfSize), 4);
+                                ofs.seekp(4, std::ios::cur);     // skip reserved
+                                ofs.write(reinterpret_cast<const char*>(&bfOffBits), 4);
+
+                                // BITMAPINFOHEADER (40 bytes)
+                                uint32_t biSize = 40;
+                                int32_t  biWidth = w;
+                                int32_t  biHeight = -h;          // top-down
+                                uint16_t biPlanes = 1;
+                                uint16_t biBitCount = 32;
+                                uint32_t biCompression = 0;
+                                uint32_t biSizeImage = imgSize;
+                                ofs.write(reinterpret_cast<const char*>(&biSize), 4);
+                                ofs.write(reinterpret_cast<const char*>(&biWidth), 4);
+                                ofs.write(reinterpret_cast<const char*>(&biHeight), 4);
+                                ofs.write(reinterpret_cast<const char*>(&biPlanes), 2);
+                                ofs.write(reinterpret_cast<const char*>(&biBitCount), 2);
+                                ofs.write(reinterpret_cast<const char*>(&biCompression), 4);
+                                ofs.seekp(20, std::ios::cur);    // skip rest (zeros)
+
+                                // pixel data
+                                ofs.write(reinterpret_cast<const char*>(frame.rgba.data()), imgSize);
+                            }
+                        }
+                }
+
+                // 2.4 拼 <img>
+                int w = 0, h = 0;
+                //for (unsigned i = 0; i < elem.attributes.length; ++i)
+                //{
+                //    GumboAttribute* a = static_cast<GumboAttribute*>(elem.attributes.data[i]);
+                //    if (strcmp(a->name, "width") == 0)  w = std::atoi(a->value);
+                //    if (strcmp(a->name, "height") == 0) h = std::atoi(a->value);
+                //}
+                out << R"(<img src=")" << bmpPath.generic_string() << R"(")";
+                out << " width=\"" << "100%" << "\"";
+                out << " height=\"" << "100%" << "\"";
+                out << " />";
+                return;
+            }
+
+            // 普通节点
+            out << "<" << tag;
+            for (unsigned i = 0; i < elem.attributes.length; ++i)
+            {
+                GumboAttribute* a = static_cast<GumboAttribute*>(elem.attributes.data[i]);
+                out << " " << a->name << "=\"" << a->value << "\"";
+            }
+            out << ">";
+            for (unsigned i = 0; i < elem.children.length; ++i)
+                walk(static_cast<GumboNode*>(elem.children.data[i]), out);
+            out << "</" << tag << ">";
+        };
+
+    std::ostringstream oss;
+    walk(output->root, oss);
+    newHtml = oss.str();
+    gumbo_destroy_output(&kGumboDefaultOptions, output);
+    return newHtml;
+}
 
 
 // --------------------------------------------------
@@ -2945,7 +3262,8 @@ std::string PreprocessHTML(std::string html)
     //-------------------------------------------------
   // 2. 自闭合 <script .../> → <script ...>code</script>
     html = preprocess_js(html);
-
+    std::wstring dir = make_temp_dir();
+    html = inline_and_rasterize_svgs_gumbo(html, dir);
     //-------------------------------------------------
     // 2. EPUB 3 的 <meta property="..." content="..."/>
     //     litehtml 只认识 name/content，不认识 property
@@ -4514,15 +4832,7 @@ std::wstring url_decode(const std::wstring& in)
 //}
 
 
-// 生成临时目录，返回路径（带反斜杠）
-static std::wstring make_temp_dir()
-{
-    wchar_t tmp[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, tmp);
-    std::wstring dir = std::wstring(tmp) + L"epub_fonts\\";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir;
-}
+
 
 void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
 {
@@ -4530,7 +4840,6 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
 
     // 1. 创建临时目录
     static std::wstring tempDir = make_temp_dir();
-    int fontSerial = 0;          // 重命名计数器
 
     // 2. 正则
     const std::wregex rx_face(LR"(@font-face\s*\{([^}]*)\})", std::regex::icase);
@@ -4597,7 +4906,15 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
                 MemFile fontFile = book->read_zip(book->m_zipIndex.find(fontPath).c_str());
                 if (fontFile.data.empty()) continue;
 
-                std::wstring tempFont = tempDir + std::to_wstring(fontSerial++) + ext;
+                std::wstring hashHex = blake3_hex(fontFile.data);   // 32 字节 → 64 字符
+                std::wstring tempFont = tempDir + hashHex + ext;    // 例如：a1b2c3...ff.woff2
+                // 2. 如果文件已存在，直接记录路径，不再写盘
+                if (GetFileAttributesW(tempFont.c_str()) != INVALID_FILE_ATTRIBUTES)
+                {
+                    paths.push_back(tempFont);   // 已缓存
+                    continue;
+                }
+          
                 HANDLE h = CreateFileW(tempFont.c_str(), GENERIC_WRITE, 0, nullptr,
                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                 DWORD written = 0;
@@ -5204,40 +5521,6 @@ litehtml::element::ptr EPUBBook::find_link_in_chain(litehtml::element::ptr start
     return out;
 }
 
- static void gumbo_serialize(const GumboNode* node, std::string& out)
- {
-     if (node->type == GUMBO_NODE_TEXT)
-     {
-         out.append(node->v.text.text);
-         return;
-     }
-     if (node->type != GUMBO_NODE_ELEMENT) return;
-
-     const GumboElement& elem = node->v.element;
-     out.push_back('<');
-     out.append(gumbo_normalized_tagname(elem.tag));
-
-     // 属性
-     for (unsigned int i = 0; i < elem.attributes.length; ++i)
-     {
-         auto* attr = static_cast<GumboAttribute*>(elem.attributes.data[i]);
-         out.append(" ").append(attr->name).append("=\"")
-             .append(attr->value).append("\"");
-     }
-
-     if (elem.tag == GUMBO_TAG_IMG || elem.tag == GUMBO_TAG_BR)
-     {
-         // 自闭合
-         out.append(" />");
-     }
-     else
-     {
-         out.push_back('>');
-         for (unsigned int i = 0; i < elem.children.length; ++i)
-             gumbo_serialize(static_cast<GumboNode*>(elem.children.data[i]), out);
-         out.append("</").append(gumbo_normalized_tagname(elem.tag)).push_back('>');
-     }
- }
 
  // 从一段 HTML 中提取第一个 <img> 的 outerHTML；没有则返回空串
  static std::string extract_first_img(const std::string& html)
@@ -8097,3 +8380,6 @@ void D2DCanvas::on_lbutton_dblclk(int x, int y)
     m_selEnd = static_cast<size_t>(wordEnd);
     UpdateCache();
 }
+
+
+
