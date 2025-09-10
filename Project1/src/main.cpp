@@ -767,50 +767,10 @@ void DumpAllFontNames()
 }
 
 // 真正读文件
-static void do_reload()
-{
-    wchar_t exe[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    fs::path cssPath = fs::path(exe).parent_path() / L"config" / L"global.css";
 
-    try
-    {
-        auto t = fs::last_write_time(cssPath);
-        if (t != g_lastTime)
-        {
-            std::ifstream f(cssPath, std::ios::binary);
-            if (f)
-            {
-                std::ostringstream oss;
-                oss << f.rdbuf();
-                g_globalCSS = oss.str();
-                g_lastTime = t;
-                PostMessage(g_hView, WM_EPUB_CSS_RELOAD, 0, 0);
-            }
-        }
-    }
-    catch (...) { /* 文件不存在就忽略 */ }
-}
 
-// 后台线程：每秒检查一次
-static void css_watcher_thread()
-{
-    do_reload();   // 启动时先读一次
-    while (true)
-    {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        do_reload();
-    }
-}
 
-// 在 main() 里调用一次即可
-inline void start_css_watcher()
-{
-    static std::once_flag once;
-    std::call_once(once, [] {
-        std::thread(css_watcher_thread).detach();
-        });
-}
+
 // ---------- 工具 ----------
 static std::string w2a(const std::wstring& s)
 {
@@ -910,7 +870,49 @@ bool is_xhtml(const std::wstring& file_path)
 
 // 读取 ./config/global.css
 
+static fs::path exe_dir()
+{
+    wchar_t buf[1024]{};
+    GetModuleFileNameW(nullptr, buf, 1024);
+    return fs::path(buf).parent_path();
 
+}
+
+// 工具：把文件内容读成字符串
+static std::string read_file(const fs::path& p)
+{
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return {};
+    std::ostringstream oss;
+    oss << f.rdbuf();
+    return oss.str();
+}
+
+// 工具：把 css 内容塞进 <style> 并插入 <head>
+static std::string embed_css(const std::string& html,
+    const std::string& css)
+{
+    if (css.empty()) return html;
+    std::string tag = "<style>\n" + css + "\n</style>\n";
+    size_t pos = html.find("</head>");
+    if (pos != std::string::npos)
+        return html.substr(0, pos) + tag + html.substr(pos);
+    return tag + html;   // 没有 </head> 时直接前置
+}
+
+// 1. 仅内嵌 global.css
+std::string inject_global_css(const std::string& html)
+{
+    fs::path file = exe_dir() / "config" / "global.css";
+    return embed_css(html, read_file(file));
+}
+
+// 2. 仅内嵌 katex.css
+std::string inject_katex_css(const std::string& html)
+{
+    fs::path file = exe_dir() / "config" / "katex" / "katex.css";
+    return embed_css(html, read_file(file));
+}
 static std::string insert_global_css(std::string html) {
     if (!g_globalCSS.empty())
     {
@@ -1211,15 +1213,18 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
         auto doc = lunasvg::Document::loadFromData(
             reinterpret_cast<const char*>(mf.data.data()), mf.data.size());
         if (!doc) return {};
+
         lunasvg::Bitmap svgBmp = doc->renderToBitmap();
         if (svgBmp.isNull()) return {};
+
+        svgBmp.convertToRGBA();   // 1. 原地转格式
 
         frame.width = svgBmp.width();
         frame.height = svgBmp.height();
         frame.stride = frame.width * 4;
         frame.rgba.assign(
-            reinterpret_cast<uint8_t*>(svgBmp.data()),
-            reinterpret_cast<uint8_t*>(svgBmp.data()) + frame.stride * frame.height);
+            reinterpret_cast<const uint8_t*>(svgBmp.data()),
+            reinterpret_cast<const uint8_t*>(svgBmp.data()) + frame.stride * frame.height);
         break;
     }
 
@@ -2278,7 +2283,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     w.lpszMenuName = nullptr;   // ← 必须为空
     RegisterClassEx(&w);
     RegisterViewClass(g_hInst);
-    start_css_watcher();
+
     register_thumb_class();
     register_imageview_class();
     register_scrollbar_class();
@@ -2848,6 +2853,7 @@ void SimpleContainer::split_text(
     if (U_FAILURE(status)) return;
 
     /* 3. 遍历所有边界区间 */
+    std::vector<std::u16string> tokens;
     int32_t prev = ubrk_first(brk);
     for (int32_t curr = ubrk_next(brk);
         curr != UBRK_DONE;
@@ -3090,6 +3096,48 @@ static std::wstring blake3_hex(const std::vector<uint8_t>& data)
         oss << std::hex << std::setw(2) << std::setfill(L'0') << (b & 0xFF);
     return oss.str();                                  // 64 个十六进制字符
 }
+static void save_image(const ImageFrame& img, const std::filesystem::path& bmpPath)
+{
+        const int w = img.width;
+        const int h = img.height;
+        const int rowBytes = w * 4;
+        const int imgSize = rowBytes * h;
+        const int fileSize = 54 + imgSize;   // 54 = 14 + 40
+
+        std::ofstream ofs(bmpPath, std::ios::binary);
+        if (ofs)
+        {
+            // BITMAPFILEHEADER (14 bytes)
+            uint16_t bfType = 0x4D42;        // 'BM'
+            uint32_t bfSize = fileSize;
+            uint32_t bfOffBits = 54;
+            ofs.write(reinterpret_cast<const char*>(&bfType), 2);
+            ofs.write(reinterpret_cast<const char*>(&bfSize), 4);
+            ofs.seekp(4, std::ios::cur);     // skip reserved
+            ofs.write(reinterpret_cast<const char*>(&bfOffBits), 4);
+
+            // BITMAPINFOHEADER (40 bytes)
+            uint32_t biSize = 40;
+            int32_t  biWidth = w;
+            int32_t  biHeight = -h;          // top-down
+            uint16_t biPlanes = 1;
+            uint16_t biBitCount = 32;
+            uint32_t biCompression = 0;
+            uint32_t biSizeImage = imgSize;
+            ofs.write(reinterpret_cast<const char*>(&biSize), 4);
+            ofs.write(reinterpret_cast<const char*>(&biWidth), 4);
+            ofs.write(reinterpret_cast<const char*>(&biHeight), 4);
+            ofs.write(reinterpret_cast<const char*>(&biPlanes), 2);
+            ofs.write(reinterpret_cast<const char*>(&biBitCount), 2);
+            ofs.write(reinterpret_cast<const char*>(&biCompression), 4);
+            ofs.seekp(20, std::ios::cur);    // skip rest (zeros)
+
+            // pixel data
+            ofs.write(reinterpret_cast<const char*>(img.rgba.data()), imgSize);
+        }
+}
+
+
 std::string inline_and_rasterize_svgs_gumbo(std::string_view html,
     const fs::path& tempDir)
 {
@@ -3164,43 +3212,8 @@ std::string inline_and_rasterize_svgs_gumbo(std::string_view html,
                         ImageFrame frame = decode_img(mfSvg, L"svg");
                         if (!frame.rgba.empty())
                         {
-                            const int w = frame.width;
-                            const int h = frame.height;
-                            const int rowBytes = w * 4;
-                            const int imgSize = rowBytes * h;
-                            const int fileSize = 54 + imgSize;   // 54 = 14 + 40
+                            save_image(frame, bmpPath);
 
-                            std::ofstream ofs(bmpPath, std::ios::binary);
-                            if (ofs)
-                            {
-                                // BITMAPFILEHEADER (14 bytes)
-                                uint16_t bfType = 0x4D42;        // 'BM'
-                                uint32_t bfSize = fileSize;
-                                uint32_t bfOffBits = 54;
-                                ofs.write(reinterpret_cast<const char*>(&bfType), 2);
-                                ofs.write(reinterpret_cast<const char*>(&bfSize), 4);
-                                ofs.seekp(4, std::ios::cur);     // skip reserved
-                                ofs.write(reinterpret_cast<const char*>(&bfOffBits), 4);
-
-                                // BITMAPINFOHEADER (40 bytes)
-                                uint32_t biSize = 40;
-                                int32_t  biWidth = w;
-                                int32_t  biHeight = -h;          // top-down
-                                uint16_t biPlanes = 1;
-                                uint16_t biBitCount = 32;
-                                uint32_t biCompression = 0;
-                                uint32_t biSizeImage = imgSize;
-                                ofs.write(reinterpret_cast<const char*>(&biSize), 4);
-                                ofs.write(reinterpret_cast<const char*>(&biWidth), 4);
-                                ofs.write(reinterpret_cast<const char*>(&biHeight), 4);
-                                ofs.write(reinterpret_cast<const char*>(&biPlanes), 2);
-                                ofs.write(reinterpret_cast<const char*>(&biBitCount), 2);
-                                ofs.write(reinterpret_cast<const char*>(&biCompression), 4);
-                                ofs.seekp(20, std::ios::cur);    // skip rest (zeros)
-
-                                // pixel data
-                                ofs.write(reinterpret_cast<const char*>(frame.rgba.data()), imgSize);
-                            }
                         }
                 }
 
@@ -3239,10 +3252,328 @@ std::string inline_and_rasterize_svgs_gumbo(std::string_view html,
     return newHtml;
 }
 
+std::string replace_svg_with_img(const std::string& html,
+    const fs::path& tempDir)
+{
+    fs::create_directories(tempDir);
+
+    /* ---------- 1. 解析 ---------- */
+    GumboOutput* output = gumbo_parse(html.c_str());
+
+    /* ---------- 2. 收集 <svg> 节点 ---------- */
+    struct SvgNode {
+        size_t start;   // <svg ...> 的起始偏移
+        size_t end;     // </svg> 的结束偏移
+    };
+    std::vector<SvgNode> svgs;
+
+    std::function<void(GumboNode*)> walk = [&](GumboNode* node)
+        {
+            if (node->type != GUMBO_NODE_ELEMENT) return;
+            GumboElement& el = node->v.element;
+            if (el.tag == GUMBO_TAG_SVG)
+            {
+                size_t start = el.start_pos.offset;
+                size_t end = el.end_pos.offset + el.original_end_tag.length;
+                svgs.push_back({ start, end });
+            }
+            for (unsigned i = 0; i < el.children.length; ++i)
+                walk(static_cast<GumboNode*>(el.children.data[i]));
+        };
+    walk(output->root);
+
+    /* ---------- 3. 从后往前替换 ---------- */
+    std::string patched = html;
+    for (auto it = svgs.rbegin(); it != svgs.rend(); ++it)
+    {
+        std::string svgBlock = patched.substr(it->start, it->end - it->start);
+        std::string hash = blade16(svgBlock);
+        fs::path pngPath = tempDir / (hash + ".png");
+        if (!fs::exists(pngPath))
+        {
+            /* 3.1 处理内部 <image> 并落地资源（同之前） */
+            std::regex imgRe("<(image|img)\\b[^>]*\\b(href|xlink:href)\\s*=\\s*\"([^\"]+)\"",
+                std::regex::icase);
+            std::string patchedSvg = svgBlock;
+            std::smatch m;
+            std::string::const_iterator search(patchedSvg.cbegin());
+            while (std::regex_search(search, patchedSvg.cend(), m, imgRe))
+            {
+                std::string imgRel = m[3].str();
+                fs::path diskPath = tempDir / fs::u8path(imgRel).relative_path();
+                fs::create_directories(diskPath.parent_path());
+
+                std::wstring wRel = a2w(imgRel);
+                MemFile mf = g_book->read_zip(g_book->m_zipIndex.find(wRel).c_str());
+                if (!mf.data.empty())
+                {
+                    std::ofstream ofs(diskPath, std::ios::binary);
+                    ofs.write(reinterpret_cast<const char*>(mf.data.data()),
+                        mf.data.size());
+                }
+                patchedSvg.replace(m.position(3), m.length(3),
+                    diskPath.generic_string());
+                search = patchedSvg.cbegin() + m.position() + diskPath.generic_string().size();
+            }
+            auto document = lunasvg::Document::loadFromData(patchedSvg);
+            if (!document) continue;
+            document->renderToBitmap().writeToPng(pngPath.generic_string());
+            ///* 3.2 渲染为位图 */
+            //MemFile mfSvg;
+            //mfSvg.data.assign(patchedSvg.begin(), patchedSvg.end());
+            //ImageFrame frame = decode_img(mfSvg, L"svg");
+            //if (frame.rgba.empty()) continue;   // 失败则保持原 <svg>
+
+
+            //save_image(frame, bmpPath);
+        }
+        /* 3.3 拼 <img>，保留原 width/height */
+        std::ostringstream imgTag;
+        imgTag << R"(<img src=")" << pngPath.generic_string() << R"(")";
+        imgTag << " width=\"" << "100%" << "\"";
+        imgTag << " height=\"" << "100%" << "\"";
+        imgTag << " />";
+
+        patched.replace(it->start, it->end - it->start, imgTag.str());
+    }
+
+    gumbo_destroy_output(&kGumboDefaultOptions, output);
+    return patched;
+}
+// 替代 “duk_push_string_file”
+
+//static std::string read_file(const char* path) {
+//    FILE* fp = fopen(path, "rb");
+//    if (!fp) return {};
+//    fseek(fp, 0, SEEK_END);
+//    size_t sz = ftell(fp);
+//    fseek(fp, 0, SEEK_SET);
+//    std::string buf(sz, '\0');
+//    fread(buf.data(), 1, sz, fp);
+//    fclose(fp);
+//    return buf;
+//}
+//
+//std::string tex_to_html(const std::string& tex, bool displayMode = false)
+//{
+//    JSRuntime* rt = JS_NewRuntime();
+//    if (!rt) return {};
+//    JSContext* ctx = JS_NewContext(rt);
+//    if (!ctx) { JS_FreeRuntime(rt); return {}; }
+//
+//
+//    /* 1. 注入 KaTeX 单文件 */
+//    fs::path katex_path = exe_dir() / "config" / "katex" / "katex.min.js";
+//    std::string katex_js = read_file(katex_path);
+//    if (katex_js.empty()) { JS_FreeContext(ctx); JS_FreeRuntime(rt); return {}; }
+//    JS_Eval(ctx, katex_js.c_str(), katex_js.size(), "<katex>", JS_EVAL_TYPE_GLOBAL);
+//
+//    /* 2. stub：把 TeX 转 HTML */
+//
+//    char stub[512];
+//    snprintf(stub, sizeof(stub),
+//        "katex.renderToString(tex, {"
+//        "  displayMode: %s,"
+//        "  throwOnError: false,"
+//        "  output: 'html'"
+//        "})",
+//        displayMode ? "true" : "false");
+//    /* 3. 把公式字符串放进全局变量 `tex` */
+//    JSValue global = JS_GetGlobalObject(ctx);
+//    JS_SetPropertyStr(ctx, global, "tex", JS_NewString(ctx, tex.c_str()));
+//    JS_FreeValue(ctx, global);
+//
+//    /* 4. 执行 stub 并取结果 */
+//    JSValue ret = JS_Eval(ctx, stub, strlen(stub), "<stub>", JS_EVAL_TYPE_GLOBAL);
+//    std::string html;
+//    if (JS_IsException(ret)) {
+//        JSValue ex = JS_GetException(ctx);
+//        const char* err = JS_ToCString(ctx, ex);
+//        fprintf(stderr, "KaTeX error: %s\n", err ? err : "unknown");
+//        JS_FreeCString(ctx, err);
+//        JS_FreeValue(ctx, ex);
+//    }
+//    else {
+//        const char* str = JS_ToCString(ctx, ret);
+//        if (str) { html = str; JS_FreeCString(ctx, str); }
+//    }
+//
+//    JS_FreeValue(ctx, ret);
+//    JS_FreeContext(ctx);
+//    JS_FreeRuntime(rt);
+//    return html;
+//}
+
+/* ---------- 3. 主函数 ---------- */
+//std::string replace_math_with_katex(const std::string& html)
+//{
+//    GumboOutput* output = gumbo_parse(html.c_str());
+//
+//    /* 收集所有 <math> 节点 */
+//    struct MathNode {
+//        GumboElement* el;
+//        size_t start;
+//        size_t end;
+//    };
+//    std::vector<MathNode> mathNodes;
+//    std::function<void(GumboNode*)> walk = [&](GumboNode* node) {
+//        if (node->type == GUMBO_NODE_ELEMENT) {
+//            GumboElement& el = node->v.element;
+//            if (el.tag == GUMBO_TAG_MATH) {
+//                mathNodes.push_back({ &el,
+//                                      el.start_pos.offset,
+//                                      el.end_pos.offset + el.original_end_tag.length});
+//            }
+//            for (unsigned i = 0; i < el.children.length; ++i)
+//                walk(static_cast<GumboNode*>(el.children.data[i]));
+//        }
+//        };
+//    walk(output->root);
+//
+//    /* 从后往前替换，避免字节偏移失效 */
+//    std::string patched = html;
+//    for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
+//        /* 1. 取 MathML 原文 */
+//        std::string mathml = patched.substr(it->start, it->end - it->start);
+//
+//        std::string tex = mathml2tex::convert(mathml);
+//        
+//        /* 3. LaTeX → KaTeX HTML */
+//        std::string katexHtml = tex_to_html(tex, /*display=*/false);
+//        OutputDebugStringA(katexHtml.c_str());
+//        OutputDebugStringA("\n");
+//        if (katexHtml.empty()) continue;
+//
+//        /* 4. 直接替换原 <math> 标签 */
+//        patched.replace(it->start, it->end - it->start, katexHtml);
+//    }
+//
+//    gumbo_destroy_output(&kGumboDefaultOptions, output);
+//    return patched;
+//}
+//
+
+
+#include <windows.h>
+#include <string>
+
+bool runSvg2Png(const std::wstring& exePath,
+    const std::wstring& svgPath,
+    const std::wstring& pngPath)
+{
+    std::wstring cmd = L"\"" + exePath + L"\" "
+        + L"\"" + svgPath + L"\" "
+        + L"\"" + pngPath + L"\"";
+
+    STARTUPINFOW        si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;            // 关键：隐藏窗口
+
+    if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr,
+        FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+        return false;
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return exitCode == 0;
+}
 
 // --------------------------------------------------
 // 通用 HTML 预处理
 // --------------------------------------------------
+std::string replace_math_with_svg(const std::string& html)
+{
+    GumboOutput* output = gumbo_parse(html.c_str());
+
+    /* 收集所有 <math> 节点 */
+    struct MathNode {
+        GumboElement* el;
+        size_t start;
+        size_t end;
+    };
+    std::vector<MathNode> mathNodes;
+    std::function<void(GumboNode*)> walk = [&](GumboNode* node) {
+        if (node->type == GUMBO_NODE_ELEMENT) {
+            GumboElement& el = node->v.element;
+            if (el.tag == GUMBO_TAG_MATH) {
+                mathNodes.push_back({ &el,
+                                      el.start_pos.offset,
+                                      el.end_pos.offset + el.original_end_tag.length});
+            }
+            for (unsigned i = 0; i < el.children.length; ++i)
+                walk(static_cast<GumboNode*>(el.children.data[i]));
+        }
+        };
+    walk(output->root);
+
+    /* 从后往前替换，避免字节偏移失效 */
+    std::string patched = html;
+    //for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
+    //    /* 1. 取 MathML 原文 */
+    //    std::string mathml = patched.substr(it->start, it->end - it->start);
+
+    // 
+    //    
+    //    /* 3. LaTeX → KaTeX HTML */
+    //    MathML2SVG& m2s = MathML2SVG::instance();
+    //    std::string svg = m2s.convert(mathml);
+    //    if (svg.empty()) continue;
+
+
+    //    /* 4. 直接替换原 <math> 标签 */
+    //    patched.replace(it->start, it->end - it->start, svg);
+    //}
+    for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
+        /* 1. 取 MathML 原文 */
+        std::string mathml = patched.substr(it->start, it->end - it->start);
+
+        /* 2. LaTeX → KaTeX → SVG（你原来的逻辑） */
+        MathML2SVG& m2s = MathML2SVG::instance();
+        std::string svg = m2s.convert(mathml);
+        if (svg.empty()) continue;
+
+        /* 3. 生成唯一文件名 */
+    
+        fs::path tmpDir = make_temp_dir();
+        std::string hash = blade16(svg);
+        fs::path svgPath = tmpDir /( hash + ".svg");
+        fs::path pngPath = tmpDir / (hash + ".png");
+
+        /* 4. 写临时 SVG 文件 */
+        {
+            std::ofstream ofs(svgPath, std::ios::binary);
+            ofs << svg;
+        }
+
+        /* 5. 调用官方 svg2png.exe 转 PNG */
+        fs::path svgToolPath = exe_dir() / "config" / "svg2png.exe";
+
+        int ret = runSvg2Png(svgToolPath, svgPath, pngPath);
+        //if (ret != 0) {
+        //     转换失败，回退到原 SVG 或直接跳过
+        //    continue;
+        //}
+
+        /* 6. 构造 <img> 标签（可自定义宽高、样式） */
+        std::string imgTag;
+        imgTag =  R"(<img class="math-png" src=")" + pngPath.generic_string()
+            + R"(" alt="math" />)";
+
+        /* 7. 替换原 <math> 标签 */
+        patched.replace(it->start, it->end - it->start, imgTag);
+    }
+
+    gumbo_destroy_output(&kGumboDefaultOptions, output);
+    return patched;
+}
+//
+
+
 std::string PreprocessHTML(std::string html)
 {
     //-------------------------------------------------
@@ -3252,18 +3583,22 @@ std::string PreprocessHTML(std::string html)
     //html = std::regex_replace(html,
     //    std::regex(R"(<title\b[^>]*?/\s*>)", std::regex::icase),
     //    "<title></title>");
-
+    html = replace_math_with_svg(html);  // 存在问题，无法解析闭合<annotation-xml>
     html = std::regex_replace(
         html,
         std::regex(R"(<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?)/\s*>)", std::regex::icase),
         "<$1$2></$1>");
+
     //-------------------------------------------------
     // 2. 自闭合 <script .../> → <script ...>code</script>
     //-------------------------------------------------
   // 2. 自闭合 <script .../> → <script ...>code</script>
     html = preprocess_js(html);
+    
     std::wstring dir = make_temp_dir();
-    html = inline_and_rasterize_svgs_gumbo(html, dir);
+    html = replace_svg_with_img(html, dir);
+    //html = inline_and_rasterize_svgs_gumbo(html, dir); //存在问题，会把semantic标签变为空白
+  
     //-------------------------------------------------
     // 2. EPUB 3 的 <meta property="..." content="..."/>
     //     litehtml 只认识 name/content，不认识 property
@@ -6061,7 +6396,8 @@ FontCache::get(std::wstring& familyName, const litehtml::font_description& descr
         std::wstring(familyName.begin(), familyName.end()),
         descr.weight,
         descr.style == litehtml::font_style_italic,
-        descr.size
+        descr.size, 
+        
     };
    
     // 2. 读缓存
@@ -6141,6 +6477,7 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
              fm.descent = static_cast<litehtml::pixel_t>(m.descent * dip + 0.5f);
              fm.height = static_cast<litehtml::pixel_t>((m.ascent + m.descent + m.lineGap) * dip + 0.5f);
              fm.x_height = static_cast<litehtml::pixel_t>(m.xHeight * dip + 0.5f);
+           
              fm.ch_width = fm.font_size * 3 / 5;
              fm.sub_shift = fm.super_shift = fm.x_height / 2;
   
@@ -6652,9 +6989,11 @@ bool VirtualDoc::load_by_id( int spine_id, bool isPushBack)
     if (href.empty()) { return false; }
     std::string html = m_book->load_html(href);
     if (html.empty()) { return false; }
-    if (g_cfg.enableGlobalCSS) { html = insert_global_css(html); }
-    html = inject_css(html);
+
     if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
+    if (g_cfg.enableGlobalCSS) { html = inject_global_css(html); }
+    html = inject_css(html);
+    //html = inject_katex_css(html);
     auto block = get_html_block(html, spine_id);
  
     if (isPushBack){ m_blocks.push_back(std::move(block)); }
@@ -8382,4 +8721,788 @@ void D2DCanvas::on_lbutton_dblclk(int x, int y)
 }
 
 
+//namespace mathml2tex {
+//
+//
+//    using namespace tinyxml2;
+//
+//    // ---------- 工具 ----------
+//    static inline void write(std::string& out, const std::string& s) { out += s; }
+//
+//    static inline std::string trim(const std::string& s)
+//    {
+//        const char* ws = " \t\n\r\f\v";
+//        size_t first = s.find_first_not_of(ws);
+//        if (first == std::string::npos) return "";
+//        size_t last = s.find_last_not_of(ws);
+//        return s.substr(first, last - first + 1);
+//    }
+//    static inline std::string get_attr(const XMLElement* e,
+//        const char* name,
+//        const char* def = "")
+//    {
+//        const char* v = e->Attribute(name);
+//        return v ? v : def;
+//    }
+//
+//    static inline std::string escape_text(const std::string& s)
+//    {
+//        std::string r;
+//        r.reserve(s.size());
+//        for (char c : s)
+//        {
+//            switch (c)
+//            {
+//            case '\\': r += "\\textbackslash{}"; break;
+//            case '{':  r += "\\{"; break;
+//            case '}':  r += "\\}"; break;
+//            case '$':  r += "\\$"; break;
+//            case '&':  r += "\\&"; break;
+//            case '%':  r += "\\%"; break;
+//            case '#':  r += "\\#"; break;
+//            case '^':  r += "\\^{}"; break;
+//            case '_':  r += "\\_"; break;
+//            case '~':  r += "\\textasciitilde{}"; break;
+//            default:   r += c;
+//            }
+//        }
+//        return r;
+//    }
+//
+//    // ---------- 主转换 ----------
+//    void convert_node(const XMLNode* node, std::string& out, bool display = false)
+//    {
+//        if (!node) return;
+//        if (const XMLText* txt = node->ToText())
+//        {
+//            write(out, escape_text(trim(txt->Value())));
+//            return;
+//        }
+//
+//        const XMLElement* e = node->ToElement();
+//        if (!e) return;
+//
+//        // 使用 gperf 或编译期哈希可再提速，这里用 switch-case 展开
+//        switch (e->Name()[0])
+//        {
+//        case 'm':
+//        {
+//            switch (e->Name()[1])
+//            {
+//            case 'a': // math
+//                if (std::strcmp(e->Name(), "math") == 0)
+//                {
+//                    bool d = display || (get_attr(e, "display") == "block");
+//                    for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                        convert_node(c, out, d);
+//                    return;
+//                }
+//                break;
+//
+//            case 'f': // mfrac
+//                if (std::strcmp(e->Name(), "mfrac") == 0)
+//                {
+//                    std::string lt = get_attr(e, "linethickness");
+//                    if (!lt.empty() && lt != "1")
+//                    {
+//                        write(out, "\\genfrac{}{}{" + lt + "}{");
+//                    }
+//                    else
+//                    {
+//                        write(out, "\\frac{");
+//                    }
+//                    convert_node(e->FirstChild(), out, display);
+//                    write(out, "}{");
+//                    convert_node(e->FirstChild()->NextSibling(), out, display);
+//                    write(out, "}");
+//                    return;
+//                }
+//                break;
+//
+//            case 'r':
+//                if (std::strcmp(e->Name(), "mroot") == 0)
+//                {
+//                    write(out, "\\sqrt[");
+//                    convert_node(e->FirstChild()->NextSibling(), out, display);
+//                    write(out, "]{");
+//                    convert_node(e->FirstChild(), out, display);
+//                    write(out, "}");
+//                    return;
+//                }
+//                else if (std::strcmp(e->Name(), "mrow") == 0)
+//                {
+//                    for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                        convert_node(c, out, display);
+//                    return;
+//                }
+//                break;
+//
+//            case 's':
+//                switch (e->Name()[2])
+//                {
+//                case 'q': // msqrt
+//                    if (std::strcmp(e->Name(), "msqrt") == 0)
+//                    {
+//                        write(out, "\\sqrt{");
+//                        for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                            convert_node(c, out, display);
+//                        write(out, "}");
+//                        return;
+//                    }
+//                    break;
+//
+//                case 'u': // msub, msup, msubsup
+//                    if (std::strcmp(e->Name(), "msub") == 0)
+//                    {
+//                        convert_node(e->FirstChild(), out, display);
+//                        write(out, "_{");
+//                        convert_node(e->FirstChild()->NextSibling(), out, display);
+//                        write(out, "}");
+//                        return;
+//                    }
+//                    else if (std::strcmp(e->Name(), "msup") == 0)
+//                    {
+//                        convert_node(e->FirstChild(), out, display);
+//                        write(out, "^{");
+//                        convert_node(e->FirstChild()->NextSibling(), out, display);
+//                        write(out, "}");
+//                        return;
+//                    }
+//                    else if (std::strcmp(e->Name(), "msubsup") == 0)
+//                    {
+//                        convert_node(e->FirstChild(), out, display);
+//                        write(out, "_{");
+//                        convert_node(e->FirstChild()->NextSibling(), out, display);
+//                        write(out, "}^{");
+//                        convert_node(e->FirstChild()->NextSibling()->NextSibling(), out, display);
+//                        write(out, "}");
+//                        return;
+//                    }
+//                    break;
+//
+//                case 't': // mtable, mtr, mtd
+//                    if (std::strcmp(e->Name(), "mtable") == 0)
+//                    {
+//                        write(out, "\\begin{array}");
+//                        std::string colalign = get_attr(e, "columnalign");
+//                        if (!colalign.empty())
+//                        {
+//                            write(out, "{");
+//                            for (char c : colalign)
+//                            {
+//                                switch (c)
+//                                {
+//                                case 'l': write(out, "l"); break;
+//                                case 'c': write(out, "c"); break;
+//                                case 'r': write(out, "r"); break;
+//                                default:  write(out, "c");
+//                                }
+//                            }
+//                            write(out, "}");
+//                        }
+//                        else
+//                        {
+//                            // 默认列数：第一行 <mtr> 的 <mtd> 数量
+//                            int cols = 0;
+//                            if (const XMLNode* firstRow = e->FirstChild())
+//                                for (const XMLNode* cell = firstRow->FirstChild(); cell; cell = cell->NextSibling())
+//                                    ++cols;
+//                            write(out, std::string(std::max(cols, 1), 'c'));
+//                        }
+//
+//                        for (const XMLNode* row = e->FirstChild(); row; row = row->NextSibling())
+//                        {
+//                            write(out, "\n");
+//                            for (const XMLNode* cell = row->FirstChild(); cell; cell = cell->NextSibling())
+//                            {
+//                                if (cell != row->FirstChild()) write(out, " & ");
+//                                convert_node(cell, out, display);
+//                            }
+//                            write(out, " \\\\");
+//                        }
+//                        write(out, "\n\\end{array}");
+//                        return;
+//                    }
+//                    else if (std::strcmp(e->Name(), "mtr") == 0 || std::strcmp(e->Name(), "mtd") == 0)
+//                    {
+//                        for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                            convert_node(c, out, display);
+//                        return;
+//                    }
+//                    break;
+//                }
+//                break;
+//
+//            case 'o': // mo, mi, mn
+//                if (std::strcmp(e->Name(), "mo") == 0 ||
+//                    std::strcmp(e->Name(), "mi") == 0 ||
+//                    std::strcmp(e->Name(), "mn") == 0)
+//                {
+//                    if (const char* txt = e->GetText())
+//                    {
+//                        std::string s = txt;
+//                        if (std::strcmp(e->Name(), "mo") == 0)
+//                        {
+//                            // 简单映射常用符号
+//                            if (s == "−") s = "-";
+//                            else if (s == "×") s = "\\times";
+//                            else if (s == "·") s = "\\cdot";
+//                            else if (s == "→") s = "\\to";
+//                            else if (s == "∞") s = "\\infty";
+//                            else if (s == "≤") s = "\\leq";
+//                            else if (s == "≥") s = "\\geq";
+//                            else if (s == "≠") s = "\\neq";
+//                            else if (s == "±") s = "\\pm";
+//                        }
+//                        write(out, s);
+//                    }
+//                    return;
+//                }
+//                break;
+//
+//            case 'e': // merror, menclose
+//                if (std::strcmp(e->Name(), "menclose") == 0)
+//                {
+//                    std::string notation = get_attr(e, "notation");
+//                    if (notation == "longdiv")
+//                    {
+//                        write(out, "\\longdiv{");
+//                    }
+//                    else
+//                    {
+//                        write(out, "\\boxed{");
+//                    }
+//                    for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                        convert_node(c, out, display);
+//                    write(out, "}");
+//                    return;
+//                }
+//                break;
+//
+//            case 'i': // mspace, mstyle, mphantom, mpadded
+//                if (std::strcmp(e->Name(), "mstyle") == 0)
+//                {
+//                    std::string scriptlevel = get_attr(e, "scriptlevel");
+//                    if (!scriptlevel.empty())
+//                    {
+//                        int lvl = std::stoi(scriptlevel);
+//                        if (lvl > 0) write(out, "\\scriptstyle ");
+//                        else         write(out, "\\displaystyle ");
+//                    }
+//                    for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                        convert_node(c, out, display);
+//                    return;
+//                }
+//                else if (std::strcmp(e->Name(), "mspace") == 0)
+//                {
+//                    std::string w = get_attr(e, "width");
+//                    if (!w.empty())
+//                    {
+//                        write(out, "\\hspace{" + w + "}");
+//                    }
+//                    return;
+//                }
+//                else if (std::strcmp(e->Name(), "mphantom") == 0)
+//                {
+//                    write(out, "\\phantom{");
+//                    for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//                        convert_node(c, out, display);
+//                    write(out, "}");
+//                    return;
+//                }
+//                break;
+//            }
+//            break;
+//        }
+//
+//        default:
+//            break;
+//        }
+//
+//        // 兜底：未知节点直接递归子节点
+//        for (const XMLNode* c = e->FirstChild(); c; c = c->NextSibling())
+//            convert_node(c, out, display);
+//    }
+//    /* ---------- 递归转换 ---------- */
+//    std::string mathml2tex(const std::string& mathml)
+//    {
+//        XMLDocument doc;
+//        doc.Parse(mathml.c_str());
+//        const XMLElement* math = doc.RootElement();
+//        if (!math || std::strcmp(math->Name(), "math") != 0)
+//            return "";
+//
+//        std::string tex;
+//        convert_node(math, tex, true);
+//        return tex;
+//    }
+//
+//    /* ---------- 对外接口 ---------- */
+//    std::string convert(const std::string& mathml) {
+//        return mathml2tex(mathml);
+//    }
+//
+//} // namespace mathml2tex
 
+
+
+// 方便打印任意字符串
+inline void DbgPrint(const char* fmt, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    OutputDebugStringA(buf);
+}
+
+
+
+
+using namespace tinyxml2;
+
+
+/* ---------- 内部实现 ---------- */
+class MathML2SVG::Impl {
+public:
+    /* 样式结构体 —— 只在 Impl 内部可见 */
+
+
+    /* 策略表 */
+    using RenderFn = std::function<std::string(const tinyxml2::XMLElement*, const Style&)>;
+    using AttrFn = void(*)(const class tinyxml2::XMLAttribute*, class Style&);
+
+    std::unordered_map<std::string, RenderFn> tagRender;
+    std::unordered_map<std::string, AttrFn>   attrApply;
+    std::mutex                                mtx;
+    bool m_usePath = true;   // 外部可改
+    Impl() { registerAll(); }
+
+    /* 线程安全注册 */
+    void registerTag(const std::string& tag, RenderFn fn) {
+        std::lock_guard<std::mutex> lock(mtx);
+        tagRender[tag] = std::move(fn);
+    }
+    void registerAttr(const std::string& attr, AttrFn fn) {
+        std::lock_guard<std::mutex> lock(mtx);
+        attrApply[attr] = fn;
+    }
+
+    std::string cleanup(std::string svg) {
+        std::regex re(R"(\s*data-w="[^"]*")");
+        return std::regex_replace(svg, re, "");
+    }
+    /* 主转换 */
+    std::string convert(const std::string& mathml) {
+        XMLDocument doc;
+        if (doc.Parse(mathml.c_str()) != XML_SUCCESS)
+            return "<!-- parse error -->";
+
+        XMLElement* root = doc.RootElement();
+        if (!root) return "<!-- empty -->";
+
+        Style st;
+        std::string inner = renderElement(root, st);
+
+        std::ostringstream svg;
+        svg << R"(<svg xmlns="http://www.w3.org/2000/svg"  height="120">)"
+            << "<g transform=\"translate(5,30)\">" << inner << "</g>"
+            << "</svg>";
+        return (svg.str());
+    }
+
+private:
+    static std::wstring extractPlainText(const tinyxml2::XMLElement* e) {
+        std::wstring out;
+        if (!e) return out;
+
+        // 深度优先收集所有文本节点
+        if (const char* txt = e->GetText())
+            out += a2w(txt);
+
+        for (const tinyxml2::XMLElement* c = e->FirstChildElement();
+            c; c = c->NextSiblingElement()) {
+            out += extractPlainText(c);
+        }
+        return out;
+    }
+
+    /* ---------- 工具函数 ---------- */
+    static std::string textRender(const tinyxml2::XMLElement* e, const Style& st)
+    {
+        const char* txt = e->GetText() ? e->GetText() : "";
+        std::wstring wtxt = a2w(txt);
+
+
+        // 老逻辑
+        auto si = GdiTextMeasurer::instance().measure(
+            wtxt, st.fontFamily, std::stof(st.fontSize));
+        std::ostringstream os;
+        os << "<text x=\"0\" y=\"" << si.ascent
+            << "\" font-size=\"" << st.fontSize
+            << "\" font-family=\"" << w2a(st.fontFamily) << "\" fill=\"" << st.fill
+            << "\" data-w=\"" << si.width << "\">"
+            << txt << "</text>";
+        return os.str();
+    }
+
+    static double extractWidth(const std::string& svg) {
+        // 从 <g data-w="123.45"> 里提取宽度
+        const char* tag = "data-w=\"";
+        auto pos = svg.find(tag);
+        if (pos == std::string::npos) return 0;
+        pos += strlen(tag);
+        auto end = svg.find('"', pos);
+        return std::stod(svg.substr(pos, end - pos));
+    }
+
+    static std::string hbox(const std::vector<std::string>& parts, double dx = 2) {
+        std::ostringstream os;
+        double x = 0;
+        for (const auto& p : parts) {
+            os << "<g transform=\"translate(" << x << ",0)\">" << p << "</g>";
+            x += extractWidth(p);   // 优先用实际宽度
+            if (x == 0) x += dx;  // 没有 data-w 才退回到固定 dx
+        }
+        return "<g>" + os.str() + "</g>";
+    }
+
+    static std::string vbox(const std::vector<std::string>& parts, double dy = 4) {
+        std::ostringstream os;
+        double y = 0;
+        for (const auto& p : parts) {
+            os << "<g transform=\"translate(0," << y << ")\">" << p << "</g>";
+            y += dy;
+        }
+        return "<g>" + os.str() + "</g>";
+    }
+
+    /* ---------- 递归渲染 ---------- */
+    std::string renderElement(const XMLElement* e, Style st) {
+        DbgPrint("[renderElement] <%s>\n", e->Name());
+        /* 1. 处理属性 */
+        for (const XMLAttribute* a = e->FirstAttribute(); a; a = a->Next()) {
+            auto it = attrApply.find(a->Name());
+            if (it != attrApply.end()) it->second(a, st);
+        }
+
+        /* 2. 如果是文本类节点，直接渲染，不再递归子元素 */
+        const char* tag = e->Name();
+        if (!strcmp(tag, "mtext") || !strcmp(tag, "mo") || !strcmp(tag, "mi") || !strcmp(tag, "mn")) {
+            return textRender(e, st);
+        }
+
+        /* 3. 容器节点：递归子元素 */
+        std::vector<std::string> children;
+        for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement()) {
+            children.push_back(renderElement(c, st));
+        }
+
+        /* 4. 查找是否有注册的渲染器（如 mfrac、msup 等） */
+        auto it = tagRender.find(tag);
+        if (it != tagRender.end()) {
+            return it->second(e, st);
+        }
+
+        /* 5. 默认水平排列子节点 */
+        return hbox(children);
+    }
+    /* ---------- 注册表 ---------- */
+    void registerAll() {
+        /* 记号类 */
+        registerTag("mi", textRender);
+        registerTag("mn", textRender);
+        registerTag("mo", textRender);
+        registerTag("ms", textRender);
+        registerTag("mtext", textRender);
+
+        /* 布局类 */
+        registerTag("mrow",
+            [this](const tinyxml2::XMLElement* e, const Style& st) -> std::string {
+                std::vector<std::string> children;
+                for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement()) {
+                    children.push_back(renderElement(c, st));
+                }
+                return hbox(children);
+            });
+        registerTag("mfrac", [](const XMLElement* e, const Style& st) {
+            std::vector<std::string> kids;
+            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
+                kids.push_back(textRender(c, st));
+            return vbox({ kids[0],
+                          "<line x1='0' y1='0' x2='40' y2='0' stroke='black'/>",
+                          kids[1] });
+            });
+        registerTag("msup", [this](const XMLElement* e, const Style& st) -> std::string {
+            std::vector<std::string> kids;
+            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
+                kids.push_back(renderElement(c, st));
+            if (kids.size() < 2) return kids.empty() ? "" : kids[0];
+
+            // 测量底数
+            std::wstring baseTxt = extractPlainText(e->FirstChildElement());
+            auto baseSz = GdiTextMeasurer::instance().measure(
+                baseTxt, st.fontFamily, std::stof(st.fontSize));
+
+            // 测量指数
+            std::wstring expTxt = extractPlainText(e->FirstChildElement()->NextSiblingElement());
+            auto expSz = GdiTextMeasurer::instance().measure(
+                expTxt, st.fontFamily, std::stof(st.fontSize));
+
+            const double scale = 0.7;
+            const double gap = 1.0;
+            const double expX = baseSz.width + gap;
+            const double expY = -baseSz.height * 0.45;
+
+            const double totalWidth = expX + expSz.width * scale;
+
+            std::ostringstream os;
+            os << "<g data-w=\"" << totalWidth << "\">"
+                << kids[0]
+                << "<g transform=\"translate(" << expX << "," << expY << ") scale(" << scale << ")\">"
+                << kids[1] << "</g>"
+                << "</g>";
+            return os.str();
+            });
+        registerTag("msub", [this](const XMLElement* e, const Style& st) -> std::string {
+            std::vector<std::string> kids;
+            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
+                kids.push_back(renderElement(c, st));
+            if (kids.size() < 2) return kids.empty() ? "" : kids[0];
+
+            // 测量底数
+            std::wstring baseTxt = extractPlainText(e->FirstChildElement());
+            auto baseSz = GdiTextMeasurer::instance().measure(
+                baseTxt, st.fontFamily, std::stof(st.fontSize));
+
+            // 测量下标
+            std::wstring subTxt = extractPlainText(e->FirstChildElement()->NextSiblingElement());
+            auto subSz = GdiTextMeasurer::instance().measure(
+                subTxt, st.fontFamily, std::stof(st.fontSize));
+
+            const double scale = 0.7;
+            const double gap = 1.0;
+            const double subX = baseSz.width + gap;
+            const double subY = baseSz.height * 0.45;   // 向下偏移
+
+            const double totalWidth = subX + subSz.width * scale;
+
+            std::ostringstream os;
+            os << "<g data-w=\"" << totalWidth << "\">"
+                << kids[0]
+                << "<g transform=\"translate(" << subX << "," << subY << ") scale(" << scale << ")\">"
+                << kids[1] << "</g>"
+                << "</g>";
+            return os.str();
+            });
+        registerTag("msubsup", [](const XMLElement* e, const Style& st) {
+            std::vector<std::string> kids;
+            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
+                kids.push_back(textRender(c, st));
+            return hbox({ kids[0],
+                          "<g transform=\"translate(2,-8) scale(0.7)\">" + kids[2] + "</g>",
+                          "<g transform=\"translate(2,8) scale(0.7)\">" + kids[1] + "</g>" });
+            });
+        registerTag("msqrt", [](const XMLElement* e, const Style& st) {
+            std::string inner;
+            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
+                inner += textRender(c, st);
+
+            std::string rootSym =  "<text font-size='20'>√</text>";
+
+            // 量根号实际宽度
+            float rootW = GdiTextMeasurer::instance().measure(L"√", st.fontFamily, std::stof(st.fontSize)).width;
+
+            return "<g>"
+                + rootSym +
+                "<g transform=\"translate(" + std::to_string(rootW) + ",0)\">"
+                "<rect x='-2' y='-2' width='" + std::to_string(
+                    GdiTextMeasurer::instance().measure(a2w(inner), st.fontFamily, std::stof(st.fontSize)).width)
+                + "' height='20' stroke='black' fill='none'/>"
+                + inner + "</g></g>";
+            });
+
+        registerTag("mroot", [](const XMLElement* e, const Style& st) {
+            std::vector<std::string> kids;
+            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
+                kids.push_back(textRender(c, st));
+
+            std::string rootSym = "<text font-size='20'>√</text>";
+
+            float rootW = GdiTextMeasurer::instance().measure(L"√", st.fontFamily, std::stof(st.fontSize)).width;
+
+            return "<g>"
+                "<g transform=\"translate(0,-8) scale(0.7)\">" + kids[1] + "</g>"
+                + rootSym +
+                "<g transform=\"translate(" + std::to_string(rootW) + ",0)\">"
+                "<rect x='-2' y='-2' width='" + std::to_string(
+                    GdiTextMeasurer::instance().measure(a2w(kids[0]), st.fontFamily, std::stof(st.fontSize)).width)
+                + "' height='20' stroke='black' fill='none'/>"
+                + kids[0] + "</g></g>";
+            });
+        registerTag("mspace", [](const XMLElement* e, const Style&) {
+            const char* w = e->Attribute("width");
+            double width = w ? std::stod(w) : 2.0;
+            return "<g transform=\"translate(" + std::to_string(width) + ",0)\"></g>";
+            });
+
+        /* 属性 */
+        registerAttr("mathcolor", [](const XMLAttribute* a, Style& st) {
+            st.fill = a->Value();
+            });
+        registerAttr("mathsize", [](const XMLAttribute* a, Style& st) {
+            st.fontSize = a->Value();
+            });
+        registerAttr("mathvariant", [](const XMLAttribute* a, Style& st) {
+            const char* v = a->Value();
+            if (!strcmp(v, "italic")) st.fontStyle = "italic";
+            else if (!strcmp(v, "bold")) st.fontWeight = "bold";
+            });
+    }
+};
+
+/* ---------- 单例 ---------- */
+MathML2SVG& MathML2SVG::instance() {
+    static MathML2SVG inst;
+    return inst;
+}
+MathML2SVG::MathML2SVG() : pImpl(std::make_unique<Impl>()) {}
+MathML2SVG::~MathML2SVG() = default;
+
+/* 暴露接口 */
+std::string MathML2SVG::convert(const std::string& mathml) {
+    return pImpl->convert(mathml);
+}
+void MathML2SVG::registerTag(const std::string& tag, RenderFn fn) {
+    pImpl->registerTag(tag, fn);
+}
+void MathML2SVG::registerAttr(const std::string& attr, AttrFn fn) {
+    pImpl->registerAttr(attr, fn);
+}
+
+
+
+std::wstring GdiTextMeasurer::makeKey(const std::wstring& name, float size, int style) {
+    return name + L'|' + std::to_wstring(size) + L'|' + std::to_wstring(style);
+}
+
+GdiTextMeasurer& GdiTextMeasurer::instance() {
+    static GdiTextMeasurer inst;
+    return inst;
+}
+
+GdiTextMeasurer::GdiTextMeasurer() {
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+}
+
+GdiTextMeasurer::~GdiTextMeasurer() {
+    // 所有 unique_ptr 会自动释放
+}
+
+GdiTextMeasurer::Size
+GdiTextMeasurer::measure(const std::wstring& text,
+    const std::wstring& fontName,
+    float               fontSizePx,
+    Gdiplus::FontStyle  style)
+{
+    std::wstring key = makeKey(fontName, fontSizePx, style);
+    std::lock_guard lg(mtx_);
+
+    auto& slot = cache_[key];
+    if (!slot.font) {
+        slot.family = std::make_unique<Gdiplus::FontFamily>(fontName.c_str());
+        slot.font = std::make_unique<Gdiplus::Font>(slot.family.get(),
+            fontSizePx,
+            style,
+            Gdiplus::UnitPixel);
+    }
+
+    HDC hdc = GetDC(nullptr);
+    Gdiplus::Graphics g(hdc);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+
+    // 测量
+    Gdiplus::RectF bounds;
+    g.MeasureString(text.c_str(), -1, slot.font.get(),
+        Gdiplus::PointF(0, 0), &bounds);
+
+    // 计算 ascent（像素）
+    INT emHeight = slot.family->GetEmHeight(style);
+    INT ascent = slot.family->GetCellAscent(style);
+    float ascentPx = fontSizePx * ascent / emHeight;
+
+    ReleaseDC(nullptr, hdc);
+    return { bounds.Width, bounds.Height, ascentPx };
+}
+
+std::string GdiTextMeasurer::outlineToSVG(const std::wstring& text,
+    const std::wstring& fontName,
+    float fontSizePx,
+    const std::string& fill)
+{
+    /* 1. 复用已有缓存字体 */
+    auto& cached = cache_[makeKey(fontName, fontSizePx, Gdiplus::FontStyleRegular)];
+    if (!cached.font) {
+        cached.family = std::make_unique<Gdiplus::FontFamily>(fontName.c_str());
+        cached.font = std::make_unique<Gdiplus::Font>(cached.family.get(),
+            fontSizePx,
+            Gdiplus::FontStyleRegular,
+            Gdiplus::UnitPixel);
+    }
+
+    /* 2. 生成 GraphicsPath */
+    Gdiplus::GraphicsPath path;
+    path.AddString(text.c_str(), static_cast<int>(text.size()),
+        cached.family.get(), Gdiplus::FontStyleRegular,
+        fontSizePx, Gdiplus::PointF(0, 0), nullptr);
+
+    /* 3. 转 SVG path */
+    std::ostringstream d;
+    d << "<path fill=\"" << fill << "\" d=\"";
+    Gdiplus::PathData pd;
+    if (path.GetPathData(&pd) != Gdiplus::Ok || pd.Count == 0) {
+        d << "\"/>";
+        return d.str();
+    }
+
+    for (int i = 0; i < pd.Count; ) {
+        BYTE type = pd.Types[i] & Gdiplus::PathPointTypePathTypeMask;
+
+        switch (type) {
+        case Gdiplus::PathPointTypeStart:
+            d << "M" << pd.Points[i].X << " " << pd.Points[i].Y;
+            ++i;
+            break;
+
+        case Gdiplus::PathPointTypeLine:
+            d << "L" << pd.Points[i].X << " " << pd.Points[i].Y;
+            ++i;
+            break;
+
+        case Gdiplus::PathPointTypeBezier:
+            if (i + 2 < pd.Count) {   // 确保有 3 个点
+                d << "C"
+                    << pd.Points[i].X << " " << pd.Points[i].Y << " "
+                    << pd.Points[i + 1].X << " " << pd.Points[i + 1].Y << " "
+                    << pd.Points[i + 2].X << " " << pd.Points[i + 2].Y;
+                i += 3;
+            }
+            else {
+                i += 1;               // 防御：点数不足，跳过
+            }
+            break;
+
+        default:
+            ++i;
+            break;
+        }
+
+        if (pd.Types[i - 1] & Gdiplus::PathPointTypeCloseSubpath)
+            d << "Z";
+    }
+
+    d << "\"/>";
+    return d.str();
+}

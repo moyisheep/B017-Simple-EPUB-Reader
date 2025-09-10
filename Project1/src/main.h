@@ -23,7 +23,7 @@
 #include <algorithm>
 #include <miniz/miniz.h>
 #include <tinyxml2.h>
-#include <lunasvg/lunasvg.h>    
+#include <lunasvg/lunasvg.h>"    
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
@@ -45,13 +45,9 @@ using namespace Gdiplus;
 #include <sqlite3.h>
 #include <wininet.h>
 #include "resource.h"
-#include <duktape.h>
+
 #include <gumbo.h>
-#include <string>
-#include <sstream>
-#include <vector>
 #include <unordered_set>
-#include <regex>
 #include <chrono>
 #include <thread>
 #include <set>
@@ -63,9 +59,6 @@ using namespace Gdiplus;
 #include <locale>
 #pragma comment(lib, "dwrite.lib")
 #include <d2d1_3.h>        // ID2D1DeviceContext / ID2D1Bitmap1
-#include <vector>
-#include <algorithm>
-#include <unordered_set>
 #pragma comment(lib, "d2d1.lib")
 #include <dwrite_1.h>   // 需要 IDWriteTextFormat1
 #include <d2d1_1.h>       // D2D 1.1
@@ -119,6 +112,11 @@ using namespace Gdiplus;
 #include <stack>
 #include <sstream>
 #include <blake3.h>
+#include <quickjs.h>
+
+
+
+
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -1270,38 +1268,7 @@ private:
     ThumbState m_thumb;
     HWND m_hwnd = nullptr;
 };
-namespace litehtml {
 
-    class el_svg : public html_tag
-    {
-    public:
-        explicit el_svg(const document::ptr& doc);
-
-        /* litehtml::element 接口 */
-        void            parse_attributes() override;
-        void            compute_styles(bool recursive) override;
-        void            draw(uint_ptr hdc,
-            pixel_t x,
-            pixel_t y,
-            const position* clip,
-            const std::shared_ptr<render_item>& ri) override;
-        void            get_content_size(size& sz, pixel_t max_width) override;
-        bool            is_replaced() const override { return true; }
-        string          dump_get_name() override { return "svg"; }
-        std::shared_ptr<render_item>
-            create_render_item(const std::shared_ptr<render_item>& parent) override;
-
-    private:
-        std::string  m_src;        // 外链地址
-        std::string  m_data_uri;   // 内联 SVG 的 data URI
-        bool         m_inline = false;
-        std::string m_raw_svg;   // 原始 <svg>...</svg> 文本
-        /* 简单 base64 实现（头文件里放声明，cpp 里放实现） */
-        static std::string base64_encode(const unsigned char* data, size_t len);
-        void set_data(const char* data) override;
-    };
-
-} // namespace litehtml
 
 struct BmpHeader {
     uint16_t bfType = 0x4D42;          // 'BM'
@@ -1322,4 +1289,124 @@ struct BmpInfo {
     int32_t  biYPelsPerMeter = 0;
     uint32_t biClrUsed = 0;
     uint32_t biClrImportant = 0;
+};
+//
+//namespace mathml2tex {
+//
+//    /* 唯一对外接口 */
+//    std::string convert(const std::string& mathml);
+//
+//} // namespace mathml2tex
+
+enum PuncClass {
+    PC_NORMAL,   // 普通字符
+    PC_LEFT,   // 左引号、左括号、书名号前半
+    PC_RIGHT,  // 右引号、右括号、句末标点
+    PC_MIDDLE, // 破折号、省略号（不可拆）
+};
+
+static PuncClass classify(UChar32 cp) {
+    switch (cp) {
+        /* ---------- 左半部分 ---------- */
+    case 0x3008: case 0x300A: case 0x300C: case 0x300E: // 〈 《 「 『
+    case 0xFF08:                                        // （
+    case 0x3010: case 0x3014: case 0x3016: case 0x3018: // 【 〔 〖 〘
+    case 0xFF3B: case 0xFF5B: case 0xFF5F:              // ［ ｛ ｟
+    case 0x2018: case 0x201C:                           // ‘ “
+        return PC_LEFT;
+
+        /* ---------- 右半部分 ---------- */
+    case 0x3001: case 0x3002:                           // 、 。
+    case 0xFF01: case 0xFF1F:                           // ！ ？
+    case 0xFF0C: case 0xFF1B: case 0xFF1A:              // ， ； ：
+    case 0x3009: case 0x300B: case 0x300D: case 0x300F: // 〉 》 」 』
+    case 0xFF09:                                        // ）
+    case 0x3011: case 0x3015: case 0x3017: case 0x3019: // 】 〕 〗 〙
+    case 0xFF3D: case 0xFF5D: case 0xFF60:              // ］ ｝ ｠
+    case 0x2019: case 0x201D:                           // ’ ”
+        return PC_RIGHT;
+
+        /* ---------- 中间整体 ---------- */
+    case 0x2014:                                        // —  破折号
+    case 0x2026:                                        // …  省略号
+    case 0x2025:                                        // ‥  二点省略
+        return PC_MIDDLE;
+
+    default:
+        return PC_NORMAL;
+    }
+}
+
+
+class MathML2SVG {
+public:
+    static MathML2SVG& instance();
+
+    // 删除拷贝/移动
+    MathML2SVG(const MathML2SVG&) = delete;
+    MathML2SVG& operator=(const MathML2SVG&) = delete;
+    MathML2SVG(MathML2SVG&&) = delete;
+    MathML2SVG& operator=(MathML2SVG&&) = delete;
+
+    /* 业务接口 */
+    std::string convert(const std::string& mathml);
+
+    struct Style {
+        std::string fontSize = "20";
+        std::wstring fontFamily = L"Times New Roman";
+        std::string fill = "#000000";
+        std::string fontStyle;
+        std::string fontWeight;
+    };
+    /* 扩展点 */
+    using AttrMap = std::unordered_map<std::string, std::string>;
+    using RenderFn = std::function<std::string(const tinyxml2::XMLElement*, const Style&)>;
+    using AttrFn = void(*)(const class tinyxml2::XMLAttribute*, class Style&);
+
+    void registerTag(const std::string& tag, RenderFn  fn);
+    void registerAttr(const std::string& attr, AttrFn fn);
+
+private:
+    MathML2SVG();
+    ~MathML2SVG();
+
+    class Impl;
+    std::unique_ptr<Impl> pImpl;
+
+};
+
+
+class GdiTextMeasurer {
+public:
+    static std::wstring makeKey(const std::wstring& name, float size, int style);
+    static GdiTextMeasurer& instance();   // Meyers 单例
+
+    // 返回文本的像素宽高
+    struct Size {
+        float width = 0.f;
+        float height = 0.f;
+        float ascent = 0.f;   // 新增
+    };
+    Size measure(const std::wstring& text,
+        const std::wstring& fontName,
+        float               fontSizePx,
+        Gdiplus::FontStyle  style = Gdiplus::FontStyleRegular);
+
+    std::string outlineToSVG(const std::wstring& text,
+        const std::wstring& fontName,
+        float               fontSizePx,
+        const std::string& fill = "black");
+private:
+    GdiTextMeasurer();
+    ~GdiTextMeasurer();
+    GdiTextMeasurer(const GdiTextMeasurer&) = delete;
+    GdiTextMeasurer& operator=(const GdiTextMeasurer&) = delete;
+
+    struct CachedFont {
+        std::unique_ptr<Gdiplus::FontFamily> family;
+        std::unique_ptr<Gdiplus::Font>       font;
+    };
+
+    std::unordered_map<std::wstring, CachedFont> cache_;
+    std::mutex                                   mtx_;
 };
