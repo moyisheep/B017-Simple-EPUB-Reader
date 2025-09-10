@@ -3513,21 +3513,6 @@ std::string replace_math_with_svg(const std::string& html)
 
     /* 从后往前替换，避免字节偏移失效 */
     std::string patched = html;
-    //for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
-    //    /* 1. 取 MathML 原文 */
-    //    std::string mathml = patched.substr(it->start, it->end - it->start);
-
-    // 
-    //    
-    //    /* 3. LaTeX → KaTeX HTML */
-    //    MathML2SVG& m2s = MathML2SVG::instance();
-    //    std::string svg = m2s.convert(mathml);
-    //    if (svg.empty()) continue;
-
-
-    //    /* 4. 直接替换原 <math> 标签 */
-    //    patched.replace(it->start, it->end - it->start, svg);
-    //}
     for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
         /* 1. 取 MathML 原文 */
         std::string mathml = patched.substr(it->start, it->end - it->start);
@@ -9092,6 +9077,7 @@ public:
         std::regex re(R"(\s*data-w="[^"]*")");
         return std::regex_replace(svg, re, "");
     }
+
     /* 主转换 */
     std::string convert(const std::string& mathml) {
         XMLDocument doc;
@@ -9105,13 +9091,31 @@ public:
         std::string inner = renderElement(root, st);
 
         std::ostringstream svg;
-        svg << R"(<svg xmlns="http://www.w3.org/2000/svg"  height="120">)"
+        svg << R"(<svg xmlns="http://www.w3.org/2000/svg"  >)"
             << "<g transform=\"translate(5,30)\">" << inner << "</g>"
             << "</svg>";
         return (svg.str());
     }
 
 private:
+    static std::string xmlEscape(std::string_view raw)
+    {
+        std::string out;
+        out.reserve(raw.size() + 16);          // 小优化
+        for (char c : raw)
+        {
+            switch (c)
+            {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            case '\'': out += "&apos;"; break;
+            default:   out += c;
+            }
+        }
+        return out;
+    }
     static std::wstring extractPlainText(const tinyxml2::XMLElement* e) {
         std::wstring out;
         if (!e) return out;
@@ -9133,22 +9137,34 @@ private:
         const char* txt = e->GetText() ? e->GetText() : "";
         std::wstring wtxt = a2w(txt);
 
-
-        // 老逻辑
         auto si = GdiTextMeasurer::instance().measure(
             wtxt, st.fontFamily, std::stof(st.fontSize));
+
         std::ostringstream os;
-        os << "<text x=\"0\" y=\"" << si.ascent
-            << "\" font-size=\"" << st.fontSize
-            << "\" font-family=\"" << w2a(st.fontFamily) << "\" fill=\"" << st.fill
-            << "\" data-w=\"" << si.width << "\">"
-            << txt << "</text>";
+        os << "<text x=\"0\" y=\"0\""              // y=0，不再下移
+            << " font-size=\"" << st.fontSize
+            << "\" font-family=\"" << w2a(st.fontFamily)
+            << "\" fill=\"" << st.fill
+            << "\" dominant-baseline=\"hanging\""   // 让字形顶部对齐 y=0
+            << " data-w=\"" << si.width
+            << "\" data-h=\"" << si.height << "\">"
+            << xmlEscape(txt)
+            << "</text>";
         return os.str();
     }
 
     static double extractWidth(const std::string& svg) {
         // 从 <g data-w="123.45"> 里提取宽度
         const char* tag = "data-w=\"";
+        auto pos = svg.find(tag);
+        if (pos == std::string::npos) return 0;
+        pos += strlen(tag);
+        auto end = svg.find('"', pos);
+        return std::stod(svg.substr(pos, end - pos));
+    }
+    static double extractHeight(const std::string& svg) {
+        // 从 <g data-h="123.45"> 里提取高度
+        const char* tag = "data-h=\"";
         auto pos = svg.find(tag);
         if (pos == std::string::npos) return 0;
         pos += strlen(tag);
@@ -9176,10 +9192,21 @@ private:
         }
         return "<g>" + os.str() + "</g>";
     }
-
+    std::string vbox(const std::vector<std::string>& parts,
+        const std::vector<double>& heights)
+    {
+        std::ostringstream os;
+        double y = 0;
+        for (size_t i = 0; i < parts.size(); ++i) {
+            os << "<g transform=\"translate(0," << y << ")\">"
+                << parts[i] << "</g>";
+            y += heights[i];
+        }
+        return "<g>" + os.str() + "</g>";
+    }
     /* ---------- 递归渲染 ---------- */
     std::string renderElement(const XMLElement* e, Style st) {
-        DbgPrint("[renderElement] <%s>\n", e->Name());
+        //DbgPrint("[renderElement] <%s>\n", e->Name());
         /* 1. 处理属性 */
         for (const XMLAttribute* a = e->FirstAttribute(); a; a = a->Next()) {
             auto it = attrApply.find(a->Name());
@@ -9225,13 +9252,73 @@ private:
                 }
                 return hbox(children);
             });
-        registerTag("mfrac", [](const XMLElement* e, const Style& st) {
-            std::vector<std::string> kids;
-            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
-                kids.push_back(textRender(c, st));
-            return vbox({ kids[0],
-                          "<line x1='0' y1='0' x2='40' y2='0' stroke='black'/>",
-                          kids[1] });
+        registerTag("mfrac",
+            [this](const XMLElement* e, const Style& st) -> std::string {
+                /* ---------- 1. 收集子元素 ---------- */
+                std::vector<std::string> kids;
+                for (const XMLElement* c = e->FirstChildElement();
+                    c; c = c->NextSiblingElement())
+                    kids.push_back(renderElement(c, st));
+                if (kids.size() != 2)
+                    return "<!-- mfrac needs exactly 2 children -->";
+
+                /* ---------- 2. 解析属性 ---------- */
+                // linethickness
+                double thickness = 1.0;          // default: medium = 1px
+                const char* lt = e->Attribute("linethickness");
+                if (lt) {
+                    std::string val = lt;
+                    if (val == "thin")      thickness = 0.5;
+                    else if (val == "medium") thickness = 1.0;
+                    else if (val == "thick")  thickness = 2.0;
+                    else if (val.back() == 'x' || val.back() == 'X') {  // px
+                        thickness = std::stod(val.substr(0, val.size() - 2));
+                    }
+                    else if (val.back() == 't' || val.back() == 'T') { // pt
+                        thickness = std::stod(val.substr(0, val.size() - 2)) * 1.33; // 1pt ≈ 1.33px
+                    }
+                    else if (val.back() == 'm' || val.back() == 'M') { // em
+                        thickness = std::stod(val.substr(0, val.size() - 2)) * std::stof(st.fontSize);
+                    }
+                    else { // 纯数字，视为 px
+                        thickness = std::stod(val);
+                    }
+                }
+
+                // numalign / denomalign
+                std::string numAlign = e->Attribute("numalign") ? e->Attribute("numalign") : "center";
+                std::string denAlign = e->Attribute("denomalign") ? e->Attribute("denomalign") : "center";
+
+                /* ---------- 3. 计算尺寸 ---------- */
+                double numW = extractWidth(kids[0]);
+                double denW = extractWidth(kids[1]);
+                double ruleW = std::max(numW, denW);
+
+                // 垂直间距：厚度 + 上下各 2 px
+                double gap = thickness + 2.0;
+
+                /* ---------- 4. 水平偏移函数 ---------- */
+                auto offset = [](double childW, double ruleW, const std::string& align) -> double {
+                    if (align == "left")   return 0;
+                    if (align == "right")  return ruleW - childW;
+                    return (ruleW - childW) / 2; // center
+                    };
+
+                double numX = offset(numW, ruleW, numAlign);
+                double denX = offset(denW, ruleW, denAlign);
+
+                /* ---------- 5. 组装 SVG ---------- */
+                std::ostringstream oss;
+                oss << "<g>"
+                    << "<g transform=\"translate(" << numX << ",0)\">" << kids[0] << "</g>"
+                    << "<line x1=\"0\" y1=\"" << gap
+                    << "\" x2=\"" << ruleW << "\" y2=\"" << gap
+                    << "\" stroke=\"black\" stroke-width=\"" << thickness << "\"/>"
+                    << "<g transform=\"translate(" << denX << "," << 2 * gap << ")\">"
+                    << kids[1] << "</g>"
+                    << "</g>";
+
+                return oss.str();
             });
         registerTag("msup", [this](const XMLElement* e, const Style& st) -> std::string {
             std::vector<std::string> kids;
@@ -9239,25 +9326,33 @@ private:
                 kids.push_back(renderElement(c, st));
             if (kids.size() < 2) return kids.empty() ? "" : kids[0];
 
-            // 测量底数
+            /* ---------- 1. 测量 ---------- */
             std::wstring baseTxt = extractPlainText(e->FirstChildElement());
             auto baseSz = GdiTextMeasurer::instance().measure(
                 baseTxt, st.fontFamily, std::stof(st.fontSize));
 
-            // 测量指数
             std::wstring expTxt = extractPlainText(e->FirstChildElement()->NextSiblingElement());
             auto expSz = GdiTextMeasurer::instance().measure(
                 expTxt, st.fontFamily, std::stof(st.fontSize));
 
             const double scale = 0.7;
             const double gap = 1.0;
+
             const double expX = baseSz.width + gap;
             const double expY = -baseSz.height * 0.45;
 
             const double totalWidth = expX + expSz.width * scale;
 
+            /* ---------- 2. 计算整体高度 ---------- */
+            const double baseH = baseSz.height;
+            const double expH = expSz.height * scale;
+            const double top = expY + expH;          // 指数顶部
+            const double bottom = baseH;               // 底数底部
+            const double totalHeight = bottom - top; // 外框高度
+
+            /* ---------- 3. 输出 ---------- */
             std::ostringstream os;
-            os << "<g data-w=\"" << totalWidth << "\">"
+            os << "<g data-w=\"" << totalWidth << "\" data-h=\"" << totalHeight << "\">"
                 << kids[0]
                 << "<g transform=\"translate(" << expX << "," << expY << ") scale(" << scale << ")\">"
                 << kids[1] << "</g>"
@@ -9270,75 +9365,162 @@ private:
                 kids.push_back(renderElement(c, st));
             if (kids.size() < 2) return kids.empty() ? "" : kids[0];
 
-            // 测量底数
+            /* ---------- 1. 测量 ---------- */
             std::wstring baseTxt = extractPlainText(e->FirstChildElement());
             auto baseSz = GdiTextMeasurer::instance().measure(
                 baseTxt, st.fontFamily, std::stof(st.fontSize));
 
-            // 测量下标
             std::wstring subTxt = extractPlainText(e->FirstChildElement()->NextSiblingElement());
             auto subSz = GdiTextMeasurer::instance().measure(
                 subTxt, st.fontFamily, std::stof(st.fontSize));
 
             const double scale = 0.7;
             const double gap = 1.0;
+
             const double subX = baseSz.width + gap;
-            const double subY = baseSz.height * 0.45;   // 向下偏移
+            const double subY = baseSz.height * 0.45;
 
             const double totalWidth = subX + subSz.width * scale;
 
+            /* ---------- 2. 计算整体高度 ---------- */
+            const double baseH = baseSz.height;
+            const double subH = subSz.height * scale;
+            const double totalHeight = baseH + subH * 0.45 + subH; // 基线到底部 + 下标
+
+            /* ---------- 3. 输出 ---------- */
             std::ostringstream os;
-            os << "<g data-w=\"" << totalWidth << "\">"
+            os << "<g data-w=\"" << totalWidth << "\" data-h=\"" << totalHeight << "\">"
                 << kids[0]
                 << "<g transform=\"translate(" << subX << "," << subY << ") scale(" << scale << ")\">"
                 << kids[1] << "</g>"
                 << "</g>";
             return os.str();
             });
-        registerTag("msubsup", [](const XMLElement* e, const Style& st) {
+        registerTag("msubsup", [this](const XMLElement* e, const Style& st) -> std::string {
             std::vector<std::string> kids;
             for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
-                kids.push_back(textRender(c, st));
-            return hbox({ kids[0],
-                          "<g transform=\"translate(2,-8) scale(0.7)\">" + kids[2] + "</g>",
-                          "<g transform=\"translate(2,8) scale(0.7)\">" + kids[1] + "</g>" });
+                kids.push_back(renderElement(c, st));
+            if (kids.size() < 3) return kids.empty() ? "" : kids[0];
+
+            /* ---------- 1. 各元素尺寸 ---------- */
+            const double scale = 0.7;
+            const double gap = 1.0;      // 水平间隙
+            const double vOff = 8.0;      // 垂直偏移（上标↑、下标↓）
+
+            double baseW = extractWidth(kids[0]);
+            double baseH = extractHeight(kids[0]);
+
+            double supW = extractWidth(kids[1]) * scale;
+            double supH = extractHeight(kids[1]) * scale;
+
+            double subW = extractWidth(kids[2]) * scale;
+            double subH = extractHeight(kids[2]) * scale;
+
+            /* ---------- 2. 整体外框 ---------- */
+            double totalW = baseW + gap + std::max(supW, subW);
+            double totalH = baseH + vOff + std::max(supH, subH);
+
+            /* ---------- 3. 组装 SVG ---------- */
+            std::ostringstream os;
+            os << "<g data-w=\"" << totalW << "\" data-h=\"" << totalH << "\">"
+                << kids[0]                                   // 底数
+                << "<g transform=\"translate(" << (baseW + gap) << "," << -vOff << ") scale(" << scale << ")\">"
+                << kids[1] << "</g>"                        // 上标
+                << "<g transform=\"translate(" << (baseW + gap) << "," << vOff << ") scale(" << scale << ")\">"
+                << kids[2] << "</g>"                        // 下标
+                << "</g>";
+
+            return os.str();
             });
-        registerTag("msqrt", [](const XMLElement* e, const Style& st) {
-            std::string inner;
-            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
-                inner += textRender(c, st);
+        registerTag("msqrt",
+            [this](const XMLElement* e, const Style& st) -> std::string
+            {
+                /* ---------- 1. 渲染内部表达式 ---------- */
+                std::string inner;
+                for (const XMLElement* c = e->FirstChildElement();
+                    c; c = c->NextSiblingElement())
+                    inner += renderElement(c, st);
 
-            std::string rootSym =  "<text font-size='20'>√</text>";
+                /* ---------- 2. 计算内部尺寸 ---------- */
+                double innerW = extractWidth(inner);
+                double innerH = extractHeight(inner);
 
-            // 量根号实际宽度
-            float rootW = GdiTextMeasurer::instance().measure(L"√", st.fontFamily, std::stof(st.fontSize)).width;
+                /* ---------- 3. 根号几何参数 ---------- */
+                const double pad = 2.0;               // 内边距
+                const double bar = 1.2;               // 横线超出系数
+                const double vgap = 2.0;              // 横线与内容垂直间距
+                const double tick = 6.0;              // 勾线水平段长度
+                const double slope = 0.6;             // 勾线斜率
 
-            return "<g>"
-                + rootSym +
-                "<g transform=\"translate(" + std::to_string(rootW) + ",0)\">"
-                "<rect x='-2' y='-2' width='" + std::to_string(
-                    GdiTextMeasurer::instance().measure(a2w(inner), st.fontFamily, std::stof(st.fontSize)).width)
-                + "' height='20' stroke='black' fill='none'/>"
-                + inner + "</g></g>";
+                double totalW = innerW + tick + pad * 2;
+                double totalH = innerH + vgap + pad * 2;
+
+                /* ---------- 4. 组装 SVG ---------- */
+                std::ostringstream oss;
+                oss << "<g data-w=\"" << totalW << "\" data-h=\"" << totalH << "\">"
+                    // 根号勾线 + 横线
+                    << "<path d=\"M0," << totalH - pad
+                    << " L" << tick << "," << pad
+                    << " L" << tick + innerW * bar << "," << pad
+                    << "\" stroke=\"black\" fill=\"none\" stroke-width=\"1\"/>"
+                    // 内部内容平移到勾线右侧
+                    << "<g transform=\"translate(" << tick << "," << vgap + pad << ")\">"
+                    << inner
+                    << "</g>"
+                    << "</g>";
+
+                return oss.str();
             });
 
-        registerTag("mroot", [](const XMLElement* e, const Style& st) {
-            std::vector<std::string> kids;
-            for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement())
-                kids.push_back(textRender(c, st));
+        registerTag("mroot",
+            [this](const XMLElement* e, const Style& st) -> std::string
+            {
+                /* ---------- 1. 收集子元素 ---------- */
+                std::vector<std::string> kids;
+                for (const XMLElement* c = e->FirstChildElement();
+                    c; c = c->NextSiblingElement())
+                    kids.push_back(renderElement(c, st));
+                if (kids.size() != 2)
+                    return "<!-- mroot needs exactly 2 children -->";
 
-            std::string rootSym = "<text font-size='20'>√</text>";
+                /* ---------- 2. 计算尺寸 ---------- */
+                double innerW = extractWidth(kids[0]);
+                double innerH = extractHeight(kids[0]);
+                double indexW = extractWidth(kids[1]) * 0.7;   // 指数缩小 0.7
+                double indexH = extractHeight(kids[1]) * 0.7;
 
-            float rootW = GdiTextMeasurer::instance().measure(L"√", st.fontFamily, std::stof(st.fontSize)).width;
+                /* ---------- 3. 根号几何参数 ---------- */
+                const double pad = 2.0;   // 内边距
+                const double bar = 1.2;   // 横线超出系数
+                const double vgap = 2.0;   // 横线与内容垂直间距
+                const double tick = 6.0;   // 勾线水平段长度
+                const double slope = 0.6;   // 勾线斜率
 
-            return "<g>"
-                "<g transform=\"translate(0,-8) scale(0.7)\">" + kids[1] + "</g>"
-                + rootSym +
-                "<g transform=\"translate(" + std::to_string(rootW) + ",0)\">"
-                "<rect x='-2' y='-2' width='" + std::to_string(
-                    GdiTextMeasurer::instance().measure(a2w(kids[0]), st.fontFamily, std::stof(st.fontSize)).width)
-                + "' height='20' stroke='black' fill='none'/>"
-                + kids[0] + "</g></g>";
+                // 指数放在根号勾线左上方
+                double indexOffsetX = -indexW - 1.0;   // 再留 1 px 空隙
+                double indexOffsetY = 0.0;             // 顶部对齐勾线
+
+                // 根号整体尺寸
+                double totalW = tick + innerW * bar + pad * 2;
+                double totalH = std::max(innerH + vgap, indexH) + pad * 2;
+
+                /* ---------- 4. 组装 SVG ---------- */
+                std::ostringstream oss;
+                oss << "<g data-w=\"" << totalW << "\" data-h=\"" << totalH << "\">"
+                    // 指数
+                    << "<g transform=\"translate(" << indexOffsetX << "," << indexOffsetY << ") scale(0.7)\">"
+                    << kids[1] << "</g>"
+                    // 根号勾线 + 横线
+                    << "<path d=\"M0," << totalH - pad
+                    << " L" << tick << "," << pad
+                    << " L" << tick + innerW * bar << "," << pad
+                    << "\" stroke=\"black\" fill=\"none\" stroke-width=\"1\"/>"
+                    // 被开方内容
+                    << "<g transform=\"translate(" << tick << "," << vgap + pad << ")\">"
+                    << kids[0] << "</g>"
+                    << "</g>";
+
+                return oss.str();
             });
         registerTag("mspace", [](const XMLElement* e, const Style&) {
             const char* w = e->Attribute("width");
@@ -9357,6 +9539,57 @@ private:
             const char* v = a->Value();
             if (!strcmp(v, "italic")) st.fontStyle = "italic";
             else if (!strcmp(v, "bold")) st.fontWeight = "bold";
+            });
+        /* 表格类 */
+        registerTag("mtable",
+            [this](const tinyxml2::XMLElement* e, const Style& st) -> std::string {
+                std::vector<std::string> rows;
+                std::vector<double>      rowHeights;
+
+                for (const XMLElement* r = e->FirstChildElement("mtr"); r; r = r->NextSiblingElement("mtr")) 
+                {
+                    std::string rowSvg = renderElement(r, st);      // 递归渲染 <mtr>
+                    // 粗略行高：字体 1.2 倍，可再细化           
+                    double rowH  = std::stof(st.fontSize) * 2;
+                    rows.push_back(std::move(rowSvg));
+                    rowHeights.push_back(rowH);
+                }
+                return vbox(rows, rowHeights);
+            });
+
+        registerTag("mtr",
+            [this](const tinyxml2::XMLElement* e, const Style& st) -> std::string {
+                std::vector<std::string> cells;
+                for (const XMLElement* c = e->FirstChildElement("mtd"); c; c = c->NextSiblingElement("mtd")) {
+                    cells.push_back(renderElement(c, st));
+                }
+                double colGap = 4.0;
+                const char* gap = e->Attribute("columnspacing");
+                if (gap) colGap = std::stod(gap);
+                return hbox(cells, colGap);
+            });
+
+        registerTag("mtd",
+            [this](const tinyxml2::XMLElement* e, const Style& st) -> std::string {
+                // <mtd> 只包含一个隐式 mrow，把子元素横向排即可
+                std::vector<std::string> children;
+                for (const XMLElement* c = e->FirstChildElement(); c; c = c->NextSiblingElement()) {
+                    children.push_back(renderElement(c, st));
+                }
+                return hbox(children);
+            });
+        registerTag("mlabeledtr",
+            [this](const XMLElement* e, const Style& st) -> std::string {
+                std::vector<std::string> cells;
+                // 第一个 <mtd> 是 label，其余是正常单元格
+                for (const XMLElement* c = e->FirstChildElement("mtd");
+                    c; c = c->NextSiblingElement("mtd"))
+                    cells.push_back(renderElement(c, st));
+
+                double colGap = 4.0;
+                const char* gap = e->Attribute("columnspacing");
+                if (gap) colGap = std::stod(gap);
+                return hbox(cells, colGap);
             });
     }
 };
