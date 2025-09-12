@@ -32,12 +32,4 @@
       <Filter>资源文件</Filter>
     </ResourceCompile>
   </ItemGroup>
-  <ItemGroup>
-    <Image Include="src\splash.png">
-      <Filter>资源文件</Filter>
-    </Image>
-    <Image Include="splash.png">
-      <Filter>资源文件</Filter>
-    </Image>
-  </ItemGroup>
 </Project>

@@ -1,41 +1,61 @@
-// Microsoft Visual C++ generated resource script.
+Ôªø// Microsoft Visual C++ generated resource script.
 //
 #include "resource.h"
 /////////////////////////////////////////////////////////////////////////////
-// ÷–Œƒ(ºÚÃÂ£¨÷–π˙) resources
+// ‰∏≠Êñá(ÁÆÄ‰ΩìÔºå‰∏≠ÂõΩ) resources
+#pragma code_page(65001)   // 65001 = UTF-8
 
+#include <windows.h>
 
+#pragma code_page(65001)   // UTF-8
 
-/////////////////////////////////////////////////////////////////////////////
-//
-// Menu
-//
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1, 0, 0, 0
+PRODUCTVERSION  1, 0, 0, 0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS__WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+
+BEGIN
+BLOCK "StringFileInfo"
+BEGIN
+// 0804 = ‰∏≠Êñá(‰∏≠ÂõΩ)Ôºå04B0 = Unicode
+BLOCK "080404B0"
+BEGIN
+VALUE "CompanyName", "azx1"
+VALUE "FileDescription", "Simple EPUB Reader"
+VALUE "FileVersion", "1.0.0.0"
+VALUE "InternalName", "SimpleEPUBReader"
+VALUE "OriginalFilename", "SimpleEPUBReader.exe"
+VALUE "ProductName", "Simple EPUB Reader"
+VALUE "ProductVersion", "1.0.0.0"
+END
+END
+BLOCK "VarFileInfo"
+BEGIN
+VALUE "Translation", 0x0804, 1200
+END
+END
 
 IDR_MENU_MAIN MENU
 BEGIN
-    POPUP "&…Ë÷√"
+    POPUP "&ËÆæÁΩÆ"
     BEGIN
-        MENUITEM "&∆Ù”√ EPUB CSS",                IDM_TOGGLE_CSS, CHECKED
-        MENUITEM "∆Ù”√ JavaScript(&J)",           IDM_TOGGLE_JS, CHECKED
-        MENUITEM "∆Ù”√ »´æ÷ CSS",                   IDM_TOGGLE_GLOBAL_CSS, CHECKED
-        MENUITEM "∆Ù”√ ‘§¥¶¿Ì HTML",                 IDM_TOGGLE_PREPROCESS_HTML, CHECKED
-        MENUITEM "–¸Õ£‘§¿¿",                        IDM_TOGGLE_HOVER_PREVIEW, CHECKED
+        MENUITEM "&ÂêØÁî® EPUB CSS",                IDM_TOGGLE_CSS, CHECKED
+        MENUITEM "ÂêØÁî® JavaScript(&J)",           IDM_TOGGLE_JS, CHECKED
+        MENUITEM "ÂêØÁî® ÂÖ®Â±Ä CSS",                   IDM_TOGGLE_GLOBAL_CSS, CHECKED
+        MENUITEM "ÊÇ¨ÂÅúÈ¢ÑËßà",                        IDM_TOGGLE_HOVER_PREVIEW, CHECKED
     END
-    POPUP "&œ‘ æ"
+    POPUP "&ÊòæÁ§∫"
     BEGIN
-        MENUITEM "ƒø¬º",                          IDM_TOGGLE_TOC_WINDOW, CHECKED
-        MENUITEM "◊¥Ã¨¿∏",                         IDM_TOGGLE_STATUS_WINDOW, CHECKED
-        MENUITEM "πˆ∂ØÃı",                         IDM_TOGGLE_SCROLLBAR_WINDOW, CHECKED
-        MENUITEM "≤Àµ•¿∏",                         IDM_TOGGLE_MENUBAR_WINDOW, CHECKED
+        MENUITEM "ÁõÆÂΩï",                          IDM_TOGGLE_TOC_WINDOW, CHECKED
+        MENUITEM "Áä∂ÊÄÅÊ†è",                         IDM_TOGGLE_STATUS_WINDOW, CHECKED
+        MENUITEM "ÊªöÂä®Êù°",                         IDM_TOGGLE_SCROLLBAR_WINDOW, CHECKED
+        MENUITEM "ËèúÂçïÊ†è",                         IDM_TOGGLE_MENUBAR_WINDOW, CHECKED
     END
 END
-
-
-
-
-IDB_PNG1                PNG                     "C:\\Users\\MoYi-Sheep\\Documents\\Coding_Projects\\VS_Project\\Project1\\Project1\\splash.png"
-
-
 
 
 

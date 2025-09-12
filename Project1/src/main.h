@@ -122,6 +122,9 @@ using namespace Gdiplus;
 #include <Shlobj.h>      // SHGetKnownFolderPath
 #include <KnownFolders.h>
 #include <numeric>
+#include <commdlg.h>   // OPENFILENAMEW, GetOpenFileNameW
+#pragma comment(lib, "comdlg32.lib")
+#include <shobjidl_core.h>
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -703,6 +706,8 @@ public:
 
     void show_imageview(const litehtml::element::ptr& el);
 
+    std::string get_title();
+    std::string get_author();
     void show_tooltip(const std::string html);
     void hide_imageview();
     void hide_tooltip();
@@ -755,11 +760,25 @@ struct AppSettings {
     std::wstring temp_dir = L"epub_book";
 
     int tooltip_width = 500;
-
+    std::string appName = "Simple EPUB Reader";
     int split_space_height = 300; // 单位:px
     std::wstring default_serif = L"Georgia";
     std::wstring default_sans_serif = L"Verdana";
     std::wstring default_monospace = L"Consolas";
+
+    // 1) GDI+ 颜色（A=255 不透明）
+    Gdiplus::Color scrollbar_slider_color{ 255, 238, 165, 102 };
+    Gdiplus::Color scrollbar_dot_color{ 255, 238, 165, 102 };
+    COLORREF highlight_color_cr = RGB(238, 165, 102);  // #eea566
+
+    // 2) D2D1 颜色（保持原透明度 0.4，可按需改）
+    D2D1::ColorF highlight_color_d2d{
+        238.0f / 255.0f,  // R
+        165.0f / 255.0f,  // G
+        102.0f / 255.0f,  // B
+        0.4f              // A
+    };
+
 };
 struct AppStates {
     // ---- 取消令牌 ----
@@ -808,6 +827,10 @@ public:
 
     litehtml::pixel_t	get_default_font_size() const override;
     const char* get_default_font_name() const override;
+
+    bool isImageCached(std::string src);
+
+    void addImageCache(std::string hash, std::string svg);
 
 
     void	get_viewport(litehtml::position& viewport) const override;
@@ -859,11 +882,13 @@ public:
     void makeBackend();
 
 
+
     std::unordered_map<std::string, ImageFrame> m_img_cache;
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     litehtml::document::ptr m_doc;
     void init_dpi();
     std::unique_ptr<IRenderBackend> m_backend;
+    LPCWSTR m_currentCursor = IDC_IBEAM;
 private:
 
     float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
@@ -1121,6 +1146,7 @@ private:
     HWND hwnd_ = nullptr;
     int marginTop = 4;   // 顶部留白
     int marginLeft = 10;  // 左侧留白
+    HBRUSH   m_hightlightBrush;
 };
 
 //  file system
@@ -1263,7 +1289,7 @@ private:
     int LINE_W = 2;      // 竖线宽
     int GUTTER_W = 14;     // 整个滚动条宽
 
-    bool m_mouseIn = false;
+    bool m_mouseIn = true;
     struct ThumbState
     {
         bool hot = false;

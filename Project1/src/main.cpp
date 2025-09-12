@@ -40,6 +40,7 @@ constexpr UINT WM_LOAD_ERROR(WM_USER + 9);
 constexpr UINT WM_USER_SCROLL(WM_USER + 10);
 constexpr UINT SBM_SETSPINECOUNT(WM_USER + 11);
 constexpr UINT SBM_SETPOSITION(WM_USER + 12);
+constexpr UINT WM_EPUB_OPEN(WM_USER + 13);
 // 可随时改
 
 
@@ -48,7 +49,7 @@ AppSettings g_cfg;
 std::wstring g_last_html_path;
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
 static std::vector<std::wstring> g_tempFontFiles;
-std::string PreprocessHTML(std::string html);
+void PreprocessHTML(std::string& html);
 void UpdateCache(void);
 static  std::string g_globalCSS = "";
 static fs::file_time_type g_lastTime;
@@ -91,7 +92,14 @@ static bool isWin10OrLater()
         }();
     return once;
 }
-
+// 工具：把路径拷到堆，返回指针
+inline wchar_t* DupPath(const wchar_t* src)
+{
+    size_t len = wcslen(src) + 1;
+    wchar_t* buf = (wchar_t*)CoTaskMemAlloc(len * sizeof(wchar_t));
+    wcscpy_s(buf, len, src);
+    return buf;
+}
 
 // HTML 转义辅助函数
 inline bool save_rgba_as_bmp(const std::wstring& path,
@@ -907,13 +915,8 @@ std::string inject_global_css(const std::string& html)
     return embed_css(html, read_file(file));
 }
 
-// 2. 仅内嵌 katex.css
-std::string inject_katex_css(const std::string& html)
-{
-    fs::path file = exe_dir() / "config" / "katex" / "katex.css";
-    return embed_css(html, read_file(file));
-}
-static std::string insert_global_css(std::string html) {
+
+static void insert_global_css(std::string& html) {
     if (!g_globalCSS.empty())
     {
         // 简单暴力：直接插到 </head> 之前
@@ -925,9 +928,8 @@ static std::string insert_global_css(std::string html) {
         else
             html.insert(0, "<head>" + styleBlock + "</head>");
     }
-    return html;
 }
-static std::string inject_css(std::string html)
+static void inject_css(std::string& html)
 {
     std::ostringstream style;
     style << "<style>\n"
@@ -942,7 +944,6 @@ static std::string inject_css(std::string html)
     else
         html.insert(0, "<head>" + block + "</head>");
 
-    return html;
 }
 
 void EnableClearType()
@@ -1217,8 +1218,6 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
         lunasvg::Bitmap svgBmp = doc->renderToBitmap();
         if (svgBmp.isNull()) return {};
 
-        svgBmp.convertToRGBA();   // 1. 原地转格式
-
         frame.width = svgBmp.width();
         frame.height = svgBmp.height();
         frame.stride = frame.width * 4;
@@ -1451,7 +1450,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         GetClientRect(hwnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         float factor = std::abs(zDelta / 120);
-        float step = std::max(10.0f, g_line_height*2);
+        float step = std::max(10.0f, g_line_height*3);
         if (zDelta >= 0) { g_scrollY -= step; }
         else { g_scrollY += step; }
 
@@ -1502,16 +1501,16 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-ATOM RegisterViewClass(HINSTANCE hInst)
+void register_view_class()
 {
     WNDCLASSW wc{};
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
     wc.lpfnWndProc = ViewWndProc;
-    wc.hInstance = hInst;
+    wc.hInstance = g_hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"EPUBView";
-    return RegisterClassW(&wc);
+    RegisterClassW(&wc);
 }
 
 
@@ -1568,6 +1567,8 @@ inline void DumpBookRecord()
     OutputDebugStringW(oss.str().c_str());   // ← 宽字符版本
     OutputDebugStringW((L"\nTotal Read Time (s): " + std::to_wstring(g_recorder->getTotalTime()) + L"\n").c_str());
 }
+
+
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -1577,55 +1578,74 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         return 0;
     }
-    case WM_DROPFILES: {
+    case WM_DROPFILES:
+    {
         wchar_t file[MAX_PATH]{};
-        DragQueryFileW(reinterpret_cast<HDROP>(wp), 0, file, MAX_PATH);
-        DragFinish(reinterpret_cast<HDROP>(wp));
+        DragQueryFileW((HDROP)wp, 0, file, MAX_PATH);
+        DragFinish((HDROP)wp);
+        PostMessage(hwnd, WM_EPUB_OPEN, 0, (LPARAM)DupPath(file));
+        return 0;
+    }
+ 
+    case WM_COPYDATA:
+    {
+        PCOPYDATASTRUCT p = (PCOPYDATASTRUCT)lp;
+        if (p->dwData == WM_EPUB_OPEN && p->lpData)
+        {
+            PostMessage(hwnd, WM_EPUB_OPEN, 0,
+                (LPARAM)DupPath((const wchar_t*)p->lpData));
+        }
+        return 0;
+    }
 
-        // 只接受 .epub / .EPUB
+    // ---------- WM_EPUB_OPEN ----------
+    case WM_EPUB_OPEN:
+    {
+        const wchar_t* file = (const wchar_t*)lp;
         const wchar_t* ext = wcsrchr(file, L'.');
-        if (!ext || _wcsicmp(ext, L".epub") != 0) {
+        if (!ext || _wcsicmp(ext, L".epub") != 0)
+        {
             SetStatus(0, L"不是有效的 epub 文件");
+            CoTaskMemFree((void*)file);   // 释放堆拷贝
             return 0;
         }
-        // 1. 等待上一次任务结束（简单做法：阻塞等待）
-        if (g_parse_task.valid()) {
-            g_parse_task.wait();
+
+        // 如果上一次任务还在跑，直接忽略（或加入队列）
+        if (g_parse_task.valid() &&
+            g_parse_task.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            SetStatus(0, L"正在加载其他文件，请稍候…");
+            CoTaskMemFree((void*)file);
+            return 0;
         }
 
-  
-
+        // 清理旧数据
         g_container->clear();
         g_canvas->clear();
         g_book->clear();
         g_toc->clear();
-        InvalidateRect(g_hView, nullptr, true);
-        InvalidateRect(g_hwndToc, nullptr, true);
+        InvalidateRect(g_hView, nullptr, TRUE);
+        InvalidateRect(g_hwndToc, nullptr, TRUE);
 
-
-        // 2. 立即释放旧对象，防止野指针
-        //g_container.reset();
-
-        // 3. 启动新任务
+        // 启动新任务
         SetStatus(0, L"正在加载...");
-
         g_parse_task = std::async(std::launch::async, [file] {
-            try {
+            try
+            {
                 g_book->load(file);
-
                 PostMessage(g_hWnd, WM_EPUB_PARSED, 0, 0);
             }
-            catch (const std::exception& e) {
-                // 把异常文本发到主线程
-                std::string what = e.what();
-                auto* buf = (wchar_t*)CoTaskMemAlloc((what.size() + 1) * sizeof(wchar_t));
-                MultiByteToWideChar(CP_UTF8, 0, what.c_str(), -1, buf, (int)what.size() + 1);
+            catch (const std::exception& e)
+            {
+                auto* buf = DupPath(a2w(e.what()).c_str());
                 PostMessage(g_hWnd, WM_LOAD_ERROR, 0, (LPARAM)buf);
             }
-            catch (...) {
+            catch (...)
+            {
                 PostMessage(g_hWnd, WM_LOAD_ERROR, 0,
-                    (LPARAM)_wcsdup(L"未知错误"));
+                    (LPARAM)DupPath(L"未知错误"));
             }
+            CoTaskMemFree((void*)file);   // 任务结束释放路径
             });
         return 0;
     }
@@ -1649,9 +1669,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         if (!g_states.isLoaded) {
             g_states.isLoaded = true;
+
             PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
             PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
-
+            ShowWindow(g_hViewScroll, SW_SHOW);
             ShowWindow(g_hView, SW_SHOW);
      
         }
@@ -1745,10 +1766,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
-    case WM_LOAD_ERROR: {
+    case WM_LOAD_ERROR:
+    {
         wchar_t* msg = (wchar_t*)lp;
         SetStatus(0, msg);
-        free(msg);                // 对应 CoTaskMemAlloc / _wcsdup
+        OutputDebugStringW(msg);
+        OutputDebugStringW(L"\n");
+        CoTaskMemFree(msg);
         return 0;
     }
     case WM_PAINT:
@@ -1757,15 +1781,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC hdc = BeginPaint(g_hWnd, &ps);
         RECT rc;
         GetClientRect(g_hWnd, &rc);
-        // 1. 强制整屏刷白
-    // ① 先整屏刷成红色——肉眼可见
 
 
         // 如果还没加载 EPUB，就画起始图
         if (!g_states.isLoaded && g_pSplashImg)
         {
             Gdiplus::Graphics g(hdc);
-            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+   
 
             RECT rc;
             GetClientRect(g_hWnd, &rc);
@@ -1789,6 +1811,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 Gdiplus::RectF(x, y, drawW, drawH),
                 0, 0, imgW, imgH,
                 Gdiplus::UnitPixel);
+
         }
         else
         {
@@ -1838,6 +1861,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE;
             }
         }
+        if (HWND(wp) == g_hView)   // 确保是客户区
+        {
+            if (g_container)
+            {
+                SetCursor(LoadCursor(nullptr, g_container->m_currentCursor));
+                return TRUE;                  // 已设置光标
+            }
+        }
         break;
     }
     case WM_DESTROY: {
@@ -1877,13 +1908,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_vd) { g_vd->reload(); }
             break;
    
-        case IDM_TOGGLE_PREPROCESS_HTML:
-            g_cfg.enablePreprocessHTML = !g_cfg.enablePreprocessHTML;          // 切换状态
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_PREPROCESS_HTML,
-                MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
-            if (g_vd) { g_vd->reload(); }
-            break;
-       
+ 
 
         case IDM_TOGGLE_HOVER_PREVIEW:
             g_cfg.enableHoverPreview = !g_cfg.enableHoverPreview;          // 切换状态
@@ -2266,28 +2291,73 @@ void register_scrollbar_class()
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     RegisterClassExW(&wc);
 }
-// ---------- 入口 ----------
-int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
 
-    ULONG_PTR gdiplusToken{};
-    GdiplusStartupInput gdiplusStartupInput{};
-    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
-    g_hInst = h;
-    InitCommonControls();
+void register_main_class()
+{
     WNDCLASSEX w{ sizeof(WNDCLASSEX) };
+    w.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
     w.lpfnWndProc = WndProc;
-    w.hInstance = h;
+    w.hInstance = g_hInst;
     w.hCursor = LoadCursor(nullptr, IDC_ARROW);
     w.lpszClassName = L"EPUBLite";
     w.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     w.lpszMenuName = nullptr;   // ← 必须为空
     RegisterClassEx(&w);
-    RegisterViewClass(g_hInst);
+}
+const wchar_t TOC_CLASS[] = L"TocPanelClass";
+void register_toc_class()
+{
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = TocPanel::WndProc;          // 你的新 WndProc
+    wc.hInstance = g_hInst;
+    wc.lpszClassName = TOC_CLASS;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;             // 自绘
+    wc.cbWndExtra = sizeof(LONG_PTR);   // ← 必须有
+    RegisterClassExW(&wc);
+}
+// ---------- 入口 ----------
+int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
+    // ---------- 1. 解析命令行 ----------
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    wchar_t* firstFile = nullptr;
+    if (argc > 1)
+        firstFile = DupPath(argv[1]);   // 堆拷贝
+    LocalFree(argv);
+
+    // ---------- 2. 单例检测 ----------
+    CreateMutex(nullptr, TRUE, L"EPUBLite_SingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        if (firstFile)
+        {
+            HWND hPrev = FindWindow(L"EPUBLite", nullptr);
+            if (hPrev)
+            {
+                COPYDATASTRUCT cds{};
+                cds.dwData = WM_EPUB_OPEN;
+                cds.cbData = (DWORD)(wcslen(firstFile) + 1) * sizeof(wchar_t);
+                cds.lpData = firstFile;          // 指向堆
+                SendMessage(hPrev, WM_COPYDATA, 0, (LPARAM)&cds);
+                // SendMessage 同步返回后即可释放
+            }
+        }
+        CoTaskMemFree(firstFile);   // 无论发没发成功都要释放
+        return 0;
+    }
+    ULONG_PTR gdiplusToken{};
+    GdiplusStartupInput gdiplusStartupInput{};
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+    g_hInst = h;
+    InitCommonControls();
+    register_main_class();
+    register_view_class();
 
     register_thumb_class();
     register_imageview_class();
     register_scrollbar_class();
-
+    register_toc_class();
     // 在 CreateWindow 之前
     HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MENU_MAIN));
 
@@ -2310,16 +2380,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         0, 0, 0, 0,           // 位置和大小由 WM_SIZE 调整
         g_hWnd, nullptr, g_hInst, nullptr);
 
-    // 一次性创建
-    const wchar_t TOC_CLASS[] = L"TocPanelClass";
-    WNDCLASSEXW wc{ sizeof(wc) };
-    wc.lpfnWndProc = TocPanel::WndProc;          // 你的新 WndProc
-    wc.hInstance = g_hInst;
-    wc.lpszClassName = TOC_CLASS;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;             // 自绘
-    wc.cbWndExtra = sizeof(LONG_PTR);   // ← 必须有
-    RegisterClassExW(&wc);
+
 
 
     // 2. 创建
@@ -2403,12 +2464,25 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     // 新增：复制文本（Ctrl + C）
     gAccel.add(ID_EDIT_COPY, FCONTROL | FVIRTKEY, 'C');
 
- 
+    fs::path icoPath = exe_dir() / "res" / "app.ico";
 
-    g_pSplashImg = LoadPngFromResource(g_hInst, IDB_PNG1);
+    // 加载图标（可缩放，支持 32/48/256 像素）
+    HICON hIcon = (HICON)LoadImageW(nullptr, icoPath.c_str(),
+        IMAGE_ICON,
+        0, 0,               // 0,0 = 使用图标内最佳尺寸
+        LR_LOADFROMFILE | LR_DEFAULTSIZE);
+
+    if (hIcon)
+    {
+        // 设置窗口图标
+        SendMessageW(g_hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        SendMessageW(g_hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+    }
+
 
     g_bootstrap = std::make_unique<AppBootstrap>();
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
+
 
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
         MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
@@ -2416,16 +2490,17 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
         MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_PREPROCESS_HTML,
-        MF_BYCOMMAND | (g_cfg.enablePreprocessHTML ? MF_CHECKED : MF_UNCHECKED));
+
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
         MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
 
  
-
-
+    g_cfg.displayScrollBar = false;
+    g_cfg.displayTOC = false;
+    g_cfg.displayStatusBar = false;
+    
+       
     EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(hMenu, IDM_TOGGLE_PREPROCESS_HTML, MF_BYCOMMAND | MF_GRAYED);
 
     EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableMenuItem(hMenu, IDM_TOGGLE_SCROLLBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
@@ -2433,14 +2508,20 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     //EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableClearType();
     // =====初始化隐藏=====
-    PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
-    PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
+    ShowWindow(g_hStatus, SW_HIDE);
+    ShowWindow(g_hwndSplit, SW_HIDE);
+    ShowWindow(g_hwndToc, SW_HIDE);
+    ShowWindow(g_hViewScroll, SW_HIDE);
+    ShowWindow(g_hImageview, SW_HIDE);
     
     ShowWindow(g_hView, SW_HIDE);
     ShowWindow(g_hTooltip, SW_HIDE);
     // ====================
     ShowWindow(g_hWnd, n);
     UpdateWindow(g_hWnd);
+    // ---------- 4. 首次启动时如有文件立即加载 ----------
+    if (firstFile && fs::exists(firstFile))
+        PostMessage(g_hWnd, WM_EPUB_OPEN, 0, (LPARAM)firstFile);
     MSG msg{};
     while (GetMessage(&msg, nullptr, 0, 0)) {
         if (!gAccel.translate(&msg)) {   // ← 先给 AccelManager
@@ -2685,7 +2766,10 @@ void SimpleContainer::import_css(litehtml::string& text,
 void SimpleContainer::set_caption(const char* cap)
 {
     if (cap && g_hWnd) {
-        SetWindowTextW(g_hWnd, a2w(cap).c_str());
+        std::string title;
+        title += g_book->get_title() + " - " +
+            g_book->get_author() + " | " + g_cfg.appName;
+        SetWindowTextW(g_hWnd, a2w(title).c_str());
         //OutputDebugStringW((a2w(cap)+L"\n").c_str());
     }
 }
@@ -2754,6 +2838,8 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
 
     if (event == litehtml::mouse_event::mouse_event_enter)
     {
+        
+        if (!el) return;
         auto link = g_book->find_link_in_chain(el);
 
         std::string html;
@@ -2923,15 +3009,41 @@ void SimpleContainer::split_text(
 //}
 //✅ 使用
 // ---------- 6. 鼠标形状 -------------------------------------------------
+// 预置常用系统光标
+static const std::unordered_map<std::string, LPCWSTR> kSysCursors = {
+    {"default",  IDC_ARROW},
+    {"pointer",  IDC_HAND},
+    {"text",     IDC_IBEAM},
+    {"wait",     IDC_WAIT},
+    {"crosshair",IDC_CROSS},
+    {"move",     IDC_SIZEALL},
+    {"e-resize", IDC_SIZEWE},
+    {"n-resize", IDC_SIZENS},
+    {"w-resize", IDC_SIZEWE},
+    {"s-resize", IDC_SIZENS},
+    {"ne-resize",IDC_SIZENESW},
+    {"nw-resize",IDC_SIZENWSE},
+    {"se-resize",IDC_SIZENWSE},
+    {"sw-resize",IDC_SIZENESW},
+};
 void SimpleContainer::set_cursor(const char* cursor)
 {
-    LPCWSTR id = IDC_ARROW;
-    if (cursor)
+    m_currentCursor = IDC_ARROW;           // 默认箭头
+
+    if (!cursor) return;
+
+    // 1. 系统内置光标
+    auto it = kSysCursors.find(cursor);
+    if (it != kSysCursors.end())
     {
-        if (strcmp(cursor, "pointer") == 0) id = IDC_HAND;
-        else if (strcmp(cursor, "text") == 0) id = IDC_IBEAM;
+        m_currentCursor = it->second;
+        return;
     }
-    SetCursor(LoadCursor(nullptr, id));
+
+ 
+
+    // 3. 兜底：箭头
+    m_currentCursor = IDC_ARROW;
 }
 
 // ---------- 7. 文本转换 ----------------------------------------------
@@ -3010,7 +3122,7 @@ litehtml::pixel_t SimpleContainer::pt_to_px(float pt) const {
 }
 
 
-std::string preprocess_js(std::string html)
+void preprocess_js(std::string& html)
 {
     if (!g_cfg.enableJS) {
         // 1) 删除 <script ...>...</script>
@@ -3252,7 +3364,11 @@ std::string inline_and_rasterize_svgs_gumbo(std::string_view html,
     return newHtml;
 }
 
-std::string replace_svg_with_img(const std::string& html,
+// ------------------------------------------------
+// 主流程：SVG 内 <image> 零拷贝替换
+// ------------------------------------------------
+
+void replace_svg_with_img(std::string& html,
     const fs::path& tempDir)
 {
     fs::create_directories(tempDir);
@@ -3283,62 +3399,90 @@ std::string replace_svg_with_img(const std::string& html,
     walk(output->root);
 
     /* ---------- 3. 从后往前替换 ---------- */
-    std::string patched = html;
+  
     for (auto it = svgs.rbegin(); it != svgs.rend(); ++it)
     {
-        std::string svgBlock = patched.substr(it->start, it->end - it->start);
+        std::string svgBlock = html.substr(it->start, it->end - it->start);
         std::string hash = blade16(svgBlock);
-        fs::path pngPath = tempDir / (hash + ".png");
-        if (!fs::exists(pngPath))
+        if (!g_container) continue;
+        if (!g_container->isImageCached(hash))
         {
-            /* 3.1 处理内部 <image> 并落地资源（同之前） */
+
+            // ------------------------------------------------
             std::regex imgRe("<(image|img)\\b[^>]*\\b(href|xlink:href)\\s*=\\s*\"([^\"]+)\"",
                 std::regex::icase);
             std::string patchedSvg = svgBlock;
             std::smatch m;
             std::string::const_iterator search(patchedSvg.cbegin());
+
             while (std::regex_search(search, patchedSvg.cend(), m, imgRe))
             {
-                std::string imgRel = m[3].str();
-                fs::path diskPath = tempDir / fs::u8path(imgRel).relative_path();
-                fs::create_directories(diskPath.parent_path());
-
+                std::string imgRel = m[3].str();          // zip 内路径
                 std::wstring wRel = a2w(imgRel);
+
                 MemFile mf = g_book->read_zip(g_book->m_zipIndex.find(wRel).c_str());
                 if (!mf.data.empty())
                 {
-                    std::ofstream ofs(diskPath, std::ios::binary);
-                    ofs.write(reinterpret_cast<const char*>(mf.data.data()),
-                        mf.data.size());
+                    // 1. 根据扩展名决定 MIME
+                    fs::path p(imgRel);
+                    std::string mime = "image/png";
+                    if (p.extension() == ".jpg" || p.extension() == ".jpeg")
+                        mime = "image/jpeg";
+
+                    // 2. 编码 base64
+                    std::string b64 = base64_encode(mf.data);
+
+                    // 3. 生成 data URI
+                    std::string dataUri = "data:" + mime + ";base64," + b64;
+
+                    // 4. 替换 href
+                    patchedSvg.replace(m.position(3), m.length(3), dataUri);
+                    search = patchedSvg.cbegin() + m.position() + dataUri.size();
                 }
-                patchedSvg.replace(m.position(3), m.length(3),
-                    diskPath.generic_string());
-                search = patchedSvg.cbegin() + m.position() + diskPath.generic_string().size();
+                else
+                {
+                    // 读不到就保持原路径
+                    search = m[0].second;
+                }
             }
-            auto document = lunasvg::Document::loadFromData(patchedSvg);
-            if (!document) continue;
-            document->renderToBitmap().writeToPng(pngPath.generic_string());
-            ///* 3.2 渲染为位图 */
-            //MemFile mfSvg;
-            //mfSvg.data.assign(patchedSvg.begin(), patchedSvg.end());
-            //ImageFrame frame = decode_img(mfSvg, L"svg");
-            //if (frame.rgba.empty()) continue;   // 失败则保持原 <svg>
+
+            g_container->addImageCache(hash, patchedSvg);
+            ///* 3.1 处理内部 <image> 并落地资源（同之前） */
+            //std::regex imgRe("<(image|img)\\b[^>]*\\b(href|xlink:href)\\s*=\\s*\"([^\"]+)\"",
+            //    std::regex::icase);
+            //std::string patchedSvg = svgBlock;
+            //std::smatch m;
+            //std::string::const_iterator search(patchedSvg.cbegin());
+            //while (std::regex_search(search, patchedSvg.cend(), m, imgRe))
+            //{
+            //    std::string imgRel = m[3].str();
+            //    fs::path diskPath = tempDir / fs::u8path(imgRel).filename();
 
 
-            //save_image(frame, bmpPath);
+            //    std::wstring wRel = a2w(imgRel);
+            //    MemFile mf = g_book->read_zip(g_book->m_zipIndex.find(wRel).c_str());
+            //    if (!mf.data.empty())
+            //    {
+            //        std::ofstream ofs(diskPath, std::ios::binary);
+            //        ofs.write(reinterpret_cast<const char*>(mf.data.data()),
+            //            mf.data.size());
+            //    }
+            //    patchedSvg.replace(m.position(3), m.length(3),
+            //        diskPath.generic_string());
+            //    search = patchedSvg.cbegin() + m.position() + diskPath.generic_string().size();
+            //}
+            //g_container->addImageCache(hash, patchedSvg);
         }
-        /* 3.3 拼 <img>，保留原 width/height */
         std::ostringstream imgTag;
-        imgTag << R"(<img src=")" << pngPath.generic_string() << R"(")";
+        imgTag << R"(<img src=")" << hash << R"(")";
         imgTag << " width=\"" << "100%" << "\"";
         imgTag << " height=\"" << "100%" << "\"";
         imgTag << " />";
 
-        patched.replace(it->start, it->end - it->start, imgTag.str());
+        html.replace(it->start, it->end - it->start, imgTag.str());
     }
 
     gumbo_destroy_output(&kGumboDefaultOptions, output);
-    return patched;
 }
 // 替代 “duk_push_string_file”
 
@@ -3454,8 +3598,6 @@ std::string replace_svg_with_img(const std::string& html,
 //
 
 
-#include <windows.h>
-#include <string>
 
 bool runSvg2Png(const std::wstring& exePath,
     const std::wstring& svgPath,
@@ -3486,7 +3628,7 @@ bool runSvg2Png(const std::wstring& exePath,
 // --------------------------------------------------
 // 通用 HTML 预处理
 // --------------------------------------------------
-std::string replace_math_with_svg(const std::string& html)
+void replace_math_with_svg(std::string& html)
 {
     GumboOutput* output = gumbo_parse(html.c_str());
 
@@ -3512,111 +3654,94 @@ std::string replace_math_with_svg(const std::string& html)
     walk(output->root);
 
     /* 从后往前替换，避免字节偏移失效 */
-    std::string patched = html;
+    //std::string patched = html;
     for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
         /* 1. 取 MathML 原文 */
-        std::string mathml = patched.substr(it->start, it->end - it->start);
+        std::string mathml = html.substr(it->start, it->end - it->start);
 
-        /* 2. LaTeX → KaTeX → SVG（你原来的逻辑） */
-        MathML2SVG& m2s = MathML2SVG::instance();
-        std::string svg = m2s.convert(mathml);
-        if (svg.empty()) continue;
-
-        /* 3. 生成唯一文件名 */
-    
-        fs::path tmpDir = make_temp_dir();
-        std::string hash = blade16(svg);
-        fs::path svgPath = tmpDir /( hash + ".svg");
-        fs::path pngPath = tmpDir / (hash + ".png");
-
-        /* 4. 写临时 SVG 文件 */
+        std::string hash = blade16(mathml);
+        if (!g_container)continue;
+        if(!g_container->isImageCached(hash))
         {
-            std::ofstream ofs(svgPath, std::ios::binary);
-            ofs << svg;
+            /* 2. LaTeX → KaTeX → SVG（你原来的逻辑） */
+            MathML2SVG& m2s = MathML2SVG::instance();
+            std::string svg = m2s.convert(mathml);
+            if (svg.empty()) continue;
+            g_container->addImageCache(hash, svg);
+
         }
-
-        /* 5. 调用官方 svg2png.exe 转 PNG */
-        fs::path svgToolPath = exe_dir() / "config" / "svg2png.exe";
-
-        int ret = runSvg2Png(svgToolPath, svgPath, pngPath);
-        //if (ret != 0) {
-        //     转换失败，回退到原 SVG 或直接跳过
-        //    continue;
-        //}
-
-        /* 6. 构造 <img> 标签（可自定义宽高、样式） */
         std::string imgTag;
-        imgTag =  R"(<img class="math-png" src=")" + pngPath.generic_string()
+        imgTag =  R"(<img class="math-png" src=")" + hash
             + R"(" alt="math" />)";
 
         /* 7. 替换原 <math> 标签 */
-        patched.replace(it->start, it->end - it->start, imgTag);
+        html.replace(it->start, it->end - it->start, imgTag);
     }
 
     gumbo_destroy_output(&kGumboDefaultOptions, output);
-    return patched;
+
 }
 //
 
+struct HtmlFeatureFlags {
+    bool has_svg = false;
+    bool has_math = false;
+    bool has_script = false;
+    bool all() const { return has_svg && has_math && has_script; }
+};
 
-std::string PreprocessHTML(std::string html)
+inline HtmlFeatureFlags detect_html_features(const std::string& html) noexcept
 {
-    //-------------------------------------------------
-    // 1. Adobe Adept <meta name="..." value="..."/>
-    //-------------------------------------------------
-// 把 <title/> 或 <title /> 改成成对标签 <title></title>
-    //html = std::regex_replace(html,
-    //    std::regex(R"(<title\b[^>]*?/\s*>)", std::regex::icase),
-    //    "<title></title>");
-    html = replace_math_with_svg(html);  // 存在问题，无法解析闭合<annotation-xml>
+    HtmlFeatureFlags f;
+    const char* s = html.data();
+    const char* end = s + html.size();
+
+    while (s < end - 6)   // 最短 "<svg" 4 字节，留余量
+    {
+        if (*s == '<')
+        {
+            ++s;
+            // 跳过空白： <  svg  或 <  script
+            while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+                ++s;
+
+            if (s + 3 <= end) {
+                char c0 = static_cast<char>(std::tolower(*s));
+                char c1 = static_cast<char>(std::tolower(*(s + 1)));
+                char c2 = static_cast<char>(std::tolower(*(s + 2)));
+
+                if (c0 == 's' && c1 == 'v' && c2 == 'g') { f.has_svg = true; }
+                else if (c0 == 'm' && c1 == 'a' && c2 == 't') { f.has_math = true; }
+                else if (c0 == 's' && c1 == 'c' && c2 == 'r') { f.has_script = true; }
+
+                if (f.all()) break;   // 提前终止
+            }
+        }
+        ++s;
+    }
+    return f;
+}
+void PreprocessHTML(std::string& html)
+{
+    auto flags = detect_html_features(html);
+    if(flags.has_math) replace_math_with_svg(html); 
+
     html = std::regex_replace(
         html,
         std::regex(R"(<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?)/\s*>)", std::regex::icase),
         "<$1$2></$1>");
 
-    //-------------------------------------------------
-    // 2. 自闭合 <script .../> → <script ...>code</script>
-    //-------------------------------------------------
-  // 2. 自闭合 <script .../> → <script ...>code</script>
-    html = preprocess_js(html);
-    
-    std::wstring dir = make_temp_dir();
-    html = replace_svg_with_img(html, dir);
-    //html = inline_and_rasterize_svgs_gumbo(html, dir); //存在问题，会把semantic标签变为空白
+    if (flags.has_script)preprocess_js(html);
+
   
-    //-------------------------------------------------
-    // 2. EPUB 3 的 <meta property="..." content="..."/>
-    //     litehtml 只认识 name/content，不认识 property
-    //-------------------------------------------------
-    //html = std::regex_replace(html,
-    //    std::regex(R"(<meta\b([^>]*)\bproperty\s*=\s*["']([^"']*)["']([^>]*)\bcontent\s*=\s*["']([^"']*)["']([^>]*)/?>)",
-    //        std::regex::icase),
-    //    "<meta $1name=\"$2\" content=\"$4\"$5>");
+     if (flags.has_svg) 
+     {
+         std::wstring dir = make_temp_dir();
+         replace_svg_with_img(html, dir);
+     } 
+     if (g_cfg.enableGlobalCSS) { inject_global_css(html); }
+     inject_css(html);
 
-    //-------------------------------------------------
-    // 3. 自闭合标签缺少空格导致解析错位
-    //     例如 <br/> <hr/> <img .../> 写成 <br/ > <img.../>
-    //-------------------------------------------------
-    //html = std::regex_replace(html,
-    //    std::regex(R"(<([a-zA-Z]+)(\s*[^>]*?)\s*/\s*>)"),
-    //    "<$1$2 />");
-
-    //-------------------------------------------------
-    // 4. 删除 epub 专用命名空间属性
-    //-------------------------------------------------
-    //html = std::regex_replace(html,
-    //    std::regex(R"(\s+xmlns(:\w+)?\s*=\s*["'][^"']*["'])"),
-    //    "");
-    //html = std::regex_replace(html,
-    //    std::regex(R"(\s+\w+:\w+\s*=\s*["'][^"']*["'])"),
-    //    "");
-
-    //-------------------------------------------------
-    // 5. 可选：压缩连续空白字符
-    //-------------------------------------------------
-    // html = std::regex_replace(html, std::regex(R"(\s+)"), " ");
-
-    return html;
 }
 
 
@@ -5605,17 +5730,103 @@ HRESULT MemoryFontLoader::CreateInMemoryFontFile(
 
 
 
+// 注册 Cambria Math（常规字重，非粗非斜）
+bool lunasvgRegisterCambriaMath()
+{
 
+    wchar_t fontDir[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_FONTS, nullptr, SHGFP_TYPE_CURRENT, fontDir)))
+        return false;
 
+    wchar_t fullPath[MAX_PATH]{};
+    PathCombineW(fullPath, fontDir, L"cambria.ttc");   // Cambria Math 在 .ttc 里
+
+    char utf8Path[MAX_PATH * 3]{};
+    WideCharToMultiByte(CP_UTF8, 0, fullPath, -1, utf8Path, sizeof(utf8Path), nullptr, nullptr);
+
+    // 把 Cambria Math 的 Regular face 注册为 "Cambria Math"
+    return lunasvg_add_font_face_from_file("Cambria Math", false, false, utf8Path);
+
+}
+
+void BuildSplashWithText()
+{
+    // 1. 读源图
+    fs::path szPath = exe_dir() / "res" / "splash.png";
+    std::unique_ptr<Gdiplus::Image> src(
+        Gdiplus::Image::FromFile(szPath.generic_wstring().c_str(), FALSE));
+    if (!src || src->GetLastStatus() != Gdiplus::Ok)
+        return;                     // 文件缺失直接退出函数
+
+    int srcW = src->GetWidth();
+    int srcH = src->GetHeight();
+
+    // 2. 新建 32bpp 位图，用于离线绘制
+    Gdiplus::Bitmap* bmp = new Gdiplus::Bitmap(srcW, srcH, PixelFormat32bppPARGB);
+    Gdiplus::Graphics g(bmp);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+
+    // 3. 先画原图
+    g.DrawImage(src.get(), 0, 0, srcW, srcH);
+
+    // 4. 生成阅读时长文本
+    if (g_recorder)
+    {
+        int64_t sec = g_recorder->getTotalTime();
+        int64_t days = sec / 86400;
+        int64_t hours = (sec % 86400) / 3600;
+        int64_t minutes = (sec % 3600) / 60;
+        int64_t seconds = sec % 60;
+
+        std::wstring timeStr;
+        if (days)    timeStr += std::to_wstring(days) + L"天 ";
+        if (hours || days)   timeStr += std::to_wstring(hours) + L"时";
+        if (minutes || hours || days) timeStr += std::to_wstring(minutes) + L"分";
+        timeStr += std::to_wstring(seconds) + L"秒";
+
+        std::wstring label = L"已阅读时长：";
+        std::wstring full = label + timeStr;
+
+        // 5. 字体 & 画刷
+        Gdiplus::FontFamily fontFamily(L"SimSun");
+        Gdiplus::Font labelFont(&fontFamily, 36, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font timeFont(&fontFamily, 36, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush grayBrush(Gdiplus::Color(0, 0, 0));
+
+        // 6. 测量 & 居中偏下
+        Gdiplus::RectF fullBound;
+        g.MeasureString(full.c_str(), -1, &labelFont, Gdiplus::PointF(0, 0), &fullBound);
+        float textX = (srcW - fullBound.Width) / 2.0f;
+        float textY = srcH * 0.85f - fullBound.Height;
+
+        // 7. 绘制
+        Gdiplus::PointF origin(textX, textY);
+        g.DrawString(label.c_str(), -1, &labelFont, origin, &grayBrush);
+
+        Gdiplus::RectF labelBound;
+        g.MeasureString(label.c_str(), -1, &labelFont, origin, &labelBound);
+        Gdiplus::PointF timeOrigin(textX + labelBound.Width, textY);
+        g.DrawString(timeStr.c_str(), -1, &timeFont, timeOrigin, &grayBrush);
+    }
+
+    // 8. 替换全局指针
+    delete g_pSplashImg;   // 释放旧图（如果有）
+    g_pSplashImg = bmp;    // 以后直接用它
+}
 AppBootstrap::AppBootstrap() {
     //make_tooltip_backend();
+    if (lunasvgRegisterCambriaMath()) { OutputDebugStringW(L"[lunasvg] 注册字体成功： Cambria Math"); }
     if (g_cfg.enableJS) { enableJS(); }
     if (!g_container) {
         g_container = std::make_shared<SimpleContainer>();
     }
     if (!g_book){ g_book = std::make_unique<EPUBBook>(); }
     if (!g_vd){g_vd = std::make_unique<VirtualDoc>();}
-    if(!g_recorder){g_recorder = std::make_unique<ReadingRecorder>();}
+    if(!g_recorder)
+    {
+        g_recorder = std::make_unique<ReadingRecorder>();
+    }
     if (!g_toc) 
     { 
         g_toc = std::make_unique<TocPanel>(); 
@@ -5633,6 +5844,7 @@ AppBootstrap::AppBootstrap() {
     g_toc->SetOnNavigate([](const std::wstring& href) {
         g_book->OnTreeSelChanged(href.c_str());
         });
+    BuildSplashWithText();
 }
 
 AppBootstrap::~AppBootstrap() {
@@ -6975,10 +7187,9 @@ bool VirtualDoc::load_by_id( int spine_id, bool isPushBack)
     std::string html = m_book->load_html(href);
     if (html.empty()) { return false; }
 
-    if (g_cfg.enablePreprocessHTML) { html = PreprocessHTML(html); }
-    if (g_cfg.enableGlobalCSS) { html = inject_global_css(html); }
-    html = inject_css(html);
-    //html = inject_katex_css(html);
+    PreprocessHTML(html); 
+
+
     auto block = get_html_block(html, spine_id);
  
     if (isPushBack){ m_blocks.push_back(std::move(block)); }
@@ -7603,6 +7814,10 @@ TocPanel::TocPanel()
         DEFAULT_PITCH | FF_SWISS,
         L"Microsoft YaHei");   // 字体名
 
+    // 1. 在 WM_CREATE / 初始化时创建一次
+  
+    m_hightlightBrush = CreateSolidBrush(g_cfg.highlight_color_cr);
+
 }
 TocPanel::~TocPanel()
 {
@@ -7680,7 +7895,7 @@ void TocPanel::OnPaint(HDC hdc)
                 marginTop + (i + 1) * lineH_ - scrollY_ };
 
         HBRUSH br = (i == selLine_)
-            ? GetSysColorBrush(COLOR_HIGHLIGHT)
+            ? m_hightlightBrush
             : GetSysColorBrush(COLOR_WINDOW);
         FillRect(hdc, &r, br);
 
@@ -8274,7 +8489,7 @@ void ScrollBarEx::OnPaint()
             path.AddArc(r.X + r.Width - 6, r.Y + r.Height - 6, 6, 6, 0, 90);
             path.AddArc(r.X, r.Y + r.Height - 6, 6, 6, 90, 90);
             path.CloseFigure();
-            Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(0, 120, 215));
+            Gdiplus::SolidBrush thumbBrush(g_cfg.scrollbar_slider_color);
             g.FillPath(&thumbBrush, &path);
 
 
@@ -8313,7 +8528,7 @@ void ScrollBarEx::OnPaint()
             }
             /* 画当前章节的点 */
             {
-                Gdiplus::Color c = Gdiplus::Color(0, 120, 215);
+                Gdiplus::Color c = g_cfg.scrollbar_dot_color;
                
                 int r = ACTIVE_R;
                 int y = (m_pos.spine_id + 0.5) * step;
@@ -8566,7 +8781,7 @@ void D2DCanvas::present(int x, int y, litehtml::position* clip)
     if (!m_selBrush)
     {
         m_rt->CreateSolidColorBrush(
-            D2D1::ColorF(0.2f, 0.5f, 1.0f, 0.4f),   // 半透明蓝
+            g_cfg.highlight_color_d2d,   // 半透明蓝
             &m_selBrush);
     }
     if (m_selStart != m_selEnd && m_selBrush && m_selStart >= 0 && m_selEnd >= 0)
@@ -10512,4 +10727,42 @@ FreeTypeTextMeasurer::measure(const std::wstring& text,
     sz.ascent = maxY;
     sz.descent = minY;         // baseline → bottom（minY 为负值）
     return sz;
+}
+
+bool SimpleContainer::isImageCached(std::string src)
+{
+    if (m_img_cache.contains(src)) return true;
+    return false;
+}
+
+void SimpleContainer::addImageCache(std::string hash, std::string svg)
+{
+    auto doc = lunasvg::Document::loadFromData(svg);
+    if (!doc) return;
+
+    lunasvg::Bitmap svgBmp = doc->renderToBitmap();
+    if (svgBmp.isNull()) return;
+
+    //svgBmp.convertToRGBA();   // 1. 原地转格式
+    ImageFrame frame;
+    frame.width = svgBmp.width();
+    frame.height = svgBmp.height();
+    frame.stride = frame.width * 4;
+    frame.rgba.assign(
+        reinterpret_cast<const uint8_t*>(svgBmp.data()),
+        reinterpret_cast<const uint8_t*>(svgBmp.data()) + frame.stride * frame.height);
+    if (!g_container)return;
+    m_img_cache.emplace(hash, std::move(frame));
+}
+
+std::string EPUBBook::get_title()
+{
+    auto titIt = ocf_pkg_.meta.find(L"dc:title");
+    return titIt != ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
+}
+
+std::string EPUBBook::get_author()
+{
+    auto titIt = ocf_pkg_.meta.find(L"dc:creator");
+    return titIt != ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
 }
