@@ -114,9 +114,14 @@ using namespace Gdiplus;
 #include <blake3.h>
 #include <quickjs.h>
 
-
-
-
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#pragma comment(lib, "freetype.lib")
+#include FT_OUTLINE_H
+#include FT_GLYPH_H
+#include <Shlobj.h>      // SHGetKnownFolderPath
+#include <KnownFolders.h>
+#include <numeric>
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -1353,7 +1358,7 @@ public:
 
     struct Style {
         std::string fontSize = "20";
-        std::wstring fontFamily = L"Times New Roman";
+        std::wstring fontFamily = L"Cambria Math";
         std::string fill = "#000000";
         std::string fontStyle;
         std::string fontWeight;
@@ -1409,4 +1414,41 @@ private:
 
     std::unordered_map<std::wstring, CachedFont> cache_;
     std::mutex                                   mtx_;
+};
+
+class FreeTypeTextMeasurer {
+public:
+    static FreeTypeTextMeasurer& instance();   // Meyers 单例
+    struct Size {
+        float width = 0.f;
+        float height = 0.f;
+        float ascent = 0.f;   // baseline → top
+        float descent = 0.f;  // baseline → bottom
+    };
+    Size measure(const std::wstring& text,
+        const std::wstring& fontName,
+        float               fontSizePx,
+        int                 style = 0);   // 0=Regular, 1=Bold, 2=Italic
+
+    std::string outlineToSVG(const std::wstring& text,
+        const std::wstring& fontName,
+        float               fontSizePx,
+        const std::string& fill = "black");
+private:
+    struct CachedFace {
+        FT_Face face = nullptr;
+        float   emSize = 0.f;      // units_per_EM
+    };
+    FreeTypeTextMeasurer();
+    ~FreeTypeTextMeasurer();
+    static FT_Face loadFace(const std::wstring& fontName, int style);
+    CachedFace& getFace(const std::wstring& fontName, int style);
+    FreeTypeTextMeasurer(const FreeTypeTextMeasurer&) = delete;
+    FreeTypeTextMeasurer& operator=(const FreeTypeTextMeasurer&) = delete;
+
+
+    std::unordered_map<std::wstring, CachedFace> cache_;
+    std::mutex                                   mtx_;
+
+    FT_Library ft_ = nullptr;
 };
