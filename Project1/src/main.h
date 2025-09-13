@@ -667,6 +667,7 @@ struct AppSettings {
     int record_update_interval_ms = 1000;
     int record_flush_interval_ms = 10 * 1000;
     int tooltip_delay_ms = 300;
+    int update_interval_ms = 20;
 
     int font_size = 16;
     float line_height = 1.5f; //倍数
@@ -883,73 +884,7 @@ private:
 
 };
 
-//struct BookRecord
-//{
-//    int book_id;
-//    std::wstring book_path;
-//    std::string title;
-//    
-//    int last_spine_id;
-//    int last_scrollY;
-//    int doc_width;
-//    int font_size;
-//    float line_height_multiplier;
-//
-//    int open_count = 0;
-//    int total_time = 0; // 单位：秒
-//    float last_open;
-//    bool enableCSS = true;   // 默认启用 css
-//    bool enableJS = false;   // 默认禁用 JS
-//    bool enableGlobalCSS = false;
-//    bool enablePreprocessHTML = true;
-//    bool displayTOC = true;
-//    bool displayStatusBar = true;
-//    bool displayMenuBar = true;
-//    bool displayScrollBar = true;
-//
-//
-//
-//};
-//class ReadingRecorder {
-//public:
-//    ReadingRecorder();
-//    ~ReadingRecorder();
-//    void open();                     // 初始化数据库、建表、开 WAL
-//    void close(); // 关闭数据库，
-//
-//   //会在wm_mousemove, wm_mousewheel等的消息中调用 
-//    void tik(); 
-//    // 书籍状态
-//
-//
-//    // 统计示例
-//
-//private:
-//    /*记录的内容：
-//    * 
-//    *int id, std::wstring book_path, std::wstring title, std::wstring authors, std::wstring current_chapter, float start_time(时间戳）, float end_time（时间戳）, int duration(单位：s)
-//    * 
-//    */
-//
-//    sqlite3* m_dbRecords = nullptr;      // Records.db
-//    /*记录的内容：
-//    * int id, std::wstring book_path, std::string title, std::string author, int open_count, 
-//    * int total_words, int last_spine_id, int last_scrollY, int font_size, float line_height_multiplier, int total_time(总阅读时长s), 
-//    * float last_open_time(时间戳),     bool enableCSS = true; 
-//    *bool enableJS = false;
-//    *bool enableGlobalCSS = false;
-//    *bool enablePreprocessHTML = true;
-//    *bool displayTOC = true;
-//    *bool displayStatusBar = true;
-//    *bool displayMenuBar = true;
-//    *bool displayScrollBar = true;
-//    *
-//    *    打开新书时读取配置，关闭书时更新数据
-//    * 调用tik时更新总阅读时长
-//    */
-//    sqlite3* m_dbBooks = nullptr;      // Books.db
-//    
-//};
+
 
 
 
