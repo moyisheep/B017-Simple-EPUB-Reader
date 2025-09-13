@@ -78,7 +78,7 @@ using namespace Gdiplus;
 #include <wrl.h>
 #include <wrl/implements.h>   // 关键
 #include <iostream>
-//#include "js_runtime.h"
+
 #pragma comment(lib, "windowscodecs.lib")
 #ifndef HR
 #define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
@@ -107,12 +107,11 @@ using namespace Gdiplus;
 #include <unicode/ustring.h>
 #include <string>
 #include <functional>
-#include <gumbo.h>
+
 #include <cstring>
 #include <stack>
-#include <sstream>
 #include <blake3.h>
-#include <quickjs.h>
+
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -124,7 +123,7 @@ using namespace Gdiplus;
 #include <numeric>
 #include <commdlg.h>   // OPENFILENAMEW, GetOpenFileNameW
 #pragma comment(lib, "comdlg32.lib")
-#include <shobjidl_core.h>
+#include <shobjidl.h> // 包含任务对话框头文件
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -193,10 +192,6 @@ public:
     virtual	void set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) = 0;
     virtual	void del_clip() = 0;
 
- 
-    virtual void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts) = 0;
-
-
     virtual void clear() = 0;
 };
 
@@ -224,47 +219,6 @@ public:
 
 
 
-
-// -------------- GDI 后端 -----------------
-class GdiBackend : public IRenderBackend {
-public:
-    explicit GdiBackend(int width, int height);
-    /* 下面 7 个函数在 .cpp 里用 ExtTextOut / Rectangle 等实现 */
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
-    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
-    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
-    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
-    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
-    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
-    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
-    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
-    void				delete_font(litehtml::uint_ptr hFont) override;
-    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
-    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
-    void	del_clip() override;
-
-
-    void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
-
-    ~GdiBackend();
-
-    void clear() override;
-private:
-    HDC m_hdc;
-    HBITMAP m_memDC;
-    // 缓存已创建的 HBITMAP，避免重复 GDI 转换
-    std::unordered_map<std::string, HBITMAP> m_gdiBitmapCache;
-    int m_w;
-    int m_h;
-    static COLORREF to_cr(const litehtml::web_color& c)
-    {
-        return RGB(c.red, c.green, c.blue);
-    }
-
-    // 把 ImageFrame 转成 32bpp HBITMAP
-    HBITMAP create_dib_from_frame(const ImageFrame& frame);
-};
 
 class FileCollectionLoader : public IDWriteFontCollectionLoader
 {
@@ -398,12 +352,7 @@ private:
 class D2DBackend : public IRenderBackend {
 public:
     D2DBackend();
-  
-    //D2DBackend(const D2DBackend&) = default;   // 或自己实现深拷贝
-
-
-
-
+ 
     void record_char_boxes(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, const std::wstring& wtxt, const litehtml::position& pos);
 
 
@@ -427,13 +376,9 @@ public:
     void	del_clip() override;
 
 
-    void load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts);
-    void unload_fonts(void);
 
-    //std::optional<std::wstring> mapDynamic(const std::wstring& key);
-    //std::wstring resolveFace(const std::wstring& raw);
     std::vector<std::wstring> split_font_list(const std::string& src);
-    //ComPtr<ID2D1HwndRenderTarget> m_rt;
+
     bool is_all_zero(const litehtml::border_radiuses& r);
 
     void clear() override;
@@ -496,28 +441,6 @@ public:
 
 
 
-class GdiCanvas : public ICanvas {
-public:
-    GdiCanvas(int w, int h);
-    ~GdiCanvas();
-
-    void present(int x, int y, litehtml::position* clip) override {};
-    int width()  const override { return m_w; }
-    int height() const override { return m_h; }
-    litehtml::uint_ptr getContext() override;
-    void BeginDraw() override;
-    void EndDraw() override;
-    void resize(int width, int height) override;
-
-    void clear() override;
-
-
-private:
-    int  m_w, m_h;
-    HDC  m_memDC;
-    HBITMAP m_bmp, m_old;
-    std::unique_ptr<GdiBackend> m_backend;
-};
 
 class D2DCanvas : public ICanvas {
 public:
@@ -797,16 +720,6 @@ struct AppStates {
         cancelToken = std::make_shared<std::atomic_bool>(false);
     }
 };
-
-
-// 把整棵树存到 LPARAM 里
-struct TVData {
-    const TreeNode* node;
-    const std::vector<TreeNode>* all;
-    bool inserted = false;   // 新增
-};
-
-// 全局索引 ----------------------------------------------------------
 
 
 

@@ -32,6 +32,8 @@
 #define ID_WIDTH_SMALLER        40019
 #define ID_WIDTH_RESET          40020
 #define ID_EDIT_COPY            40021
+#define ID_FILE_OPEN            40022
+#define ID_FILE_EXIT            40023
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED

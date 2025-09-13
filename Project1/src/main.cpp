@@ -8,13 +8,14 @@ HWND g_hView = nullptr;
 HWND g_hTooltip = nullptr;
 HWND g_hImageview = nullptr;
 HWND g_hViewScroll = nullptr;
+HWND g_hHomepage = nullptr;
 // ---------- 全局 ----------
 HINSTANCE g_hInst;
 std::shared_ptr<SimpleContainer> g_container;
 std::unique_ptr<D2DCanvas> g_canvas;
 std::unique_ptr<D2DCanvas> g_tooltip_canvas;
 std::unique_ptr<D2DCanvas> g_imageview_canvas;
-
+std::unique_ptr<D2DCanvas> g_homepage_canvas;
 std::shared_ptr<EPUBBook>  g_book;
 
 Gdiplus::Image* g_pSplashImg = nullptr;
@@ -29,12 +30,11 @@ std::wstring g_currentHtmlDir = L"";
 std::wstring g_currentHtmlPath = L"";
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
 constexpr UINT WM_EPUB_UPDATE_SCROLLBAR = WM_APP + 2;
-constexpr UINT WM_EPUB_CSS_RELOAD = WM_APP + 3;
+
 constexpr UINT WM_EPUB_CACHE_UPDATED = WM_APP + 4;
 constexpr UINT WM_EPUB_ANCHOR = WM_APP + 5;
 constexpr UINT WM_EPUB_TOOLTIP = WM_APP + 6;
 constexpr UINT WM_EPUB_NAVIGATE = WM_APP + 7;
-
 constexpr UINT TB_SETBUTTONTEXT(WM_USER + 8);
 constexpr UINT WM_LOAD_ERROR(WM_USER + 9);
 constexpr UINT WM_USER_SCROLL(WM_USER + 10);
@@ -64,7 +64,7 @@ static MMRESULT g_tooltipTimer = 0;
 
 int g_center_offset = 0;
 
-std::string g_tootip_css = "<style>img{display:block;width:100%;height:auto;max-height:300px;}</style>";
+
 static HWND  g_hwndSplit = nullptr;   // 分隔条
 static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
 static bool  g_dragging = false;     // 是否正在拖动
@@ -837,24 +837,6 @@ static inline std::string trim_any(const std::string& s,
 
 
 
-void ShowActiveFontsDialog(HWND hParent)
-{
-    std::wstring text;
-    if (g_activeFonts.empty())
-    {
-        text = L"当前没有加载任何字体。";
-    }
-    else
-    {
-        for (const auto& name : g_activeFonts)
-            text += name + L"\r\n";
-    }
-
-    MessageBoxW(hParent,
-        text.c_str(),
-        L"当前正在使用的字体",
-        MB_ICONINFORMATION | MB_OK);
-}
 
 bool is_xhtml(const std::wstring& file_path)
 {
@@ -1288,7 +1270,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_SIZE:
     {
-        if ( g_canvas)
+        if ( g_canvas && g_states.isLoaded)
         {
             RECT rcClient;
             GetClientRect(hwnd, &rcClient);   // ← 这才是客户区
@@ -1501,17 +1483,6 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-void register_view_class()
-{
-    WNDCLASSW wc{};
-    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
-    wc.lpfnWndProc = ViewWndProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = L"EPUBView";
-    RegisterClassW(&wc);
-}
 
 
 
@@ -1568,532 +1539,44 @@ inline void DumpBookRecord()
     OutputDebugStringW((L"\nTotal Read Time (s): " + std::to_wstring(g_recorder->getTotalTime()) + L"\n").c_str());
 }
 
-
-// ---------- 窗口 ----------
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_CREATE: {
-        DragAcceptFiles(hwnd, TRUE);
-        SendMessage(g_hWnd, WM_SIZE, 0, 0);
-
-        return 0;
-    }
-    case WM_DROPFILES:
-    {
-        wchar_t file[MAX_PATH]{};
-        DragQueryFileW((HDROP)wp, 0, file, MAX_PATH);
-        DragFinish((HDROP)wp);
-        PostMessage(hwnd, WM_EPUB_OPEN, 0, (LPARAM)DupPath(file));
-        return 0;
-    }
- 
-    case WM_COPYDATA:
-    {
-        PCOPYDATASTRUCT p = (PCOPYDATASTRUCT)lp;
-        if (p->dwData == WM_EPUB_OPEN && p->lpData)
-        {
-            PostMessage(hwnd, WM_EPUB_OPEN, 0,
-                (LPARAM)DupPath((const wchar_t*)p->lpData));
-        }
-        return 0;
-    }
-
-    // ---------- WM_EPUB_OPEN ----------
-    case WM_EPUB_OPEN:
-    {
-        const wchar_t* file = (const wchar_t*)lp;
-        const wchar_t* ext = wcsrchr(file, L'.');
-        if (!ext || _wcsicmp(ext, L".epub") != 0)
-        {
-            SetStatus(0, L"不是有效的 epub 文件");
-            CoTaskMemFree((void*)file);   // 释放堆拷贝
-            return 0;
-        }
-
-        // 如果上一次任务还在跑，直接忽略（或加入队列）
-        if (g_parse_task.valid() &&
-            g_parse_task.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-        {
-            SetStatus(0, L"正在加载其他文件，请稍候…");
-            CoTaskMemFree((void*)file);
-            return 0;
-        }
-
-        // 清理旧数据
-        g_container->clear();
-        g_canvas->clear();
-        g_book->clear();
-        g_toc->clear();
-        InvalidateRect(g_hView, nullptr, TRUE);
-        InvalidateRect(g_hwndToc, nullptr, TRUE);
-
-        // 启动新任务
-        SetStatus(0, L"正在加载...");
-        g_parse_task = std::async(std::launch::async, [file] {
-            try
-            {
-                g_book->load(file);
-                PostMessage(g_hWnd, WM_EPUB_PARSED, 0, 0);
-            }
-            catch (const std::exception& e)
-            {
-                auto* buf = DupPath(a2w(e.what()).c_str());
-                PostMessage(g_hWnd, WM_LOAD_ERROR, 0, (LPARAM)buf);
-            }
-            catch (...)
-            {
-                PostMessage(g_hWnd, WM_LOAD_ERROR, 0,
-                    (LPARAM)DupPath(L"未知错误"));
-            }
-            CoTaskMemFree((void*)file);   // 任务结束释放路径
-            });
-        return 0;
-    }
-    case WM_MOUSELEAVE:
-    {
-        litehtml::position::vector redraw_box;
-        g_canvas->m_doc->on_mouse_leave(redraw_box);
-        if (!redraw_box.empty())
-        {
-            for (auto box: redraw_box)
-            {
-                RECT r(box.left(), box.top(), box.right(), box.bottom());
-                InvalidateRect(hwnd, &r, false);
-            }
-            UpdateCache();
-        }
- 
-        return 0;
-    }
-    case WM_EPUB_PARSED: {
-
-        if (!g_states.isLoaded) {
-            g_states.isLoaded = true;
-
-            PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
-            PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
-            ShowWindow(g_hViewScroll, SW_SHOW);
-            ShowWindow(g_hView, SW_SHOW);
-     
-        }
-        g_vd->clear();
-        g_recorder->flush();
-        g_recorder->openBook(w2a(g_book->m_file_path));
-   
-        DumpBookRecord();
-
-        // 更新设置
-        auto& record = g_recorder->m_book_record;
-        auto spine_id = record.lastSpineId;
-        g_offsetY = record.lastOffset ;
-        g_cfg.font_size = record.fontSize > 0 ? record.fontSize:g_cfg.default_font_size;
-        g_cfg.line_height = record.lineHeightMul > 0 ? record.lineHeightMul : g_cfg.default_line_height;
-        g_cfg.document_width = record.docWidth > 0 ? record.docWidth : g_cfg.default_document_width;
-        int spine_size = g_book->ocf_pkg_.spine.size();
-        SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, spine_size, 0);
-        SetStatus(1, (L"SPINE：" + std::to_wstring(spine_size)).c_str());
-   
- 
-        g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
-        g_states.needRelayout.store(true);
-        g_vd->load_book(g_book, g_container, g_cfg.document_width);
-        g_vd->load_html(g_last_html_path);
-
-        UpdateCache();          // 复用前面给出的 UpdateCache()
-
-        // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
-        InvalidateRect(g_hView, nullptr, true);
-        InvalidateRect(g_hWnd, nullptr, FALSE);
-        UpdateWindow(g_hView);
-        UpdateWindow(g_hWnd);
-        SetStatus(0, L"加载完成");
-        return 0;
-    }
-    case WM_EPUB_CSS_RELOAD: {
-        // 重新解析当前章节即可
-        return 0;
-    }
-
-    case WM_SIZE:
-    {
-        RECT rcClient;
-        GetClientRect(hwnd, &rcClient);
-        const int cx = rcClient.right;
-        int cyClient = rcClient.bottom;
-
-        /* 1. 工具栏高度 */
-        int cyTB = 0;
-
-        /* 2. 状态栏高度 */
-        int cySB = 0;
-        if (g_cfg.displayStatusBar && g_hStatus)
-        {
-            ShowWindow(g_hStatus, SW_SHOW);
-            SendMessage(g_hStatus, WM_SIZE, 0, 0);
-            int parts[2] = { 120, -1 };
-            SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
-            RECT rcSB{};
-            GetWindowRect(g_hStatus, &rcSB);
-            cySB = rcSB.bottom - rcSB.top;
-        }
-        else if (g_hStatus)
-        {
-            ShowWindow(g_hStatus, SW_HIDE);
-        }
-
-        /* 3. 剩余可用高度 */
-        const int cy = cyClient - cyTB - cySB;
-
-        /* 4. 目录宽度 & 竖线 */
-        const int tocW = g_cfg.displayTOC ? g_splitX : 0;
-        ShowWindow(g_hwndToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
-        ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
-
-        /* 5. 滚动条宽度 */
-        const int sbW = g_cfg.displayScrollBar ? 20 : 0;
-        ShowWindow(g_hViewScroll, g_cfg.displayScrollBar ? SW_SHOW : SW_HIDE);
-
-        /* 6. 摆放子窗口（Y 起点统一为 cyTB） */
-        MoveWindow(g_hwndToc, 0, cyTB, tocW, cy, TRUE);
-        MoveWindow(g_hwndSplit, tocW, cyTB, 2, cy, TRUE);
-        MoveWindow(g_hView, tocW + 2, cyTB,
-            cx - tocW - 2 - sbW, cy, TRUE);      // 正文让出滚动条
-        MoveWindow(g_hViewScroll,
-            cx - sbW, cyTB, sbW, cy, TRUE);      // 滚动条贴最右
-
-        UpdateCache();
-
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return 0;
-    }
-    case WM_LOAD_ERROR:
-    {
-        wchar_t* msg = (wchar_t*)lp;
-        SetStatus(0, msg);
-        OutputDebugStringW(msg);
-        OutputDebugStringW(L"\n");
-        CoTaskMemFree(msg);
-        return 0;
-    }
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(g_hWnd, &ps);
-        RECT rc;
-        GetClientRect(g_hWnd, &rc);
-
-
-        // 如果还没加载 EPUB，就画起始图
-        if (!g_states.isLoaded && g_pSplashImg)
-        {
-            Gdiplus::Graphics g(hdc);
-   
-
-            RECT rc;
-            GetClientRect(g_hWnd, &rc);
-            Gdiplus::RectF win(0.0f, 0.0f,
-                static_cast<float>(rc.right),
-                static_cast<float>(rc.bottom));
-
-            // 计算保持比例的缩放因子
-            float imgW = static_cast<float>(g_pSplashImg->GetWidth());
-            float imgH = static_cast<float>(g_pSplashImg->GetHeight());
-            float scale = std::max(win.Width / imgW, win.Height / imgH);
-
-            float drawW = imgW * scale;
-            float drawH = imgH * scale;
-
-            // 居中
-            float x = (win.Width - drawW) / 2.0f;
-            float y = (win.Height - drawH) / 2.0f;
-
-            g.DrawImage(g_pSplashImg,
-                Gdiplus::RectF(x, y, drawW, drawH),
-                0, 0, imgW, imgH,
-                Gdiplus::UnitPixel);
-
-        }
-        else
-        {
-            // 原有绘制逻辑（交给子控件或默认处理）
-        }
-        EndPaint(g_hWnd, &ps);
-        return 0;
-    }
-    case WM_LBUTTONDOWN:
-    {
-        if (LOWORD(lp) >= g_splitX && LOWORD(lp) <= g_splitX + 2)
-        {
-            SetCapture(hwnd); g_dragging = true;
-        }
-        break;
-    }
-    case WM_MOUSEWHEEL: 
-    {
-
-
-        return 0;
-    }
-
-    case WM_MOUSEMOVE:
-    {
-        if (g_dragging)
-        {
-            int x = LOWORD(lp);
-            if (x < 50) x = 50; if (x > 400) x = 400;
-            g_splitX = x;
-            PostMessage(hwnd, WM_SIZE, 0, 0);
-        }
-        break;
-    }
-    case WM_LBUTTONUP:
-    {
-        if (g_dragging) { ReleaseCapture(); g_dragging = false; }
-        break;
-    }
-    case WM_SETCURSOR:
-    {
-        if (LOWORD(lp) == HTCLIENT)
-        {
-            POINT pt; GetCursorPos(&pt); ScreenToClient(hwnd, &pt);
-            if (pt.x >= g_splitX && pt.x <= g_splitX + 2)
-            {
-                SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE;
-            }
-        }
-        if (HWND(wp) == g_hView)   // 确保是客户区
-        {
-            if (g_container)
-            {
-                SetCursor(LoadCursor(nullptr, g_container->m_currentCursor));
-                return TRUE;                  // 已设置光标
-            }
-        }
-        break;
-    }
-    case WM_DESTROY: {
-        g_recorder->flush();
-        if (g_tooltipTimer)
-        {
-            timeKillEvent(g_tooltipTimer);
-            g_tooltipTimer = 0;
-        }
-        PostQuitMessage(0);
-        return 0;
-    }
-    case WM_VSCROLL: { return 0; }
-    case WM_HSCROLL: { return 0; }
-
-    case WM_COMMAND: {
-        switch (LOWORD(wp))
-        {
-        case IDM_TOGGLE_CSS:
-            g_cfg.enableCSS = !g_cfg.enableCSS;
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
-                MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
-            if (g_vd) { g_vd->reload(); }
-            break;
-     
-        case IDM_TOGGLE_JS:
-            g_cfg.enableJS = !g_cfg.enableJS;          // 切换状态
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
-                MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
-            if (g_vd) { g_vd->reload(); }
-            break;
-      
-        case IDM_TOGGLE_GLOBAL_CSS:
-            g_cfg.enableGlobalCSS = !g_cfg.enableGlobalCSS;          // 切换状态
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
-                MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
-            if (g_vd) { g_vd->reload(); }
-            break;
-   
- 
-
-        case IDM_TOGGLE_HOVER_PREVIEW:
-            g_cfg.enableHoverPreview = !g_cfg.enableHoverPreview;          // 切换状态
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
-                MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
-            break;
-    
-        case IDM_TOGGLE_TOC_WINDOW:
-   
-            g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
-                MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
-            if (g_cfg.displayTOC) { ShowWindow(g_hwndToc, SW_SHOW); }
-            else { ShowWindow(g_hwndToc, SW_HIDE); }
-            // 让主窗口重新布局
-            PostMessage(g_hWnd, WM_SIZE, 0, 0);
-            break;
-   
-        case IDM_TOGGLE_STATUS_WINDOW:
-
-            g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
-                MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
-            if (g_cfg.displayStatusBar) { ShowWindow(g_hStatus, SW_SHOW); }
-            else { ShowWindow(g_hStatus, SW_HIDE); }
-            // 让主窗口重新布局
-            PostMessage(g_hWnd, WM_SIZE, 0, 0);
-            break;
- 
-        case ID_EPUB_RELOAD:
-  
-            if (g_vd) { g_vd->reload(); }
-            break;
-   
-        case ID_FONT_BIGGER:        // Ctrl + '+'
-            g_cfg.font_size = std::min(g_cfg.font_size + 1.0f, 72.0f);   // 上限 72
-            if (g_vd) { g_vd->reload(); }   // 重新加载并排版
-            break;
-
-        case ID_FONT_SMALLER:       // Ctrl + '-'
-            g_cfg.font_size = std::max(g_cfg.font_size - 1.0f, 8.0f);    // 下限 8
-            if (g_vd) { g_vd->reload(); }
-            break;
-
-        case ID_FONT_RESET:         // Ctrl + '0'
-            g_cfg.font_size = g_cfg.default_font_size;   // 默认字号
-            if (g_vd) { g_vd->reload(); }
-            break;
-
-        case ID_LINE_HEIGHT_UP:     // Ctrl + Shift + '+'
-            g_cfg.line_height = std::min(g_cfg.line_height + 0.1f, 3.0f);
-            if (g_vd) { g_vd->reload(); }
-            break;
-
-        case ID_LINE_HEIGHT_DOWN:   // Ctrl + Shift + '-'
-            g_cfg.line_height = std::max(g_cfg.line_height - 0.1f, 1.0f);
-            if (g_vd) { g_vd->reload(); }
-            break;
-
-        case ID_LINE_HEIGHT_RESET:  // Ctrl + Shift + '0'
-            g_cfg.line_height = g_cfg.default_line_height;  // 默认行高
-            if (g_vd) { g_vd->reload(); }
-            break;
-
-        case ID_WIDTH_BIGGER:       // Alt + '→'
-            g_cfg.document_width = std::min(g_cfg.document_width + 50.0f, 2000.0f);
-            if (g_vd) { g_vd->reload(); }   // 仅重新排版即可
-            break;
-
-        case ID_WIDTH_SMALLER:      // Alt + '←'
-            g_cfg.document_width = std::max(g_cfg.document_width - 50.0f, 300.0f);
-            if (g_vd) { g_vd->reload(); }
-            break;
-
-        case ID_WIDTH_RESET:        // Alt + '0'
-            g_cfg.document_width = g_cfg.default_document_width;   // 默认宽度
-            if (g_vd) { g_vd->reload(); }
-            break;
-        case ID_EDIT_COPY:
-            g_canvas->copy_to_clipboard();
-            break;
-        break;
-        }
-    }
-    }
-    return DefWindowProc(hwnd, msg, wp, lp);
-
-}
-// 从资源加载 PNG → Gdiplus::Image*
-Gdiplus::Image* LoadPngFromResource(HINSTANCE hInst, UINT resId)
+void OpenEpubWithDialog(HWND hwnd)
 {
-    // 1. 找到资源
-    HRSRC hRes = FindResource(hInst, MAKEINTRESOURCE(resId), L"PNG");
-    if (!hRes) return nullptr;
-
-    DWORD resSize = SizeofResource(hInst, hRes);
-    HGLOBAL hResData = LoadResource(hInst, hRes);
-    if (!hResData) return nullptr;
-
-    const void* pResData = LockResource(hResData);   // 无需解锁，进程结束自动释放
-
-    // 2. 把内存块包装成 IStream
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, resSize);
-    if (!hMem) return nullptr;
-
-    void* pMem = GlobalLock(hMem);
-    memcpy(pMem, pResData, resSize);
-    GlobalUnlock(hMem);
-
-    IStream* pStream = nullptr;
-    if (FAILED(CreateStreamOnHGlobal(hMem, TRUE, &pStream)))
+    wchar_t dir[MAX_PATH]{};
+    BROWSEINFOW bi{ hwnd, nullptr, dir,
+                    L"请选择包含 EPUB 的文件夹",
+                    BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE };
+    DWORD pid;
+    GetWindowThreadProcessId(hwnd, &pid);
+    AllowSetForegroundWindow(pid);   // 允许本进程抢占前台
+    SetForegroundWindow(hwnd);       // 先把主窗口抢回前台
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (pidl)
     {
-        GlobalFree(hMem);
-        return nullptr;
+        if (SHGetPathFromIDListW(pidl, dir))
+        {
+            // 枚举第一个 epub
+            std::wstring firstEpub;
+            for (const auto& e : std::filesystem::directory_iterator(dir))
+                if (_wcsicmp(e.path().extension().c_str(), L".epub") == 0)
+                {
+                    firstEpub = e.path();
+                    break;
+                }
+            if (!firstEpub.empty())
+                PostMessageW(hwnd, WM_EPUB_OPEN, 0,
+                    (LPARAM)DupPath(firstEpub.c_str()));
+            else
+                MessageBoxW(hwnd, L"目录里没有 epub 文件", L"提示", MB_OK);
+        }
+        CoTaskMemFree(pidl);
     }
 
-    // 3. 用 GDI+ 解码
-    Gdiplus::Image* img = new Gdiplus::Image(pStream);
-    pStream->Release();   // CreateStreamOnHGlobal 第二个参数 TRUE → hMem 会被自动释放
-
-    if (img->GetLastStatus() != Gdiplus::Ok)
-    {
-        delete img;
-        return nullptr;
-    }
-    return img;
-}
-bool SaveHDCAsBmp(HDC hdc, int width, int height, const wchar_t* name)
-{
-    // 1. 创建兼容的内存 DC 和位图
-    HDC     memDC = CreateCompatibleDC(hdc);
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = width;
-    bi.bmiHeader.biHeight = height;   // 正数 = 底-上 DIB
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 24;       // 24-bit RGB
-    bi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HBITMAP hBmp = CreateDIBSection(memDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!hBmp) { DeleteDC(memDC); return false; }
-
-    // 2. 把 hdc 内容拷到 DIB
-    HGDIOBJ oldBmp = SelectObject(memDC, hBmp);
-    BitBlt(memDC, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
-
-    // 3. 构造 BITMAPFILEHEADER + DIB 数据
-    BITMAPFILEHEADER bfh = { 0 };
-    bfh.bfType = 0x4D42; // 'BM'
-    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    DWORD dibSize = ((width * 3 + 3) & ~3) * height; // 每行 4 字节对齐
-    bfh.bfSize = bfh.bfOffBits + dibSize;
-
-    // 4. 写文件
-    HANDLE hFile = CreateFileW(name,
-        GENERIC_WRITE,
-        0, nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        SelectObject(memDC, oldBmp);
-        DeleteObject(hBmp);
-        DeleteDC(memDC);
-        return false;
-    }
-
-    DWORD written = 0;
-    WriteFile(hFile, &bfh, sizeof(bfh), &written, nullptr);
-    WriteFile(hFile, &bi.bmiHeader, sizeof(bi.bmiHeader), &written, nullptr);
-    WriteFile(hFile, bits, dibSize, &written, nullptr);
-    CloseHandle(hFile);
-
-    // 5. 清理
-    SelectObject(memDC, oldBmp);
-    DeleteObject(hBmp);
-    DeleteDC(memDC);
-    return true;
 }
 LRESULT CALLBACK ImageviewProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 {
-    switch(m)
+    switch (m)
     {
-    case WM_DESTROY: 
+    case WM_DESTROY:
         return 0;
     case WM_PAINT:
     {
@@ -2252,19 +1735,80 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
     }
     return DefWindowProc(hwnd, m, w, l);
 }
+LRESULT CALLBACK HomepageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_SIZE:
+    {
+        if (g_homepage_canvas && g_homepage_canvas->m_doc)
+        {
+            RECT rcClient;
+            GetClientRect(hwnd, &rcClient);
+            float width = rcClient.right - rcClient.left;
+            float height = rcClient.bottom - rcClient.top;
+            g_homepage_canvas->m_doc->render(width);
+            g_homepage_canvas->resize(width, height);
+        }
+    }
+    case WM_PAINT:
+    {
+        if (!IsWindowVisible(g_hHomepage)) { return 0; }
+        if (!g_homepage_canvas)
+        {
+            OutputDebugStringA("[TooltipProc] self or doc null\n");
+            break;
+        }
+  
+        if (!g_states.isLoaded && g_homepage_canvas->m_doc)
+        {
 
-const wchar_t THUMB_CLASS[] = L"ThumbPreview";
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            float width = rc.right - rc.left;
+            float height = rc.bottom - rc.top;
+            litehtml::position clip(0.0f, 0.0f, width, height);
 
-void register_thumb_class()
+
+            g_homepage_canvas->present(0, 0, &clip);
+
+        }
+
+        return 0;
+    }
+    case WM_DESTROY:
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProc(hwnd, msg, wp, lp);
+}
+const wchar_t TOOLTIP_CLASS[] = L"TooltipClass";
+
+void register_tooltip_class()
 {
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.lpfnWndProc = TooltipProc;
     wc.hInstance = GetModuleHandle(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = THUMB_CLASS;
+    wc.lpszClassName = TOOLTIP_CLASS;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 }
+
+const wchar_t VIEW_CLASS[] = L"ViewClass";
+void register_view_class()
+{
+    WNDCLASSW wc{};
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
+    wc.lpfnWndProc = ViewWndProc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = VIEW_CLASS;
+    RegisterClassW(&wc);
+}
+
 
 const wchar_t IMAGEVIEW_CLASS[] = L"Imageview";
 
@@ -2279,31 +1823,20 @@ void register_imageview_class()
     RegisterClassExW(&wc);
 }
 
-const wchar_t SCROLLBAR_CLASS_NAME[] = L"ScrollBarEx";
+const wchar_t SCROLLBAR_CLASS[] = L"ScrollBarEx";
 
 void register_scrollbar_class()
 {
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.lpfnWndProc = ScrollBarEx::WndProc;
     wc.hInstance = g_hInst;
-    wc.lpszClassName = SCROLLBAR_CLASS_NAME;
+    wc.lpszClassName = SCROLLBAR_CLASS;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     RegisterClassExW(&wc);
 }
 
-void register_main_class()
-{
-    WNDCLASSEX w{ sizeof(WNDCLASSEX) };
-    w.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
-    w.lpfnWndProc = WndProc;
-    w.hInstance = g_hInst;
-    w.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    w.lpszClassName = L"EPUBLite";
-    w.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    w.lpszMenuName = nullptr;   // ← 必须为空
-    RegisterClassEx(&w);
-}
+
 const wchar_t TOC_CLASS[] = L"TocPanelClass";
 void register_toc_class()
 {
@@ -2316,8 +1849,562 @@ void register_toc_class()
     wc.cbWndExtra = sizeof(LONG_PTR);   // ← 必须有
     RegisterClassExW(&wc);
 }
+
+const wchar_t HOMEPAGE_CLASS[] = L"HomepageClass";
+void register_homepage_class()
+{
+    WNDCLASSEXW wc{ sizeof(wc) };
+    wc.lpfnWndProc = HomepageProc;          // 你的新 WndProc
+    wc.hInstance = g_hInst;
+    wc.lpszClassName = HOMEPAGE_CLASS;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;             // 自绘
+    wc.cbWndExtra = sizeof(LONG_PTR);   // ← 必须有
+    RegisterClassExW(&wc);
+}
+
+
+// ---------- 窗口 ----------
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+
+        register_view_class();
+
+        register_tooltip_class();
+        register_imageview_class();
+        register_scrollbar_class();
+        register_toc_class();
+        register_homepage_class();
+        // 放在主窗口 CreateWindow 之后
+        g_hStatus = CreateWindowEx(
+            0, STATUSCLASSNAME, L"就绪",
+            WS_CHILD | SBARS_SIZEGRIP,
+            0, 0, 0, 0,           // 位置和大小由 WM_SIZE 调整
+            hwnd, nullptr, g_hInst, nullptr);
+
+        // 2. 创建
+        g_hwndToc = CreateWindowExW(
+            WS_EX_COMPOSITED,          // 双缓冲
+            TOC_CLASS,                 // 用注册的类名
+            nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+            0, 0, 200, 600,
+            hwnd, (HMENU)100, g_hInst, nullptr);
+
+        g_hwndSplit = CreateWindowExW(
+            0, WC_STATICW, nullptr,
+            WS_CHILD | SS_ETCHEDVERT,
+            200, 0, 2, 600,          // 2 px 宽
+            hwnd, (HMENU)101, g_hInst, nullptr);
+
+        g_hView = CreateWindowExW(
+            0, VIEW_CLASS, nullptr,
+            WS_CHILD | WS_CLIPSIBLINGS,
+            0, 0, 1, 1,
+            hwnd, (HMENU)101, g_hInst, nullptr);
+
+        g_hTooltip = CreateWindowExW(
+            WS_EX_COMPOSITED,
+            TOOLTIP_CLASS, nullptr,
+            WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_BORDER,
+            0, 0, 300, 200,
+            hwnd, nullptr, g_hInst, nullptr);
+
+
+        g_hImageview = CreateWindowExW(
+            WS_EX_COMPOSITED,
+            IMAGEVIEW_CLASS, nullptr,
+            WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_BORDER,
+            0, 0, 300, 200,
+            hwnd, nullptr, g_hInst, nullptr);
+
+
+        g_hViewScroll = CreateWindowExW(0, SCROLLBAR_CLASS, L"",
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            0, 0, 0, 0, hwnd, nullptr,
+            g_hInst, nullptr);
+
+        g_hHomepage = CreateWindowExW(0, HOMEPAGE_CLASS, L"",
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            0, 0, 0, 0, hwnd, nullptr,
+            g_hInst, nullptr);
+
+        g_bootstrap = std::make_unique<AppBootstrap>();
+  
+        // =====初始化隐藏=====
+        ShowWindow(g_hStatus, SW_HIDE);
+        ShowWindow(g_hwndSplit, SW_HIDE);
+        ShowWindow(g_hwndToc, SW_HIDE);
+        ShowWindow(g_hViewScroll, SW_HIDE);
+        ShowWindow(g_hImageview, SW_HIDE);
+        ShowWindow(g_hView, SW_HIDE);
+        ShowWindow(g_hTooltip, SW_HIDE);
+
+        DragAcceptFiles(hwnd, TRUE);
+
+        SendMessage(g_hWnd, WM_SIZE, 0, 0);
+
+        return 0;
+    }
+    case WM_DROPFILES:
+    {
+        wchar_t file[MAX_PATH]{};
+        DragQueryFileW((HDROP)wp, 0, file, MAX_PATH);
+        DragFinish((HDROP)wp);
+        PostMessage(hwnd, WM_EPUB_OPEN, 0, (LPARAM)DupPath(file));
+        return 0;
+    }
+ 
+    case WM_COPYDATA:
+    {
+        PCOPYDATASTRUCT p = (PCOPYDATASTRUCT)lp;
+        if (p->dwData == WM_EPUB_OPEN && p->lpData)
+        {
+            PostMessage(hwnd, WM_EPUB_OPEN, 0,
+                (LPARAM)DupPath((const wchar_t*)p->lpData));
+        }
+        return 0;
+    }
+
+    // ---------- WM_EPUB_OPEN ----------
+    case WM_EPUB_OPEN:
+    {
+        const wchar_t* file = (const wchar_t*)lp;
+        const wchar_t* ext = wcsrchr(file, L'.');
+        if (!ext || _wcsicmp(ext, L".epub") != 0)
+        {
+            SetStatus(0, L"不是有效的 epub 文件");
+            CoTaskMemFree((void*)file);   // 释放堆拷贝
+            return 0;
+        }
+
+        // 如果上一次任务还在跑，直接忽略（或加入队列）
+        if (g_parse_task.valid() &&
+            g_parse_task.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            SetStatus(0, L"正在加载其他文件，请稍候…");
+            CoTaskMemFree((void*)file);
+            return 0;
+        }
+
+        // 清理旧数据
+        g_container->clear();
+        g_canvas->clear();
+        g_book->clear();
+        g_toc->clear();
+        InvalidateRect(g_hView, nullptr, TRUE);
+        InvalidateRect(g_hwndToc, nullptr, TRUE);
+
+        // 启动新任务
+        SetStatus(0, L"正在加载...");
+        g_parse_task = std::async(std::launch::async, [file] {
+            try
+            {
+                g_book->load(file);
+                PostMessage(g_hWnd, WM_EPUB_PARSED, 0, 0);
+            }
+            catch (const std::exception& e)
+            {
+                auto* buf = DupPath(a2w(e.what()).c_str());
+                PostMessage(g_hWnd, WM_LOAD_ERROR, 0, (LPARAM)buf);
+            }
+            catch (...)
+            {
+                PostMessage(g_hWnd, WM_LOAD_ERROR, 0,
+                    (LPARAM)DupPath(L"未知错误"));
+            }
+            CoTaskMemFree((void*)file);   // 任务结束释放路径
+            });
+        return 0;
+    }
+
+    case WM_EPUB_PARSED: {
+
+        if (!g_states.isLoaded) {
+            g_states.isLoaded = true;
+
+            PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_STATUS_WINDOW, 0), 0);
+            PostMessage(g_hWnd, WM_COMMAND, MAKEWPARAM(IDM_TOGGLE_TOC_WINDOW, 0), 0);
+            ShowWindow(g_hViewScroll, SW_SHOW);
+            ShowWindow(g_hView, SW_SHOW);
+     
+        }
+        g_vd->clear();
+        g_recorder->flush();
+        g_recorder->openBook(w2a(g_book->m_file_path));
+   
+        DumpBookRecord();
+
+        // 更新设置
+        auto& record = g_recorder->m_book_record;
+        auto spine_id = record.lastSpineId;
+        g_offsetY = record.lastOffset ;
+        g_cfg.font_size = record.fontSize > 0 ? record.fontSize:g_cfg.default_font_size;
+        g_cfg.line_height = record.lineHeightMul > 0 ? record.lineHeightMul : g_cfg.default_line_height;
+        g_cfg.document_width = record.docWidth > 0 ? record.docWidth : g_cfg.default_document_width;
+        int spine_size = g_book->ocf_pkg_.spine.size();
+        SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, spine_size, 0);
+        SetStatus(1, (L"SPINE：" + std::to_wstring(spine_size)).c_str());
+   
+ 
+        g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
+        g_states.needRelayout.store(true);
+        g_vd->load_book(g_book, g_container, g_cfg.document_width);
+        g_vd->load_html(g_last_html_path);
+
+        UpdateCache();          // 复用前面给出的 UpdateCache()
+
+        // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
+        InvalidateRect(g_hView, nullptr, true);
+        InvalidateRect(g_hWnd, nullptr, FALSE);
+        UpdateWindow(g_hView);
+        UpdateWindow(g_hWnd);
+        SetStatus(0, L"加载完成");
+        return 0;
+    }
+
+
+    case WM_SIZE:
+    {
+      
+        RECT rcClient;
+        GetClientRect(hwnd, &rcClient);
+        const int cx = rcClient.right;
+        int cyClient = rcClient.bottom;
+        if (g_states.isLoaded)
+        {
+            ShowWindow(g_hHomepage, SW_HIDE);
+            /* 1. 工具栏高度 */
+            int cyTB = 0;
+
+            /* 2. 状态栏高度 */
+            int cySB = 0;
+            if (g_cfg.displayStatusBar && g_hStatus)
+            {
+                ShowWindow(g_hStatus, SW_SHOW);
+                SendMessage(g_hStatus, WM_SIZE, 0, 0);
+                int parts[2] = { 120, -1 };
+                SendMessage(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
+                RECT rcSB{};
+                GetWindowRect(g_hStatus, &rcSB);
+                cySB = rcSB.bottom - rcSB.top;
+            }
+            else if (g_hStatus)
+            {
+                ShowWindow(g_hStatus, SW_HIDE);
+            }
+
+            /* 3. 剩余可用高度 */
+            const int cy = cyClient - cyTB - cySB;
+
+            /* 4. 目录宽度 & 竖线 */
+            const int tocW = g_cfg.displayTOC ? g_splitX : 0;
+            ShowWindow(g_hwndToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
+            ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
+
+            /* 5. 滚动条宽度 */
+            const int sbW = g_cfg.displayScrollBar ? 20 : 0;
+            ShowWindow(g_hViewScroll, g_cfg.displayScrollBar ? SW_SHOW : SW_HIDE);
+
+            /* 6. 摆放子窗口（Y 起点统一为 cyTB） */
+            MoveWindow(g_hwndToc, 0, cyTB, tocW, cy, TRUE);
+            MoveWindow(g_hwndSplit, tocW, cyTB, 2, cy, TRUE);
+            MoveWindow(g_hView, tocW + 2, cyTB,
+                cx - tocW - 2 - sbW, cy, TRUE);      // 正文让出滚动条
+            MoveWindow(g_hViewScroll,
+                cx - sbW, cyTB, sbW, cy, TRUE);      // 滚动条贴最右
+            UpdateCache();
+        }
+        else
+        {
+            ShowWindow(g_hHomepage, SW_SHOW);
+            MoveWindow(g_hHomepage, 0, 0, cx, cyClient, TRUE);
+
+        }
+
+        //InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_LOAD_ERROR:
+    {
+        wchar_t* msg = (wchar_t*)lp;
+        SetStatus(0, msg);
+        OutputDebugStringW(msg);
+        OutputDebugStringW(L"\n");
+        CoTaskMemFree(msg);
+        return 0;
+    }
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        return 0;   // ✅ 显式空绘制
+    }
+    case WM_LBUTTONDOWN:
+    {
+        if (LOWORD(lp) >= g_splitX && LOWORD(lp) <= g_splitX + 2)
+        {
+            SetCapture(hwnd); g_dragging = true;
+        }
+        break;
+    }
+
+    case WM_MOUSEMOVE:
+    {
+        if (g_dragging)
+        {
+            int x = LOWORD(lp);
+            if (x < 50) x = 50; if (x > 400) x = 400;
+            g_splitX = x;
+            PostMessage(hwnd, WM_SIZE, 0, 0);
+        }
+        break;
+    }
+    case WM_LBUTTONUP:
+    {
+        if (g_dragging) { ReleaseCapture(); g_dragging = false; }
+        break;
+    }
+    case WM_SETCURSOR:
+    {
+        if (LOWORD(lp) == HTCLIENT)
+        {
+            POINT pt; GetCursorPos(&pt); ScreenToClient(hwnd, &pt);
+            if (pt.x >= g_splitX && pt.x <= g_splitX + 2)
+            {
+                SetCursor(LoadCursor(nullptr, IDC_SIZEWE)); return TRUE;
+            }
+        }
+        if (HWND(wp) == g_hView)   // 确保是客户区
+        {
+            if (g_container)
+            {
+                SetCursor(LoadCursor(nullptr, g_container->m_currentCursor));
+                return TRUE;                  // 已设置光标
+            }
+        }
+        break;
+    }
+    case WM_DESTROY: {
+        g_recorder->flush();
+        if (g_tooltipTimer)
+        {
+            timeKillEvent(g_tooltipTimer);
+            g_tooltipTimer = 0;
+        }
+        PostQuitMessage(0);
+        return 0;
+    }
+
+
+    case WM_COMMAND: {
+        switch (LOWORD(wp))
+        {
+        case IDM_TOGGLE_CSS:
+            g_cfg.enableCSS = !g_cfg.enableCSS;
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
+                MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case IDM_TOGGLE_JS:
+            g_cfg.enableJS = !g_cfg.enableJS;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
+                MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case IDM_TOGGLE_GLOBAL_CSS:
+            g_cfg.enableGlobalCSS = !g_cfg.enableGlobalCSS;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
+                MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+
+
+        case IDM_TOGGLE_HOVER_PREVIEW:
+            g_cfg.enableHoverPreview = !g_cfg.enableHoverPreview;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
+                MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
+            break;
+
+        case IDM_TOGGLE_TOC_WINDOW:
+
+            g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
+                MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
+            if (g_cfg.displayTOC) { ShowWindow(g_hwndToc, SW_SHOW); }
+            else { ShowWindow(g_hwndToc, SW_HIDE); }
+            // 让主窗口重新布局
+            PostMessage(g_hWnd, WM_SIZE, 0, 0);
+            break;
+
+        case IDM_TOGGLE_STATUS_WINDOW:
+
+            g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
+                MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
+            if (g_cfg.displayStatusBar) { ShowWindow(g_hStatus, SW_SHOW); }
+            else { ShowWindow(g_hStatus, SW_HIDE); }
+            // 让主窗口重新布局
+            PostMessage(g_hWnd, WM_SIZE, 0, 0);
+            break;
+
+        case ID_EPUB_RELOAD:
+
+            if (g_vd && g_states.isLoaded) { g_vd->reload(); }
+            break;
+
+        case ID_FONT_BIGGER:        // Ctrl + '+'
+            g_cfg.font_size = std::min(g_cfg.font_size + 1.0f, 72.0f);   // 上限 72
+            if (g_vd) { g_vd->reload(); }   // 重新加载并排版
+            break;
+
+        case ID_FONT_SMALLER:       // Ctrl + '-'
+            g_cfg.font_size = std::max(g_cfg.font_size - 1.0f, 8.0f);    // 下限 8
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_FONT_RESET:         // Ctrl + '0'
+            g_cfg.font_size = g_cfg.default_font_size;   // 默认字号
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_LINE_HEIGHT_UP:     // Ctrl + Shift + '+'
+            g_cfg.line_height = std::min(g_cfg.line_height + 0.1f, 3.0f);
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_LINE_HEIGHT_DOWN:   // Ctrl + Shift + '-'
+            g_cfg.line_height = std::max(g_cfg.line_height - 0.1f, 1.0f);
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_LINE_HEIGHT_RESET:  // Ctrl + Shift + '0'
+            g_cfg.line_height = g_cfg.default_line_height;  // 默认行高
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_WIDTH_BIGGER:       // Alt + '→'
+            g_cfg.document_width = std::min(g_cfg.document_width + 50.0f, 2000.0f);
+            if (g_vd) { g_vd->reload(); }   // 仅重新排版即可
+            break;
+
+        case ID_WIDTH_SMALLER:      // Alt + '←'
+            g_cfg.document_width = std::max(g_cfg.document_width - 50.0f, 300.0f);
+            if (g_vd) { g_vd->reload(); }
+            break;
+
+        case ID_WIDTH_RESET:        // Alt + '0'
+            g_cfg.document_width = g_cfg.default_document_width;   // 默认宽度
+            if (g_vd) { g_vd->reload(); }
+            break;
+        case ID_EDIT_COPY:
+            g_canvas->copy_to_clipboard();
+            break;
+        case ID_FILE_OPEN:
+        {
+            wchar_t buf[256];
+            swprintf_s(buf, L"hwnd=0x%08X  Enabled=%d  Iconic=%d  Visible=%d",
+                (DWORD_PTR)hwnd,
+                IsWindowEnabled(hwnd),
+                IsIconic(hwnd),
+                IsWindowVisible(hwnd));
+            OutputDebugStringW(buf);
+            MessageBoxW(hwnd,
+                L"messagebox 测试",
+                L"当前正在使用的字体",
+                MB_ICONINFORMATION | MB_OK);
+            OpenEpubWithDialog(hwnd);   // 就是之前那段 IFileOpenDialog 代码
+            break;
+        }
+        case ID_FILE_EXIT:
+            PostQuitMessage(0);
+            break;
+        
+
+        }
+    }
+    }
+    return DefWindowProc(hwnd, msg, wp, lp);
+
+}
+
+bool SaveHDCAsBmp(HDC hdc, int width, int height, const wchar_t* name)
+{
+    // 1. 创建兼容的内存 DC 和位图
+    HDC     memDC = CreateCompatibleDC(hdc);
+    BITMAPINFO bi = { 0 };
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = width;
+    bi.bmiHeader.biHeight = height;   // 正数 = 底-上 DIB
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 24;       // 24-bit RGB
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP hBmp = CreateDIBSection(memDC, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hBmp) { DeleteDC(memDC); return false; }
+
+    // 2. 把 hdc 内容拷到 DIB
+    HGDIOBJ oldBmp = SelectObject(memDC, hBmp);
+    BitBlt(memDC, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
+
+    // 3. 构造 BITMAPFILEHEADER + DIB 数据
+    BITMAPFILEHEADER bfh = { 0 };
+    bfh.bfType = 0x4D42; // 'BM'
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    DWORD dibSize = ((width * 3 + 3) & ~3) * height; // 每行 4 字节对齐
+    bfh.bfSize = bfh.bfOffBits + dibSize;
+
+    // 4. 写文件
+    HANDLE hFile = CreateFileW(name,
+        GENERIC_WRITE,
+        0, nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        SelectObject(memDC, oldBmp);
+        DeleteObject(hBmp);
+        DeleteDC(memDC);
+        return false;
+    }
+
+    DWORD written = 0;
+    WriteFile(hFile, &bfh, sizeof(bfh), &written, nullptr);
+    WriteFile(hFile, &bi.bmiHeader, sizeof(bi.bmiHeader), &written, nullptr);
+    WriteFile(hFile, bits, dibSize, &written, nullptr);
+    CloseHandle(hFile);
+
+    // 5. 清理
+    SelectObject(memDC, oldBmp);
+    DeleteObject(hBmp);
+    DeleteDC(memDC);
+    return true;
+}
+const wchar_t MAIN_CLASS[] = L"SimpleEPUBReader";
+void register_main_class()
+{
+    WNDCLASSEX w{ sizeof(WNDCLASSEX) };
+    w.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
+    w.lpfnWndProc = WndProc;
+    w.hInstance = g_hInst;
+    w.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    w.lpszClassName = MAIN_CLASS;
+    w.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    w.lpszMenuName = nullptr;   // ← 必须为空
+    RegisterClassEx(&w);
+}
+
 // ---------- 入口 ----------
-int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
+int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
+{
+    // 在 WinMain 最开头
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     // ---------- 1. 解析命令行 ----------
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -2352,16 +2439,12 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     g_hInst = h;
     InitCommonControls();
     register_main_class();
-    register_view_class();
 
-    register_thumb_class();
-    register_imageview_class();
-    register_scrollbar_class();
-    register_toc_class();
     // 在 CreateWindow 之前
     HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MENU_MAIN));
 
     if (!hMenu) {
+        OutputDebugStringW(L"LoadMenu 失败\n");
         MessageBox(nullptr, L"LoadMenu 失败", L"Error", MB_ICONERROR);
         return 0;
     }
@@ -2369,63 +2452,12 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
         SetProcessDPIAware();
 
-    g_hWnd = CreateWindowW(L"EPUBLite", L"EPUB Lite Reader",
+    g_hWnd = CreateWindowW(MAIN_CLASS, a2w(g_cfg.appName).c_str(),
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, 0, 800, 600,
         nullptr, nullptr, h, nullptr);
-    // 放在主窗口 CreateWindow 之后
-    g_hStatus = CreateWindowEx(
-        0, STATUSCLASSNAME, L"就绪",
-        WS_CHILD  | SBARS_SIZEGRIP,
-        0, 0, 0, 0,           // 位置和大小由 WM_SIZE 调整
-        g_hWnd, nullptr, g_hInst, nullptr);
 
 
-
-
-    // 2. 创建
-    g_hwndToc = CreateWindowExW(
-        WS_EX_COMPOSITED,          // 双缓冲
-        TOC_CLASS,                 // 用注册的类名
-        nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL,
-        0, 0, 200, 600,
-        g_hWnd, (HMENU)100, g_hInst, nullptr);
-
-
-
-    g_hwndSplit = CreateWindowExW(
-        0, WC_STATICW, nullptr,
-        WS_CHILD  | SS_ETCHEDVERT,
-        200, 0, 2, 600,          // 2 px 宽
-        g_hWnd, (HMENU)101, g_hInst, nullptr);
-    g_hView = CreateWindowExW(
-        0, L"EPUBView", nullptr,
-        WS_CHILD   | WS_CLIPSIBLINGS ,
-        0, 0, 1, 1,
-        g_hWnd, (HMENU)101, g_hInst, nullptr);
-
-    g_hTooltip = CreateWindowExW(
-         WS_EX_COMPOSITED,
-        THUMB_CLASS, nullptr,
-        WS_POPUP  | WS_THICKFRAME | WS_CLIPCHILDREN |WS_BORDER,
-        0, 0, 300, 200,
-        g_hView, nullptr, g_hInst, nullptr);
-
-
-    g_hImageview = CreateWindowExW(
-        WS_EX_COMPOSITED,
-        IMAGEVIEW_CLASS, nullptr,
-        WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_BORDER,
-        0, 0, 300, 200,
-        g_hView, nullptr, g_hInst, nullptr);
-
-  
-
-    g_hViewScroll = CreateWindowExW(0, SCROLLBAR_CLASS_NAME, L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-        0, 0, 0, 0, g_hWnd, nullptr,
-        g_hInst, nullptr);
 
 
     // 1. 在全局或合适位置声明
@@ -2464,9 +2496,10 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     // 新增：复制文本（Ctrl + C）
     gAccel.add(ID_EDIT_COPY, FCONTROL | FVIRTKEY, 'C');
 
-    fs::path icoPath = exe_dir() / "res" / "app.ico";
+
 
     // 加载图标（可缩放，支持 32/48/256 像素）
+    fs::path icoPath = exe_dir() / "res" / "app.ico";
     HICON hIcon = (HICON)LoadImageW(nullptr, icoPath.c_str(),
         IMAGE_ICON,
         0, 0,               // 0,0 = 使用图标内最佳尺寸
@@ -2480,7 +2513,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     }
 
 
-    g_bootstrap = std::make_unique<AppBootstrap>();
+
+
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
 
 
@@ -2495,9 +2529,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
         MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
 
  
-    g_cfg.displayScrollBar = false;
-    g_cfg.displayTOC = false;
-    g_cfg.displayStatusBar = false;
     
        
     EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
@@ -2507,18 +2538,13 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
     //EnableMenuItem(hMenu, IDM_TOGGLE_STATUS_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     //EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableClearType();
-    // =====初始化隐藏=====
-    ShowWindow(g_hStatus, SW_HIDE);
-    ShowWindow(g_hwndSplit, SW_HIDE);
-    ShowWindow(g_hwndToc, SW_HIDE);
-    ShowWindow(g_hViewScroll, SW_HIDE);
-    ShowWindow(g_hImageview, SW_HIDE);
-    
-    ShowWindow(g_hView, SW_HIDE);
-    ShowWindow(g_hTooltip, SW_HIDE);
+  
+
+
     // ====================
     ShowWindow(g_hWnd, n);
     UpdateWindow(g_hWnd);
+
     // ---------- 4. 首次启动时如有文件立即加载 ----------
     if (firstFile && fs::exists(firstFile))
         PostMessage(g_hWnd, WM_EPUB_OPEN, 0, (LPARAM)firstFile);
@@ -2529,6 +2555,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n) {
             DispatchMessage(&msg);
         }
     }
+    ::CoUninitialize();
     GdiplusShutdown(gdiplusToken);
     return static_cast<int>(msg.wParam);
 }
@@ -2767,8 +2794,11 @@ void SimpleContainer::set_caption(const char* cap)
 {
     if (cap && g_hWnd) {
         std::string title;
-        title += g_book->get_title() + " - " +
-            g_book->get_author() + " | " + g_cfg.appName;
+        auto t = g_book->get_title();
+        if (!t.empty()) { title += t + " - "; }
+        auto a = g_book->get_author();
+        if (!a.empty()) { title += a + " - "; }
+        title += g_cfg.appName;
         SetWindowTextW(g_hWnd, a2w(title).c_str());
         //OutputDebugStringW((a2w(cap)+L"\n").c_str());
     }
@@ -4974,153 +5004,11 @@ void D2DBackend::del_clip()
     //m_clipStack.pop_back();
 }
 
-// GDI backend
-GdiCanvas::GdiCanvas(int w, int h) : m_w(w), m_h(h)
-{
-
-    // 创建后端
-    m_backend = std::make_unique<GdiBackend>(m_w, m_h);
-}
-
-GdiCanvas::~GdiCanvas()
-{
-    if (m_old) SelectObject(m_memDC, m_old);
-    if (m_bmp) DeleteObject(m_bmp);
-    if (m_memDC) DeleteDC(m_memDC);
-}
 
 
 
 
-struct GdiFont {
-    HFONT hFont;
-    TEXTMETRIC tm;
-};
 
-/* ---------- 工具：RGB 转 COLORREF ---------- */
-static COLORREF to_cr(litehtml::web_color c)
-{
-    return RGB(c.red, c.green, c.blue);
-}
-
-/* ---------- 工具：UTF-8 → UTF-16 ---------- */
-
-
-/* ---------- 7 个接口实现 ---------- */
-void GdiBackend::draw_text(litehtml::uint_ptr hdc,
-    const char* text,
-    litehtml::uint_ptr hFont,
-    litehtml::web_color color,
-    const litehtml::position& pos)
-{
-    if (!text || !hFont) return;
-    HDC dc = reinterpret_cast<HDC>(hdc);
-    GdiFont* f = reinterpret_cast<GdiFont*>(hFont);
-
-    HFONT old = (HFONT)SelectObject(dc, f->hFont);
-    SetTextColor(dc, to_cr(color));
-    SetBkMode(dc, TRANSPARENT);
-
-    std::wstring w = a2w(text);
-    ExtTextOutW(dc, pos.x, pos.y, ETO_CLIPPED, nullptr,
-        w.c_str(), (UINT)w.size(), nullptr);
-
-    SelectObject(dc, old);
-}
-
-void GdiBackend::draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url)
-{
-}
-
-void GdiBackend::draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color)
-{
-}
-
-void GdiBackend::draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient)
-{
-}
-
-void GdiBackend::draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient)
-{
-}
-
-void GdiBackend::draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient)
-{
-}
-
-void GdiBackend::draw_borders(litehtml::uint_ptr hdc,
-    const litehtml::borders& borders,
-    const litehtml::position& draw_pos,
-    bool root)
-{
-    HDC dc = reinterpret_cast<HDC>(hdc);
-    HPEN oldPen = (HPEN)SelectObject(dc, GetStockObject(DC_PEN));
-    HBRUSH oldBrush = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
-
-    auto drawEdge = [&](int x, int y, int w, int h, litehtml::border br) {
-        if (br.width <= 0) return;
-        SetDCPenColor(dc, to_cr(br.color));
-        RECT rc{ x, y, x + w, y + h };
-        Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
-        };
-
-    int l = draw_pos.left(), t = draw_pos.top();
-    int r = draw_pos.right(), b = draw_pos.bottom();
-
-    // 四条边
-    drawEdge(l, t, borders.left.width, b - t, borders.left);
-    drawEdge(r - borders.right.width, t, borders.right.width, b - t, borders.right);
-    drawEdge(l, t, r - l, borders.top.width, borders.top);
-    drawEdge(l, b - borders.bottom.width, r - l, borders.bottom.width, borders.bottom);
-
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-}
-
-void GdiBackend::draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker)
-{
-}
-
-litehtml::uint_ptr GdiBackend::create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm)
-{
-    return litehtml::uint_ptr();
-}
-
-
-
-void GdiBackend::delete_font(litehtml::uint_ptr h)
-{
-    if (h) {
-        GdiFont* f = reinterpret_cast<GdiFont*>(h);
-        DeleteObject(f->hFont);
-        delete f;
-    }
-}
-
-
-
-
-litehtml::pixel_t GdiBackend::text_width(const char* text, litehtml::uint_ptr hFont)
-{
-    if (!hFont || !text) return 0;
-    HFONT hF = reinterpret_cast<HFONT>(hFont);
-    HDC hdc = GetDC(nullptr);
-    HGDIOBJ old = SelectObject(hdc, hF);
-
-    SIZE sz{};
-    std::wstring wtxt = a2w(text);
-    GetTextExtentPoint32W(hdc, wtxt.c_str(), static_cast<int>(wtxt.size()), &sz);
-
-    SelectObject(hdc, old);
-    ReleaseDC(nullptr, hdc);
-    return sz.cx;
-}
-void GdiBackend::set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius)
-{
-}
-void GdiBackend::del_clip()
-{
-}
 
 
 void EPUBBook::load_all_fonts() {
@@ -5146,10 +5034,6 @@ void SimpleContainer::makeBackend()
 {
 
     switch (g_cfg.fontRenderer) {
-    case Renderer::GDI: {
-        m_backend = std::make_unique<GdiBackend>(0, 0);
-        break;
-    }
     case Renderer::D2D: {
         m_backend =  std::make_unique<D2DBackend>();
         break;
@@ -5235,46 +5119,6 @@ std::wstring url_decode(const std::wstring& in)
     return out;
 }
 
-
-
-//std::wstring EPUBBook::get_font_family_name(const std::vector<uint8_t>& data)
-//{
-//    stbtt_fontinfo info;
-//
-//    if (!stbtt_InitFont(&info, data.data(), 0))
-//        return L"";
-//
-//    struct Try {
-//        int platform, encoding, language, nameID;
-//    } tries[] = {
-//        // 先取 Typographic Family (ID 16)
-//        {STBTT_PLATFORM_ID_MICROSOFT, STBTT_MS_EID_UNICODE_BMP,
-//         STBTT_MS_LANG_ENGLISH, 16},
-//         // 再取 Family (ID 1)
-//         {STBTT_PLATFORM_ID_MICROSOFT, STBTT_MS_EID_UNICODE_BMP,
-//          STBTT_MS_LANG_ENGLISH, 1},
-//          // mac 平台兜底
-//          {STBTT_PLATFORM_ID_MAC, STBTT_MAC_EID_ROMAN, 0, 1},
-//    };
-//
-//    for (const auto& t : tries) {
-//        int len = 0;
-//        const char* p = (const char*)stbtt_GetFontNameString(
-//            &info, &len, t.platform, t.encoding, t.language, t.nameID);
-//        if (p && len > 0) {
-//            std::wstring name;
-//            name.reserve(len / 2);
-//            for (int i = 0; i < len; i += 2) {
-//                wchar_t ch = (wchar_t(p[i]) << 8) | wchar_t(p[i + 1]);
-//                if (ch == 0) break;          // 保险：遇到 NUL 终止
-//                name.push_back(ch);
-//            }
-//            if (!name.empty())
-//                return name;
-//        }
-//    }
-//    return L"";
-//}
 
 
 
@@ -5382,64 +5226,7 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
         }
     }
 }
-// 主函数 ------------------------------------------------------------
-//void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
-//{
-//    if (!book) return;
-//
-//    const std::regex rx_face(R"(@font-face\s*\{([^}]*)\})", std::regex::icase);
-//    const std::regex rx_fam(R"(font-family\s*:\s*['"]?([^;'"}]+)['"]?)", std::regex::icase);
-//    const std::regex rx_src(R"(src\s*:\s*url\s*\(\s*['"]?([^)'"]+)['"]?\s*\))", std::regex::icase);
-//    const std::regex rx_w(R"(font-weight\s*:\s*(\d+|bold))", std::regex::icase);
-//    const std::regex rx_i(R"(font-style\s*:\s*(italic|oblique))", std::regex::icase);
-//
-//    for (const auto& item : pkg.manifest)
-//    {
-//        if (item.media_type != L"text/css") continue;
-//
-//        // 1. 读 CSS
-//        std::wstring css_path = pkg.opf_dir + item.href;
-//        MemFile css_file = book->read_zip(book->m_zipIndex.find(css_path).c_str());
-//        if (css_file.data.empty()) continue;
-//
-//        std::string css(css_file.data.begin(), css_file.data.end());
-//
-//        // 2. 遍历 @font-face
-//        for (std::sregex_iterator it(css.begin(), css.end(), rx_face), end; it != end; ++it)
-//        {
-//            std::string block = it->str();
-//            std::smatch m;
-//
-//            std::wstring family;
-//            std::wstring url;
-//            int weight = 400;
-//            bool italic = false;
-//
-//            if (std::regex_search(block, m, rx_fam)) family = a2w(m[1].str().c_str());
-//            if (std::regex_search(block, m, rx_src)) url = a2w(m[1].str().c_str());
-//            if (std::regex_search(block, m, rx_w))   weight = (m[1] == "bold" || m[1] == "700") ? 700 : 400;
-//            if (std::regex_search(block, m, rx_i)) italic = true;
-//
-//            if (family.empty() || url.empty()) continue;
-//
-//            // 3. 读字体
-//            std::wstring font_path = g_book->m_zipIndex.find(url);
-//
-//
-//
-//            MemFile font_file = book->read_zip(book->m_zipIndex.find(font_path).c_str());
-//            if (font_file.data.empty()) continue;
-//  
-//  
-//            std::wstring real_name = get_font_family_name(font_file.data);
-//
-//   
-//                // 5. 填充索引
-//            FontKey key{ family, weight, italic , 0 };
-//            g_book->m_fontBin[key] = std::move(real_name);
-//        }
-//    }
-//}
+
 
 
 
@@ -5494,104 +5281,6 @@ EPUBBook::collect_epub_fonts()
     }
     return fonts;
 }
-//------------------------------------------
-// 3.1  GDI 实现
-//------------------------------------------
-void GdiBackend::load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts)
-{
-
-    for (auto& [path, blob] : fonts)
-    {
-        // 1. 写临时文件
-        wchar_t tmpPath[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, tmpPath);
-        wchar_t fileName[MAX_PATH]{};
-        wcscpy_s(fileName, path.c_str());
-        PathStripPathW(fileName);
-        PathCombineW(tmpPath, tmpPath, fileName);
-
-        HANDLE h = CreateFileW(tmpPath, GENERIC_WRITE, 0, nullptr,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        DWORD written = 0;
-        WriteFile(h, blob.data(), (DWORD)blob.size(), &written, nullptr);
-        CloseHandle(h);
-
-        // 2. 注册到进程
-        if (AddFontResourceExW(tmpPath, FR_PRIVATE, 0))
-        {
-            g_tempFontFiles.emplace_back(tmpPath);   // 退出时 RemoveFontResourceEx + DeleteFile
-            OutputDebugStringW((L"[GDI] 已加载字体: " + std::wstring(tmpPath) + L"\n").c_str());
-        }
-        else
-        {
-            DeleteFileW(tmpPath);
-        }
-    }
-    SendMessage(HWND_BROADCAST, WM_FONTCHANGE, 0, 0);   // 通知 GDI
-}
-
-//------------------------------------------
-// 3.2  DirectWrite 实现
-//------------------------------------------
-void D2DBackend::load_all_fonts(std::vector<std::pair<std::wstring, std::vector<uint8_t>>>& fonts)
-{
-    if (fonts.empty()) return;
-
-    // 先清理旧字体
-    //unload_fonts();
-
-    if (SUCCEEDED(CreateCompatibleFontCollection(
-        m_dwrite.Get(), fonts, &m_privateFonts, m_tempFontFiles)))
-    {
-        OutputDebugStringW(L"[DWrite] 字体已加载（兼容模式)\n");
-        // 打印已加载的全部字体名
-        UINT32 familyCount = 0;
-        familyCount = m_privateFonts->GetFontFamilyCount();
-
-        OutputDebugStringW(std::format(L"[DWrite] 总数： {}\n", familyCount).c_str());
-        for (UINT32 i = 0; i < familyCount; ++i)
-        {
-            Microsoft::WRL::ComPtr<IDWriteFontFamily> family;
-            if (SUCCEEDED(m_privateFonts->GetFontFamily(i, &family)))
-            {
-                Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
-                if (SUCCEEDED(family->GetFamilyNames(&names)))
-                {
-                    UINT32 idx = 0;
-                    BOOL exists = FALSE;
-                    names->FindLocaleName(L"en-us", &idx, &exists);
-                    if (!exists) idx = 0;   // 回退到第一个
-
-                    UINT32 len = 0;
-                    names->GetStringLength(idx, &len);
-                    std::wstring name(len + 1, L'\0');
-                    names->GetString(idx, name.data(), len + 1);
-
-                    OutputDebugStringW(std::format(L"[DWrite] 加载字体: {} ", name).c_str());
-                    OutputDebugStringW(L"\n");
-
-
-                }
-            }
-        }
-    }
-
-}
-
-void D2DBackend::unload_fonts()
-{
-    if (m_privateFonts) m_privateFonts.Reset();
-    // Win7/8 需要删除临时文件
-    for (const auto& p : m_tempFontFiles)
-    {
-        m_dwrite->UnregisterFontCollectionLoader(
-            static_cast<IDWriteFontCollectionLoader*>(nullptr));
-        DeleteFileW(p.c_str());
-    }
-    m_tempFontFiles.clear();
-}
-
 
 
 
@@ -5816,59 +5505,58 @@ void BuildSplashWithText()
 }
 AppBootstrap::AppBootstrap() {
     //make_tooltip_backend();
-    if (lunasvgRegisterCambriaMath()) { OutputDebugStringW(L"[lunasvg] 注册字体成功： Cambria Math"); }
+    if (lunasvgRegisterCambriaMath()) { OutputDebugStringW(L"[lunasvg] 注册字体成功： Cambria Math\n"); }
     if (g_cfg.enableJS) { enableJS(); }
-    if (!g_container) {
-        g_container = std::make_shared<SimpleContainer>();
-    }
+    if (!g_container) {g_container = std::make_shared<SimpleContainer>();}
     if (!g_book){ g_book = std::make_unique<EPUBBook>(); }
+
     if (!g_vd){g_vd = std::make_unique<VirtualDoc>();}
-    if(!g_recorder)
-    {
-        g_recorder = std::make_unique<ReadingRecorder>();
-    }
+
+    if(!g_recorder){ g_recorder = std::make_unique<ReadingRecorder>(); }
+
     if (!g_toc) 
     { 
         g_toc = std::make_unique<TocPanel>(); 
         g_toc->GetWindow(g_hwndToc);
+        // 绑定目录点击 -> 章节跳转
+        g_toc->SetOnNavigate([](const std::wstring& href) {
+            g_book->OnTreeSelChanged(href.c_str());
+            });
     }
+
     if (!g_canvas) { g_canvas = std::make_unique<D2DCanvas>(10, 10, g_hView); }
+
     if(!g_tooltip_canvas){ g_tooltip_canvas = std::make_unique<D2DCanvas>(10, 10, g_hTooltip); }
+
     if(!g_imageview_canvas){ g_imageview_canvas = std::make_unique<D2DCanvas>(10, 10, g_hImageview); }
+
     if(!g_scrollbar) 
     {
         g_scrollbar = std::make_unique<ScrollBarEx>();
         g_scrollbar->GetWindow(g_hViewScroll);
     }
-    // 绑定目录点击 -> 章节跳转
-    g_toc->SetOnNavigate([](const std::wstring& href) {
-        g_book->OnTreeSelChanged(href.c_str());
-        });
-    BuildSplashWithText();
+
+    if(!g_homepage_canvas)
+    {
+        g_homepage_canvas = std::make_unique<D2DCanvas>(10, 10, g_hHomepage);
+        fs::path html_path = exe_dir() / "res" / "homepage.html";
+        auto html = read_file(html_path);
+        if (html.empty()) { OutputDebugStringA("[AppBootstrap] html is null!"); return; }
+        g_homepage_canvas->m_doc = litehtml::document::createFromString({ html.c_str(), litehtml::encoding::utf_8 }, g_container.get());
+        if (!g_homepage_canvas->m_doc) { OutputDebugStringA("[AppBootstrap] g_homepage_canvas->m_doc is null!"); return; }
+    }
+
+    //BuildSplashWithText();
 }
 
 AppBootstrap::~AppBootstrap() {
 
 }
 
-// GdiCanvas
-litehtml::uint_ptr GdiCanvas::getContext()
-{
-    return reinterpret_cast<litehtml::uint_ptr>(m_memDC);
-}
 
-void GdiCanvas::BeginDraw() { /* GDI 无需配对调用，留空 */ }
-void GdiCanvas::EndDraw() { /* 留空或在此处 BitBlt 到窗口 DC */ }
 
 litehtml::uint_ptr D2DCanvas::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_rt.Get()); }
 
-
-
-
-void GdiCanvas::resize(int width, int height) {
-    m_w = width;
-    m_h = height;
-}
 
 
 void D2DCanvas::resize(int w, int h)
@@ -5903,35 +5591,6 @@ void D2DCanvas::resize(int w, int h)
     m_d2dFactory->CreateHwndRenderTarget(&rtp, &hrtp, &m_rt);
 }
 
-
-
-HBITMAP GdiBackend::create_dib_from_frame(const ImageFrame& frame)
-{
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = static_cast<LONG>(frame.width);
-    bmi.bmiHeader.biHeight = -static_cast<LONG>(frame.height); // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HBITMAP hBmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!hBmp) return nullptr;
-
-    // 把 RGBA → BGRA（GDI 需要 B,G,R,A）
-    const uint8_t* src = frame.rgba.data();
-    uint8_t* dst = static_cast<uint8_t*>(bits);
-    size_t len = frame.width * frame.height;
-    for (size_t i = 0; i < len; ++i)
-    {
-        dst[i * 4 + 0] = src[i * 4 + 2]; // B
-        dst[i * 4 + 1] = src[i * 4 + 1]; // G
-        dst[i * 4 + 2] = src[i * 4 + 0]; // R
-        dst[i * 4 + 3] = src[i * 4 + 3]; // A
-    }
-    return hBmp;
-}
 
 
 
@@ -6404,31 +6063,8 @@ EPUBBook::~EPUBBook() {
     //g_tempFontFiles.clear();
 }
 
-GdiBackend::GdiBackend(int width, int height) : m_w(width), m_h(height) {    // 创建内存 DC 与 32-bit 位图
-    //HDC screenDC = GetDC(nullptr);
-    //m_memDC = CreateCompatibleDC(screenDC);
-    //BITMAPINFO bi{};
-    //bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    //bi.bmiHeader.biWidth = w;
-    //bi.bmiHeader.biHeight = -h;   // top-down DIB
-    //bi.bmiHeader.biPlanes = 1;
-    //bi.bmiHeader.biBitCount = 32;
-    //bi.bmiHeader.biCompression = BI_RGB;
-    //m_bmp = CreateDIBSection(screenDC, &bi, DIB_RGB_COLORS, nullptr, nullptr, 0);
-    //m_old = (HBITMAP)SelectObject(m_memDC, m_bmp);
-    //ReleaseDC(nullptr, screenDC);
-}
 
-GdiBackend::~GdiBackend() {
-    if (!g_tempFontFiles.empty()) {
-        for (const auto& p : g_tempFontFiles)
-        {
-            RemoveFontResourceExW(p.c_str(), FR_PRIVATE, 0);
-            DeleteFileW(p.c_str());
-        }
-        g_tempFontFiles.clear();
-    }
-}
+
 
 SimpleContainer::SimpleContainer()
  {
@@ -6543,10 +6179,6 @@ void D2DBackend::clear()
     //m_layoutCache.clear();
     m_brushPool.clear();
 }
-
-void GdiCanvas::clear() {}
-
-void GdiBackend::clear() {}
 
 
 

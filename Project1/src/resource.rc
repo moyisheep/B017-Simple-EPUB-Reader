@@ -41,6 +41,12 @@ END
 
 IDR_MENU_MAIN MENU
 BEGIN
+    POPUP "&文件"
+    BEGIN
+        MENUITEM "打开(&O)...\tCtrl+O", ID_FILE_OPEN
+        MENUITEM SEPARATOR
+        MENUITEM "退出(&X)", ID_FILE_EXIT
+    END
     POPUP "&设置"
     BEGIN
         MENUITEM "&启用 EPUB CSS",                IDM_TOGGLE_CSS, CHECKED
