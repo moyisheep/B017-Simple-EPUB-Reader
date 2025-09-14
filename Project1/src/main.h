@@ -845,7 +845,8 @@ public:
     float get_height_by_id(int spine_id);
     void reload();
     bool exists(int spine_id);
-    void draw(int x, int y, int w, int h, float offsetY);
+    //void draw(int x, int y, int w, int h, float offsetY);
+    litehtml::document::ptr m_doc;
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -865,9 +866,6 @@ private:
     void workerLoop();
 
 
-
-
-
     float get_height();
     bool insert_chapter(int spine_id);
     bool insert_prev_chapter();
@@ -883,7 +881,7 @@ private:
     std::vector<OCFRef> m_spine;
     std::shared_ptr<EPUBBook> m_book;
     std::shared_ptr<SimpleContainer> m_container;
-    std::vector<DocCache> m_doc_cache;
+    //std::vector<DocCache> m_doc_cache;
 
     // 放在 VirtualDoc 内，仅这 5 个
     std::thread              m_worker;          // 后台线程

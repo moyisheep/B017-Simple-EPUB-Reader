@@ -1475,7 +1475,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_PAINT:
 
-        if (g_canvas  && g_states.isUpdate.exchange(false))
+        if (g_canvas  && g_canvas->m_doc && g_states.isUpdate.exchange(false))
         {
 
             RECT rc;
@@ -1484,9 +1484,9 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int y = -g_offsetY;
             int w = g_cfg.document_width;
             int h = rc.bottom - rc.top;
-            g_vd->draw(x, y, w, h, g_offsetY);
-            //litehtml::position clip(x, 0, w, h);
-            //g_canvas->present(x, y, &clip);
+            //g_vd->draw(x, y, w, h, g_offsetY);
+            litehtml::position clip(x, 0, w, h);
+            g_canvas->present(x, y, &clip);
 
         }
    
@@ -2063,17 +2063,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
    
  
         g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
-        g_states.needRelayout.store(true);
+      
         g_vd->load_book(g_book, g_container, g_cfg.document_width);
         g_vd->load_html(g_last_html_path);
 
         UpdateCache();          // 复用前面给出的 UpdateCache()
 
         // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
-        InvalidateRect(g_hView, nullptr, true);
- 
-        UpdateWindow(g_hView);
         PostMessage(hwnd, WM_SIZE, 0, 0);
+        //PostMessage(g_hView, WM_SIZE, 0, 0);
+        //InvalidateRect(g_hView, nullptr, true);
+ 
+        //UpdateWindow(g_hView);
+
         SetStatus(0, L"加载完成");
         return 0;
     }
@@ -2215,6 +2217,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
         break;
+    }
+    case WM_EPUB_CACHE_UPDATED:
+    {
+        g_canvas->m_doc = std::move(g_vd->m_doc);
+        UpdateCache();
+        InvalidateRect(g_hView, nullptr, false);
+        return 0;
     }
     case WM_DESTROY: {
         g_recorder->flush();
@@ -6615,63 +6624,91 @@ std::string VirtualDoc::get_head(std::string& html) {
     return result;
 }
 
-// ---------- 2. 切 <body> ----------
-std::vector<BodyBlock> VirtualDoc::get_body_blocks(std::string& html,
-    int spine_id,
-    size_t max_chunk_bytes) {
-    std::vector<BodyBlock> blocks;
-    GumboOutput* out = gumbo_parse(html.c_str());
-    GumboNode* body = nullptr;
+std::vector<BodyBlock>
+VirtualDoc::get_body_blocks(std::string& html,
+     int spine_id,
+     size_t max_chunk_bytes)
+{
+    // 1. 用 string_view 避免拷贝
+    std::string_view sv(html);
 
-    // 找到 body
-    if (out->root->type == GUMBO_NODE_ELEMENT) {
-        for (unsigned int i = 0; i < out->root->v.element.children.length; ++i) {
-            auto* node = static_cast<GumboNode*>(out->root->v.element.children.data[i]);
-            if (node->type == GUMBO_NODE_ELEMENT &&
-                node->v.element.tag == GUMBO_TAG_BODY) {
-                body = node;
-                break;
-            }
-        }
-    }
-    if (!body) { gumbo_destroy_output(&kGumboDefaultOptions, out); return blocks; }
+    // 2. 找到 <body ...> 和 </body>
+    static const std::string_view body_tag = "<body";
+    static const std::string_view body_end = "</body>";
 
-    // 收集 body 的直接子节点
-    std::vector<const GumboNode*> nodes;
-    auto& children = body->v.element.children;
-    for (unsigned int i = 0; i < children.length; ++i)
-        nodes.emplace_back(static_cast<GumboNode*>(children.data[i]));
+    size_t body_open = sv.find(body_tag);
+    if (body_open == std::string_view::npos) return {};
 
-    // 分块
-    std::ostringstream current;
-    size_t current_bytes = 0;
-    int block_id = 0;
+    body_open = sv.find('>', body_open);          // 跳过属性
+    if (body_open == std::string_view::npos) return {};
+    ++body_open;                                  // 指向 '>' 之后
 
-    auto flush = [&]() {
-        if (current.str().empty()) return;
-        BodyBlock bb;
-        bb.spine_id = spine_id;
-        bb.block_id = block_id++;
-        bb.html = current.str();
-        blocks.emplace_back(std::move(bb));
-        current.str("");
-        current.clear();
-        current_bytes = 0;
-        };
+    size_t body_close = sv.find(body_end, body_open);
+    if (body_close == std::string_view::npos) return {};
 
-    for (const GumboNode* n : nodes) {
-        std::ostringstream tmp;
-        serialize_node(n, tmp);
-        std::string frag = tmp.str();
-        if (current_bytes + frag.size() > max_chunk_bytes && !current.str().empty())
-            flush();
-        current << frag;
-        current_bytes += frag.size();
-    }
-    flush(); // 最后一块
-    gumbo_destroy_output(&kGumboDefaultOptions, out);
-    return blocks;
+    // 3. 直接取子串（零拷贝）
+    std::string_view body_content = sv.substr(body_open, body_close - body_open);
+
+    // 4. 构造唯一块
+    return { BodyBlock{0, 0, std::string(body_content)} };
 }
+// ---------- 2. 切 <body> ----------
+//std::vector<BodyBlock> VirtualDoc::get_body_blocks(std::string& html,
+//    int spine_id,
+//    size_t max_chunk_bytes) {
+//    std::vector<BodyBlock> blocks;
+//    GumboOutput* out = gumbo_parse(html.c_str());
+//    GumboNode* body = nullptr;
+//
+//    // 找到 body
+//    if (out->root->type == GUMBO_NODE_ELEMENT) {
+//        for (unsigned int i = 0; i < out->root->v.element.children.length; ++i) {
+//            auto* node = static_cast<GumboNode*>(out->root->v.element.children.data[i]);
+//            if (node->type == GUMBO_NODE_ELEMENT &&
+//                node->v.element.tag == GUMBO_TAG_BODY) {
+//                body = node;
+//                break;
+//            }
+//        }
+//    }
+//    if (!body) { gumbo_destroy_output(&kGumboDefaultOptions, out); return blocks; }
+//
+//    // 收集 body 的直接子节点
+//    std::vector<const GumboNode*> nodes;
+//    auto& children = body->v.element.children;
+//    for (unsigned int i = 0; i < children.length; ++i)
+//        nodes.emplace_back(static_cast<GumboNode*>(children.data[i]));
+//
+//    // 分块
+//    std::ostringstream current;
+//    size_t current_bytes = 0;
+//    int block_id = 0;
+//
+//    auto flush = [&]() {
+//        if (current.str().empty()) return;
+//        BodyBlock bb;
+//        bb.spine_id = spine_id;
+//        bb.block_id = block_id++;
+//        bb.html = current.str();
+//        blocks.emplace_back(std::move(bb));
+//        current.str("");
+//        current.clear();
+//        current_bytes = 0;
+//        };
+//
+//    for (const GumboNode* n : nodes) {
+//        std::ostringstream tmp;
+//        serialize_node(n, tmp);
+//        std::string frag = tmp.str();
+//        if (current_bytes + frag.size() > max_chunk_bytes && !current.str().empty())
+//            flush();
+//        current << frag;
+//        current_bytes += frag.size();
+//    }
+//    flush(); // 最后一块
+//    gumbo_destroy_output(&kGumboDefaultOptions, out);
+//    return blocks;
+//}
 
 void VirtualDoc::load_html(std::wstring& href)
 {
@@ -6684,8 +6721,8 @@ void VirtualDoc::load_html(std::wstring& href)
         return ;
     }
  
-    bool isOk = insert_chapter(id);
-    if (!isOk) { return; }
+    insert_chapter(id);
+  
     //load_by_id(id, true);
     //// 先渲染好加载的章节
     //{
@@ -6790,8 +6827,7 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
 
 
     y_offset += scrollY;
-    //OutputDebugStringA(std::to_string(y_offset).c_str());
-    //OutputDebugStringA("\n");
+
    
 
     if (y_offset < 0)
@@ -6800,7 +6836,7 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
         y_offset = 0;
 
     }
-    if (y_offset > static_cast<float>(m_height - client_h*3.0f))
+    if (y_offset > static_cast<float>(m_height - client_h))
     {
         insert_next_chapter();
         y_offset = std::min(static_cast<float>(m_height - client_h), y_offset); 
@@ -6810,7 +6846,8 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
         insert_next_chapter();
         y_offset = std::min(static_cast<float>(m_height - client_h), y_offset); 
     }
-
+    //OutputDebugStringA(std::to_string(y_offset).c_str());
+    //OutputDebugStringA("\n");
     //if (y_offset < 0)
     //{
     //    bool isOK = insert_prev_chapter();
@@ -6886,37 +6923,38 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
     return nullptr;
 }
 
-void VirtualDoc::draw(int x, int y, int w, int h, float offsetY)
-{
-    if (m_doc_cache.empty() || m_workerBusy) { return; }
-    auto startY = offsetY;
-    auto endY = offsetY + h;
-    float height = 0.0f;
-    float drawY = 0.0f;
-    float drawH = h;
-    g_canvas->BeginDraw();
-    for (int i=0; i<m_doc_cache.size(); i++ )
-    {
-        startY -= m_doc_cache[i].height;
-        endY -= m_doc_cache[i].height;
-        if (startY > 0) { continue; }
-        startY = startY +  m_doc_cache[i].height;
-        
-        drawH = std::min(m_doc_cache[i].height- startY, drawH);
-        g_canvas->m_doc = m_doc_cache[i].doc;
-        litehtml::position clip(x, drawY, w, drawH);
-        g_canvas->m_doc->draw(g_canvas->getContext(),   // 强制转换
-            x, -startY, &clip);
-        //g_canvas->present(x, -startY, &clip);
-
-        if (endY < 0) { break; }
-        drawY += drawH;
-        drawH = h - drawY;
-        startY = -drawY;
-    }
-    g_canvas->EndDraw();
-
-}
+//
+//void VirtualDoc::draw(int x, int y, int w, int h, float offsetY)
+//{
+//    if (m_doc_cache.empty() || m_workerBusy) { return; }
+//    auto startY = offsetY;
+//    auto endY = offsetY + h;
+//    float height = 0.0f;
+//    float drawY = 0.0f;
+//    float drawH = h;
+//    g_canvas->BeginDraw();
+//    for (int i=0; i<m_doc_cache.size(); i++ )
+//    {
+//        startY -= m_doc_cache[i].height;
+//        endY -= m_doc_cache[i].height;
+//        if (startY > 0) { continue; }
+//        startY = startY +  m_doc_cache[i].height;
+//        
+//        drawH = std::min(m_doc_cache[i].height- startY, drawH);
+//        g_canvas->m_doc = m_doc_cache[i].doc;
+//        litehtml::position clip(x, drawY, w, drawH);
+//        g_canvas->m_doc->draw(g_canvas->getContext(),   // 强制转换
+//            x, -startY, &clip);
+//        //g_canvas->present(x, -startY, &clip);
+//
+//        if (endY < 0) { break; }
+//        drawY += drawH;
+//        drawH = h - drawY;
+//        startY = -drawY;
+//    }
+//    g_canvas->EndDraw();
+//
+//}
 float VirtualDoc::get_height()
 {
     float height = 0.0f;
@@ -6997,28 +7035,49 @@ void VirtualDoc::workerLoop()
         }
 
         // 2. 组装 HTML
+        float height = 0.0f;
         HtmlBlock& target = task.insertAtFront ? m_blocks.front() : m_blocks.back();
+   
+        //std::vector<DocCache> temp_doc_cache;
+        //for (auto& b : target.body_blocks)
+        //{
+        //    std::string html = "<html>" + target.head + "<body>";
+        //    html += b.html;
+        //    html += "</body></html>";
+        //    auto doc = litehtml::document::createFromString(
+        //        { html.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+        //    doc->render(g_cfg.document_width);
+        //    height += doc->height();
+        //    temp_doc_cache.emplace_back(std::move(doc), doc->height(), task.chapterId);
+        //}
         std::string html = "<html>" + target.head + "<body>";
-        for (auto& b : target.body_blocks) html += b.html;
+        for (auto&hb : m_blocks)
+        {
+            for (auto& b : hb.body_blocks) html += b.html;
+        }
+     
         html += "</body></html>";
 
-        // 3. 解析排版
-        auto doc = litehtml::document::createFromString(
+        m_doc = litehtml::document::createFromString(
             { html.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-        doc->render(g_cfg.document_width);
-        float height = doc->height();
-
-        // 4. 同时更新 m_blocks 与 m_doc_cache
+        m_doc->render(g_cfg.document_width);
+        height = m_doc->height() - m_height;
+ 
         target.height = height;
-        m_height += height;
+        m_height = m_doc->height();
         g_offsetY += task.insertAtFront ? height : 0.0f;
-        if (task.insertAtFront)
-            m_doc_cache.emplace(m_doc_cache.begin(),
-                DocCache{ std::move(doc), height, task.chapterId });
-        else
-            m_doc_cache.emplace_back(std::move(doc), height, task.chapterId);
+ 
+        //if (task.insertAtFront)
+        //{
+        //    m_doc_cache.emplace(m_doc_cache.begin(),DocCache{std::move(doc), height, target.spine_id});
+        //}
+        //else
+        //{
+        //    m_doc_cache.emplace_back(DocCache{ std::move(doc), height, target.spine_id });
+        //}
 
         m_workerBusy.store(false, std::memory_order_relaxed);
+        PostMessage(g_hWnd, WM_EPUB_CACHE_UPDATED, 0, 0);
     }
 }
 //bool VirtualDoc::insert_prev_chapter()
@@ -7109,7 +7168,7 @@ void VirtualDoc::clear()
 {
     m_blocks.clear();
     g_offsetY = 0;
-    m_doc_cache.clear();
+    //m_doc_cache.clear();
     m_height = 0;
 }
 
@@ -7776,7 +7835,7 @@ void TocPanel::SetHighlight(ScrollPosition sp)
     if (target == m_nodes.size() || target == m_curTarget) return;
 
     m_curTarget = target;
-    for (auto& n : m_nodes) n.expanded = false;
+    //for (auto& n : m_nodes) n.expanded = false;
     // ---------- 2. 记录路径并展开 ----------
     // path 只需存需要展开的节点，最多树高
     std::vector<size_t> path;
