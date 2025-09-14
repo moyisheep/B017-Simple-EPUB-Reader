@@ -1499,7 +1499,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 void CALLBACK OnUpdateTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
 {
-    OutputDebugStringA("OnUpdateTimer\n");
+    //OutputDebugStringA("OnUpdateTimer\n");
     g_updateTimer = 0;
 }
 
@@ -6846,13 +6846,15 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
     scrollY = 0;
 
     ScrollPosition p = get_scroll_position();
-
-    m_current_id = p.spine_id;
-    //std::wstring href = get_href_by_id(m_current_id);
-    
-    SendMessage(g_hViewScroll, SBM_SETPOSITION,
-        p.spine_id, MAKELPARAM(p.height, p.offset));
-        //g_toc->SetHighlightByHref(href);
+    if (IsWindowVisible(g_hwndToc))
+    {
+        g_toc->SetHighlight(p);
+    }
+    if (IsWindowVisible(g_hViewScroll))
+    {
+        SendMessage(g_hViewScroll, SBM_SETPOSITION,
+            p.spine_id, MAKELPARAM(p.height, p.offset));
+    }
 
     return m_doc;
 }
@@ -7294,45 +7296,60 @@ void ReadingRecorder::updateRecord()
 
 void TocPanel::clear()
 {
-    nodes_.clear();
-    roots_.clear();
-    vis_.clear();      // 可见行索引
-    lineH_ = 20;
-    scrollY_ = 0;
-    totalH_ = 0;
-    selLine_ = -1;
+    m_nodes.clear();
+    m_roots.clear();
+    m_visible.clear();      // 可见行索引
+    m_lineH = 20;
+    m_scrollY = 0;
+    m_totalH = 0;
+    m_selLine = -1;
 
 }
 
 void TocPanel::GetWindow(HWND hwnd)
 {
     SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)this);
-    hwnd_ = hwnd;
+    m_hwnd = hwnd;
 }
 
 
-void TocPanel::Load(const std::vector<OCFNavPoint>& flat)
+void TocPanel::Load(const OCFPackage& pkg)
 {
     // 复用你原来的 BuildTree 算法
-    nodes_.clear();
-    roots_.clear();
-    nodes_.reserve(flat.size());
+    m_nodes.clear();
+    m_roots.clear();
+    m_nodes.reserve(pkg.toc.size());
     std::vector<size_t> st;
     st.push_back(SIZE_MAX);
-    for (const auto& np : flat)
+    for (const auto& np : pkg.toc)
     {
         while (st.size() > static_cast<size_t>(np.order + 1)) st.pop_back();
-        size_t idx = nodes_.size();
-        nodes_.push_back(Node{ &np });
+        size_t idx = m_nodes.size();
+        m_nodes.push_back(Node{ &np });
         if (st.back() != SIZE_MAX)
-            nodes_[st.back()].childIdx.push_back(idx);
+            m_nodes[st.back()].childIdx.push_back(idx);
         else
-            roots_.push_back(idx);
+            m_roots.push_back(idx);
         st.push_back(idx);
     }
-    for (auto& n : nodes_) n.expanded = false;
+    for (auto& n : m_nodes) 
+    { 
+        // 1. 分离锚点
+        std::wstring href = n.nav->href;
+        size_t pos = href.find(L'#');
+        std::wstring pure = pos == std::wstring::npos ? href : href.substr(0, pos);
+        for (int i = 0; i < pkg.spine.size(); i++)
+        {
+            if (pkg.spine[i].href == pure)
+            {
+                n.spineId = i;
+                break;
+            }
+        }
+        n.expanded = false; 
+    }
     RebuildVisible();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 /* ---------- 内部实现 ---------- */
@@ -7349,22 +7366,22 @@ LRESULT TocPanel::HandleMsg(UINT m, WPARAM w, LPARAM l)
     switch (m)
     {
     case WM_ERASEBKGND: return 1;
-    case WM_PAINT: { PAINTSTRUCT ps; OnPaint(BeginPaint(hwnd_, &ps)); EndPaint(hwnd_, &ps); } return 0;
+    case WM_PAINT: { PAINTSTRUCT ps; OnPaint(BeginPaint(m_hwnd, &ps)); EndPaint(m_hwnd, &ps); } return 0;
     case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
     case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(w)); return 0;
     case WM_VSCROLL:     OnVScroll(LOWORD(w), HIWORD(w)); return 0;
     case WM_KEYDOWN:
-        if (w == VK_UP && selLine_ > 0) { selLine_--; EnsureVisible(selLine_); InvalidateRect(hwnd_, nullptr, FALSE); }
-        if (w == VK_DOWN && selLine_ + 1 < (int)vis_.size()) { selLine_++; EnsureVisible(selLine_); InvalidateRect(hwnd_, nullptr, FALSE); }
+        if (w == VK_UP && m_selLine > 0) { m_selLine--; EnsureVisible(m_selLine); InvalidateRect(m_hwnd, nullptr, FALSE); }
+        if (w == VK_DOWN && m_selLine + 1 < (int)m_visible.size()) { m_selLine++; EnsureVisible(m_selLine); InvalidateRect(m_hwnd, nullptr, FALSE); }
         return 0;
     }
-    return DefWindowProc(hwnd_, m, w, l);
+    return DefWindowProc(m_hwnd, m, w, l);
 }
 
 TocPanel::TocPanel()
 {
     // 16 px 高，默认宽度，正常粗细，不斜体，不 underline，不 strikeout
-    hFont_ = CreateFontW(18, 0, 0, 0,
+    m_hFont = CreateFontW(18, 0, 0, 0,
         FW_NORMAL,
         FALSE, FALSE, FALSE,
         DEFAULT_CHARSET,
@@ -7381,80 +7398,80 @@ TocPanel::TocPanel()
 }
 TocPanel::~TocPanel()
 {
-    if (hFont_) DeleteObject(hFont_);
+    if (m_hFont) DeleteObject(m_hFont);
 }
 void TocPanel::RebuildVisible()
 {
-    vis_.clear();
+    m_visible.clear();
     std::function<void(size_t)> walk = [&](size_t idx) {
-        vis_.push_back(idx);
-        const Node& n = nodes_[idx];
+        m_visible.push_back(idx);
+        const Node& n = m_nodes[idx];
         if (n.expanded)
             for (size_t c : n.childIdx) walk(c);
         };
-    for (size_t r : roots_) walk(r);
+    for (size_t r : m_roots) walk(r);
 
     // 1. 总高度（像素）
-    totalH_ = (int)vis_.size() * lineH_ + 20;
+    m_totalH = (int)m_visible.size() * m_lineH + m_marginTop + m_marginBottom;
 
     // 2. 客户区高度（像素）
     RECT rc;
-    GetClientRect(hwnd_, &rc);
+    GetClientRect(m_hwnd, &rc);
     int clientH = rc.bottom - rc.top;
 
     // 3. 设置滚动条
     SCROLLINFO si{ sizeof(si) };
     si.fMask = SIF_RANGE | SIF_PAGE;
     si.nMin = 0;
-    si.nMax = totalH_;          // 像素
+    si.nMax = m_totalH;          // 像素
     si.nPage = clientH;          // 像素
-    SetScrollInfo(hwnd_, SB_VERT, &si, TRUE);
+    SetScrollInfo(m_hwnd, SB_VERT, &si, TRUE);
 }
 
 int TocPanel::HitTest(int y) const
 {
-    int line = (y + scrollY_) / lineH_;
-    return (line >= 0 && line < (int)vis_.size()) ? line : -1;
+    int line = (y + m_scrollY) / m_lineH;
+    return (line >= 0 && line < (int)m_visible.size()) ? line : -1;
 }
 
 void TocPanel::Toggle(int line)
 {
-    size_t idx = vis_[line];
-    nodes_[idx].expanded = !nodes_[idx].expanded;
+    size_t idx = m_visible[line];
+    m_nodes[idx].expanded = !m_nodes[idx].expanded;
     RebuildVisible();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 void TocPanel::EnsureVisible(int line)
 {
-    RECT rc; GetClientRect(hwnd_, &rc);
-    int y = line * lineH_;
-    if (y < scrollY_) scrollY_ = y;
-    else if (y + lineH_ > scrollY_ + rc.bottom) scrollY_ = y + lineH_ - rc.bottom;
-    SetScrollPos(hwnd_, SB_VERT, scrollY_, TRUE);
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    int y = line * m_lineH;
+    if (y < m_scrollY) m_scrollY = y;
+    else if (y + m_lineH > m_scrollY + rc.bottom) m_scrollY = y + m_lineH - rc.bottom;
+    SetScrollPos(m_hwnd, SB_VERT, m_scrollY, TRUE);
 }
 
 void TocPanel::OnPaint(HDC hdc)
 {
-    RECT rc; GetClientRect(hwnd_, &rc);
+    RECT rc; GetClientRect(m_hwnd, &rc);
     /* 1. 先把整块客户区刷成背景色，解决残影 */
     FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
-    int first = scrollY_ / lineH_;
-    int last = std::min(first + rc.bottom / lineH_ + 1, (long)vis_.size());
-    HFONT hOld = (HFONT)SelectObject(hdc, hFont_);
+    int first = m_scrollY / m_lineH;
+    int last = std::min(first + rc.bottom / m_lineH + 1, (long)m_visible.size());
+    HFONT hOld = (HFONT)SelectObject(hdc, m_hFont);
 
 
     for (int i = first; i < last; ++i)
     {
-        const Node& n = nodes_[vis_[i]];
+        const Node& n = m_nodes[m_visible[i]];
 
         // 行矩形：整体向下、向右各偏移 marginTop / marginLeft
-        RECT r{ marginLeft,
-                marginTop + i * lineH_ - scrollY_,
+        RECT r{ m_marginLeft,
+                m_marginTop + i * m_lineH - m_scrollY,
                 rc.right,
-                marginTop + (i + 1) * lineH_ - scrollY_ };
+                m_marginTop + (i + 1) * m_lineH - m_scrollY };
 
-        HBRUSH br = (i == selLine_)
+        HBRUSH br = (i == m_selLine)
             ? m_hightlightBrush
             : GetSysColorBrush(COLOR_WINDOW);
         FillRect(hdc, &r, br);
@@ -7465,12 +7482,12 @@ void TocPanel::OnPaint(HDC hdc)
             sign[0] = n.expanded ? L'−' : L'+';
 
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, GetSysColor(i == selLine_
+        SetTextColor(hdc, GetSysColor(i == m_selLine
             ? COLOR_HIGHLIGHTTEXT
             : COLOR_WINDOWTEXT));
 
         // 文字再缩进：左侧留白 + 层级缩进
-        int textLeft = marginLeft + indent;
+        int textLeft = m_marginLeft + indent;
         TextOutW(hdc, textLeft, r.top + 2, sign, lstrlenW(sign));
         textLeft += 12;
         TextOutW(hdc, textLeft, r.top + 2,
@@ -7485,34 +7502,70 @@ void TocPanel::OnLButtonDown(int x, int y)
     int line = HitTest(y);
     if (line < 0) return;
 
-    const Node& n = nodes_[vis_[line]];
+    const Node& n = m_nodes[m_visible[line]];
+    m_curTarget = m_visible[line];
     if (n.childIdx.empty())
     {
-        selLine_ = line;
-        InvalidateRect(hwnd_, nullptr, false);
-        UpdateWindow(hwnd_);
+        m_selLine = line;
+        InvalidateRect(m_hwnd, nullptr, false);
+        UpdateWindow(m_hwnd);
 
-        if (onNavigate_) onNavigate_(n.nav->href);
+        if (m_onNavigate) m_onNavigate(n.nav->href);
     }
     else
     {
-        selLine_ = line;
+        m_selLine = line;
 
         Toggle(line);
     }
 }
-
-void TocPanel::SetHighlightByHref(const std::wstring& href)
+float TocPanel::getAnchorOffsetY(const std::wstring& href)
 {
-    // ---------- 1. 找目标节点 ----------
-    size_t target = nodes_.size();
-    for (size_t i = 0; i < nodes_.size(); ++i)
-        if (nodes_[i].nav && nodes_[i].nav->href == href)
+    if (!g_canvas || !g_canvas->m_doc) { return 0; }
+    size_t pos = href.find(L'#');
+    std::wstring pure = pos == std::wstring::npos ? href : href.substr(0, pos);
+    std::wstring anchor = pos == std::wstring::npos ? L"" : href.substr(pos+1);
+ 
+    if (!anchor.empty()) {
+        std::string cssSel = "[id=\"" + w2a(anchor) + "\"]";
+        if (auto el = g_canvas->m_doc->root()->select_one(cssSel.c_str())) {
+            return el->get_placement().y;
+        }
+    }
+    return 0;
+}
+size_t TocPanel::getTargetNode(const ScrollPosition& sp)
+{
+    size_t target = m_nodes.size();
+    for (size_t i = 0; i < m_nodes.size(); ++i)
+    {
+        if (m_nodes[i].nav && m_nodes[i].spineId == sp.spine_id)
         {
             target = i; break;
         }
-    if (target == nodes_.size()) return;
+    }
+    for (size_t i = target+1; i < m_nodes.size(); ++i)
+    {
+        if (m_nodes[i].nav && m_nodes[i].spineId == m_nodes[target].spineId)
+        {
 
+            std::wstring href = m_nodes[i].nav->href;
+            int offsetY = getAnchorOffsetY(href);
+            if (g_offsetY < offsetY) { break; }
+            target = i;
+        }
+        else { break; }
+    }
+    return target;
+}
+void TocPanel::SetHighlight(ScrollPosition sp)
+{
+    // ---------- 1. 找目标节点 ----------
+    size_t target = getTargetNode(sp);
+    if (target == m_nodes.size() || target == m_curTarget) return;
+
+    m_curTarget = target;
+    for (auto& n : m_nodes) n.expanded = false;
     // ---------- 2. 记录路径并展开 ----------
     // path 只需存需要展开的节点，最多树高
     std::vector<size_t> path;
@@ -7520,9 +7573,9 @@ void TocPanel::SetHighlightByHref(const std::wstring& href)
         {
             if (idx == target) return true;          // 命中目标
 
-            Node& n = nodes_[idx];
-            if (!n.expanded)                       // 折叠就展开
-                n.expanded = true;
+            Node& n = m_nodes[idx];
+            //if (!n.expanded)                       // 折叠就展开
+            //    n.expanded = true;
 
             for (size_t c : n.childIdx)
                 if (dfs(c))
@@ -7533,49 +7586,49 @@ void TocPanel::SetHighlightByHref(const std::wstring& href)
             return false;
         };
 
-    for (size_t r : roots_)                    // 支持多根
+    for (size_t r : m_roots)                    // 支持多根
         if (dfs(r)) break;
-
+    for (size_t idx : path) m_nodes[idx].expanded = true;
     // 3. 重建可见表（O(N) 一次遍历）
     RebuildVisible();
 
-    // 4. 直接取行号（yLine 已在 RebuildVisible 中更新）
-    selLine_ = -1;
-    for (size_t i = 0; i < vis_.size(); ++i)
-        if (vis_[i] == target) { selLine_ = static_cast<int>(i); break; }
+    // 4. 直接取行号
+    m_selLine = -1;
+    for (size_t i = 0; i < m_visible.size(); ++i)
+        if (m_visible[i] == target) { m_selLine = static_cast<int>(i); break; }
 
-    if (selLine_ != -1)
-        EnsureVisible(selLine_);
+    if (m_selLine != -1)
+        EnsureVisible(m_selLine);
     // 5. 重绘
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 void TocPanel::OnVScroll(int code, int pos)
 {
     RECT rc;
-    GetClientRect(hwnd_, &rc);
+    GetClientRect(m_hwnd, &rc);
     int clientH = rc.bottom - rc.top;
-    int maxY = std::max(0, totalH_ - clientH);
+    int maxY = std::max(0, m_totalH - clientH);
 
     switch (code)
     {
-    case SB_LINEUP:      scrollY_ -= lineH_; break;
-    case SB_LINEDOWN:    scrollY_ += lineH_; break;
-    case SB_PAGEUP:      scrollY_ -= clientH; break;   // 按页滚 = 客户区高度
-    case SB_PAGEDOWN:    scrollY_ += clientH; break;
+    case SB_LINEUP:      m_scrollY -= m_lineH; break;
+    case SB_LINEDOWN:    m_scrollY += m_lineH; break;
+    case SB_PAGEUP:      m_scrollY -= clientH; break;   // 按页滚 = 客户区高度
+    case SB_PAGEDOWN:    m_scrollY += clientH; break;
     case SB_THUMBTRACK:
     case SB_THUMBPOSITION:
     {
         SCROLLINFO si{ sizeof(si), SIF_TRACKPOS };
-        if (GetScrollInfo(hwnd_, SB_VERT, &si))
-            scrollY_ = si.nTrackPos;      // 拿到 32 位真实位置
+        if (GetScrollInfo(m_hwnd, SB_VERT, &si))
+            m_scrollY = si.nTrackPos;      // 拿到 32 位真实位置
         break;
     }
     }
 
-    scrollY_ = std::max(0, std::min(scrollY_, maxY));
+    m_scrollY = std::max(0, std::min(m_scrollY, maxY));
 
-    SetScrollPos(hwnd_, SB_VERT, scrollY_, TRUE);
-    InvalidateRect(hwnd_, nullptr, TRUE);
+    SetScrollPos(m_hwnd, SB_VERT, m_scrollY, TRUE);
+    InvalidateRect(m_hwnd, nullptr, TRUE);
 }
 void TocPanel::OnMouseWheel(int delta)
 {
@@ -7591,7 +7644,7 @@ void EPUBBook::LoadToc()
 {
     if (g_toc)
     {
-        g_toc->Load(ocf_pkg_.toc);                 // 代替 EPUBBook::LoadToc()
+        g_toc->Load(ocf_pkg_);                 // 代替 EPUBBook::LoadToc()
     }
 }
 

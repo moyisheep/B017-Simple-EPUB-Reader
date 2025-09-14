@@ -516,13 +516,7 @@ struct OCFPackage {
     std::wstring toc_path;
 };
 
-struct TreeNode {
-    const OCFNavPoint* nav = nullptr;
-    std::vector<size_t> childIdx;
-    // 仅用于自绘面板
-    bool expanded = false;   // 当前是否展开
-    int  yLine = 0;      // 当前在面板中的行号（缓存）
-};
+
 
 class ZipIndexW {
 public:
@@ -879,7 +873,6 @@ private:
     std::shared_ptr<EPUBBook> m_book;
     std::shared_ptr<SimpleContainer> m_container;
 
-    int m_current_id = 0;
 
 
 };
@@ -952,16 +945,24 @@ class TocPanel
 {
 public:
     using OnNavigate = std::function<void(const std::wstring& href)>;
+    struct TreeNode {
+        const OCFNavPoint* nav = nullptr;
+        std::vector<size_t> childIdx;
+        // 仅用于自绘面板
+        bool expanded = false;   // 当前是否展开
+        int  spineId = -1;      //
+    };
 
     TocPanel();
     ~TocPanel();
     void clear();
     void GetWindow(HWND hwnd);
 
-    void Load(const std::vector<OCFNavPoint>& flatToc);
-    void SetOnNavigate(OnNavigate cb) { onNavigate_ = std::move(cb); }
+    void Load(const OCFPackage& pkg);
+    void SetOnNavigate(OnNavigate cb) { m_onNavigate = std::move(cb); }
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-    void SetHighlightByHref(const std::wstring& href);
+    size_t getTargetNode(const ScrollPosition& sp);
+    void SetHighlight(ScrollPosition sp);
 private:
     struct Node : TreeNode{};
 
@@ -981,20 +982,25 @@ private:
     void OnMouseWheel(int delta);
     void OnLButtonDown(int x, int y);
 
+    float getAnchorOffsetY(const std::wstring& href);
+
     // 数据
-    std::vector<Node>          nodes_;
-    std::vector<size_t>        roots_;
-    std::vector<size_t>        vis_;      // 可见行索引
-    int                        lineH_ = 20;
-    int                        scrollY_ = 0;
-    int                        totalH_ = 0;
-    int                        selLine_ = -1;
-    OnNavigate                 onNavigate_;
-    HFONT hFont_ = nullptr;
-    HWND hwnd_ = nullptr;
-    int marginTop = 4;   // 顶部留白
-    int marginLeft = 10;  // 左侧留白
+    std::vector<Node>          m_nodes;
+    std::vector<size_t>        m_roots;
+    std::vector<size_t>        m_visible;      // 可见行索引
+    int                        m_lineH = 20;
+    int                        m_scrollY = 0;
+    int                        m_totalH = 0;
+    int                        m_selLine = -1;
+    OnNavigate                 m_onNavigate;
+    
+    HFONT m_hFont = nullptr;
+    HWND m_hwnd = nullptr;
+    int m_marginTop = 4;   // 顶部留白
+    int m_marginLeft = 10;  // 左侧留白
+    int m_marginBottom = 10;
     HBRUSH   m_hightlightBrush;
+    int m_curTarget = 0;
 };
 
 //  file system
