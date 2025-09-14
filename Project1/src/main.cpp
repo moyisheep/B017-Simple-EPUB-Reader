@@ -22,8 +22,8 @@ Gdiplus::Image* g_pSplashImg = nullptr;
 std::future<void> g_parse_task;
 enum class StatusBar { INFO = 0, FONT = 1 };
 std::unique_ptr<VirtualDoc> g_vd;
-static int g_scrollY = 0;   // 当前像素偏移
-static int g_offsetY = 0;
+static float g_scrollY = 0.0f;   // 当前像素偏移
+static float g_offsetY = 0.0f;
 static int g_maxScroll = 0;   // 总高度 - 客户区高度
 static float g_line_height = 1.0f;
 std::wstring g_currentHtmlDir = L"";
@@ -1273,7 +1273,7 @@ void CALLBACK Tick(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
 {
     // 直接在工作线程/回调里刷新
     if (g_recorder && !g_vd->m_blocks.empty()) { g_recorder->updateRecord(); }
-    OutputDebugStringA("定时器触发\n");
+   // OutputDebugStringA("定时器触发\n");
     g_tickTimer = 0;
 }
 LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1454,18 +1454,20 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
         litehtml::position::vector redraw_box;
-        g_canvas->m_doc->on_mouse_leave(redraw_box);
-
-        if (!redraw_box.empty())
+        if (g_canvas && g_canvas->m_doc)
         {
-            for (auto box : redraw_box)
+            g_canvas->m_doc->on_mouse_leave(redraw_box);
+
+            if (!redraw_box.empty())
             {
-                RECT r(box.left(), box.top(), box.right(), box.bottom());
-                InvalidateRect(hwnd, &r, false);
+                for (auto box : redraw_box)
+                {
+                    RECT r(box.left(), box.top(), box.right(), box.bottom());
+                    InvalidateRect(hwnd, &r, false);
+                }
+
             }
-
         }
-
         UpdateCache();
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -1473,7 +1475,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_PAINT:
 
-        if (g_canvas && g_canvas->m_doc  && g_states.isUpdate.exchange(false))
+        if (g_canvas  && g_states.isUpdate.exchange(false))
         {
 
             RECT rc;
@@ -1482,8 +1484,9 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int y = -g_offsetY;
             int w = g_cfg.document_width;
             int h = rc.bottom - rc.top;
-            litehtml::position clip(x, 0, w, h);
-            g_canvas->present(x, y, &clip);
+            g_vd->draw(x, y, w, h, g_offsetY);
+            //litehtml::position clip(x, 0, w, h);
+            //g_canvas->present(x, y, &clip);
 
         }
    
@@ -1520,8 +1523,8 @@ void UpdateCache()
     if (w <= 0 || h <= 0) return;
     
     //request_doc_async(h, g_scrollY, g_offsetY);
-    auto doc = g_vd->get_doc(h, g_scrollY, g_offsetY);
-    g_canvas->m_doc = doc;
+    g_vd->get_doc(h, g_scrollY, g_offsetY);
+ 
 
     g_states.isUpdate.store(true);
 
@@ -6448,10 +6451,13 @@ void FontCache::clear() {
 
 VirtualDoc::VirtualDoc()
 {
+    m_worker = std::thread(&VirtualDoc::workerLoop, this);
 }
 
 VirtualDoc::~VirtualDoc()
 {
+
+    m_worker.detach();   // 或 join，取决于生命周期
     clear();
 
 }
@@ -6678,25 +6684,27 @@ void VirtualDoc::load_html(std::wstring& href)
         return ;
     }
  
-    load_by_id(id, true);
-    // 先渲染好加载的章节
-    {
-        std::string text;
-        text += "<html>" + m_blocks.back().head + "<body>";
-        for (auto hb : m_blocks)
-        {
-            for (auto b : hb.body_blocks)
-            {
-                text += b.html;
-            }
-        }
+    bool isOk = insert_chapter(id);
+    if (!isOk) { return; }
+    //load_by_id(id, true);
+    //// 先渲染好加载的章节
+    //{
+    //    std::string text;
+    //    text += "<html>" + m_blocks.back().head + "<body>";
+    //    for (auto hb : m_blocks)
+    //    {
+    //        for (auto b : hb.body_blocks)
+    //        {
+    //            text += b.html;
+    //        }
+    //    }
 
-        text += "</body></html>";
-        m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-        m_doc->render(g_cfg.document_width);
-        m_blocks.back().height = m_doc->height();
-        m_height = m_doc->height();
-    }
+    //    text += "</body></html>";
+    //    m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+    //    m_doc->render(g_cfg.document_width);
+    //    m_blocks.back().height = m_doc->height();
+    //    m_height = m_doc->height();
+    //}
 
     //id -= 1;
     //load_by_id(m_top_block, id, false);
@@ -6776,7 +6784,7 @@ ScrollPosition VirtualDoc::get_scroll_position()
     return pos;
 }
 
-litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_offset)
+litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float& y_offset)
 {
     if (!m_book || !m_container) { return nullptr; }
 
@@ -6785,64 +6793,83 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
     //OutputDebugStringA(std::to_string(y_offset).c_str());
     //OutputDebugStringA("\n");
    
+
     if (y_offset < 0)
     {
-        bool isOK = insert_prev_chapter();
-        if (isOK) { g_states.needRelayout.store(true); }
-        else  { y_offset = 0; }
-    
+        insert_prev_chapter();
+        y_offset = 0;
+
     }
-    if (y_offset > static_cast<int>(m_height - client_h))
+    if (y_offset > static_cast<float>(m_height - client_h*3.0f))
     {
-        bool isOK = insert_next_chapter();
-        if (isOK) { g_states.needRelayout.store(true); }
-        else { y_offset = std::min(static_cast<int>(m_height - client_h), y_offset); }
+        insert_next_chapter();
+        y_offset = std::min(static_cast<float>(m_height - client_h), y_offset); 
     }
-    if(m_height < client_h * 3)
+    if (m_height < client_h * 3)
     {
-        bool isOK = insert_next_chapter();
-        if (isOK) { g_states.needRelayout.store(true); }
-        else { y_offset = std::min(static_cast<int>(m_height - client_h), y_offset); }
+        insert_next_chapter();
+        y_offset = std::min(static_cast<float>(m_height - client_h), y_offset); 
     }
 
-    if (g_states.needRelayout.exchange(false)) 
-    {
+    //if (y_offset < 0)
+    //{
+    //    bool isOK = insert_prev_chapter();
+    //    if (isOK) { g_states.needRelayout.store(true); }
+    //    else  { y_offset = 0; }
+    //
+    //}
+    //if (y_offset > static_cast<int>(m_height - client_h))
+    //{
+    //    bool isOK = insert_next_chapter();
+    //    if (isOK) { g_states.needRelayout.store(true); }
+    //    else { y_offset = std::min(static_cast<int>(m_height - client_h), y_offset); }
+    //}
+    //if(m_height < client_h * 3)
+    //{
+    //    bool isOK = insert_next_chapter();
+    //    if (isOK) { g_states.needRelayout.store(true); }
+    //    else { y_offset = std::min(static_cast<int>(m_height - client_h), y_offset); }
+    //}
 
-        std::string text;
-        text += "<html>" + m_blocks.back().head + "<body>";
-        for (auto hb: m_blocks)
-        {
-            for (auto b: hb.body_blocks)
-            {
-                text += b.html;
-            }
-        }
-
-        text += "</body></html>";
-        m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-
-        m_doc->render(g_cfg.document_width);
-        m_height = get_height();
-        if (m_blocks.size() == 1) { m_blocks.back().height = m_doc->height(); };
-        if (m_blocks.size() > 1)
-        {
-            if (m_blocks.front().height == 0.0f)
-            {
-                float height = std::max(m_doc->height() - m_height, 0.0f);
-                y_offset += height;
-                m_blocks.front().height = height;
-            }
-            else if (m_blocks.back().height == 0.0f)
-            {
-                float height = std::max(m_doc->height() - m_height, 0.0f);
-                
-                m_blocks.back().height = height;
-            }
-        }
+    //if (g_states.needRelayout.exchange(false)) 
+    //{
 
 
-        
-    }
+    //    std::string text;
+    //    text += "<html>" + m_blocks.back().head + "<body>";
+    //    for (auto hb: m_blocks)
+    //    {
+    //        for (auto b: hb.body_blocks)
+    //        {
+    //            text += b.html;
+    //        }
+    //    }
+
+    //    text += "</body></html>";
+    //    m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+
+    //    m_doc->render(g_cfg.document_width);
+    //    m_height = get_height();
+    //    if (m_blocks.size() == 1) { m_blocks.back().height = m_doc->height(); };
+    //    if (m_blocks.size() > 1)
+    //    {
+    //        if (m_blocks.front().height == 0.0f)
+    //        {
+    //            float height = std::max(m_doc->height() - m_height, 0.0f);
+    //            y_offset += height;
+    //            m_blocks.front().height = height;
+    //        }
+    //        else if (m_blocks.back().height == 0.0f)
+    //        {
+    //            float height = std::max(m_doc->height() - m_height, 0.0f);
+    //            
+    //            m_blocks.back().height = height;
+    //        }
+    //    }
+
+
+    //    
+    //}
     scrollY = 0;
 
     ScrollPosition p = get_scroll_position();
@@ -6856,10 +6883,40 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, int& scrollY, int& y_o
             p.spine_id, MAKELPARAM(p.height, p.offset));
     }
 
-    return m_doc;
+    return nullptr;
 }
 
+void VirtualDoc::draw(int x, int y, int w, int h, float offsetY)
+{
+    if (m_doc_cache.empty() || m_workerBusy) { return; }
+    auto startY = offsetY;
+    auto endY = offsetY + h;
+    float height = 0.0f;
+    float drawY = 0.0f;
+    float drawH = h;
+    g_canvas->BeginDraw();
+    for (int i=0; i<m_doc_cache.size(); i++ )
+    {
+        startY -= m_doc_cache[i].height;
+        endY -= m_doc_cache[i].height;
+        if (startY > 0) { continue; }
+        startY = startY +  m_doc_cache[i].height;
+        
+        drawH = std::min(m_doc_cache[i].height- startY, drawH);
+        g_canvas->m_doc = m_doc_cache[i].doc;
+        litehtml::position clip(x, drawY, w, drawH);
+        g_canvas->m_doc->draw(g_canvas->getContext(),   // 强制转换
+            x, -startY, &clip);
+        //g_canvas->present(x, -startY, &clip);
 
+        if (endY < 0) { break; }
+        drawY += drawH;
+        drawH = h - drawY;
+        startY = -drawY;
+    }
+    g_canvas->EndDraw();
+
+}
 float VirtualDoc::get_height()
 {
     float height = 0.0f;
@@ -6870,24 +6927,177 @@ float VirtualDoc::get_height()
     }
     return height;
 }
+bool VirtualDoc::insert_chapter(int spine_id)
+{
+    int id = spine_id;
+    if (id < 0 || id >= static_cast<int>(m_spine.size()) || exists(id)) return false;
+
+    if (m_workerBusy.load(std::memory_order_relaxed)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(m_taskMtx);
+        if (!m_taskQueue.empty()) return false;
+        m_taskQueue.push({ id, true });
+    }
+    m_taskCv.notify_one();
+    return false;
+}
+
 bool VirtualDoc::insert_prev_chapter()
 {
-    ScrollPosition p = get_scroll_position();
-    auto id = p.spine_id - 1;
-    if (exists(id)) { return true; }
-    return load_by_id(id, false);
+    int id = get_scroll_position().spine_id - 1;
+    if (id < 0 || exists(id)) return false;
+
+    if (m_workerBusy.load(std::memory_order_relaxed)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(m_taskMtx);
+        if (!m_taskQueue.empty()) return false;
+        m_taskQueue.push({ id, true });
+    }
+    m_taskCv.notify_one();
+    return false;
 }
+
 bool VirtualDoc::insert_next_chapter()
 {
-    ScrollPosition p = get_scroll_position();
-    auto id = p.spine_id + 1;
-    if (exists(id)) { return true; }
+    int id = get_scroll_position().spine_id + 1;
+    if (id >= static_cast<int>(m_spine.size()) || exists(id)) return false;
 
-    return load_by_id(id, true);
+    if (m_workerBusy.load(std::memory_order_relaxed)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(m_taskMtx);
+        if (!m_taskQueue.empty()) return false;
+        m_taskQueue.push({ id, false });
+    }
+    m_taskCv.notify_one();
+    return false;
 }
+void VirtualDoc::workerLoop()
+{
+    while (true)
+    {
+        Task task;
+        {
+            std::unique_lock<std::mutex> lk(m_taskMtx);
+            m_taskCv.wait(lk, [this] { return !m_taskQueue.empty(); });
+
+            task = m_taskQueue.front();
+            m_taskQueue.pop();
+        }
+
+        m_workerBusy.store(true, std::memory_order_relaxed);
+        OutputDebugStringA("[VirtualDod thread] 开始更新\n");
+        // 1. 耗时 IO
+        if (!load_by_id(task.chapterId, !task.insertAtFront))
+        {
+            m_workerBusy.store(false, std::memory_order_relaxed);
+            continue;
+        }
+
+        // 2. 组装 HTML
+        HtmlBlock& target = task.insertAtFront ? m_blocks.front() : m_blocks.back();
+        std::string html = "<html>" + target.head + "<body>";
+        for (auto& b : target.body_blocks) html += b.html;
+        html += "</body></html>";
+
+        // 3. 解析排版
+        auto doc = litehtml::document::createFromString(
+            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+        doc->render(g_cfg.document_width);
+        float height = doc->height();
+
+        // 4. 同时更新 m_blocks 与 m_doc_cache
+        target.height = height;
+        m_height += height;
+        g_offsetY += task.insertAtFront ? height : 0.0f;
+        if (task.insertAtFront)
+            m_doc_cache.emplace(m_doc_cache.begin(),
+                DocCache{ std::move(doc), height, task.chapterId });
+        else
+            m_doc_cache.emplace_back(std::move(doc), height, task.chapterId);
+
+        m_workerBusy.store(false, std::memory_order_relaxed);
+    }
+}
+//bool VirtualDoc::insert_prev_chapter()
+//{
+//    ScrollPosition p = get_scroll_position();
+//    auto id = p.spine_id - 1;
+//    if (id < 0 || exists(id)) return true;   // 1. 边界
+//    if (!load_by_id(id, false)) return false;
+//
+//    if (m_blocks.empty()) return false;      // 2. 空检查
+//
+//    std::string text = "<html>" + m_blocks.front().head + "<body>";
+//    for (const auto& b : m_blocks.front().body_blocks)
+//        text += b.html;
+//    text += "</body></html>";
+//
+//    auto doc = litehtml::document::createFromString(
+//        { text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+//    doc->render(g_cfg.document_width);
+//    float height = doc->height();
+//
+//    m_blocks.front().height = height;
+//
+//    // 3. 先构造临时对象，再移动，避免异常时破坏状态
+//    m_doc_cache.emplace(m_doc_cache.begin(),
+//        DocCache{ std::move(doc), height, id });
+//    return true;
+//}
+//bool VirtualDoc::insert_next_chapter()
+//{
+//    ScrollPosition p = get_scroll_position();
+//    auto id = p.spine_id + 1;
+//
+//    // 1. 正确边界：是否越界
+//    if (id >= m_spine.size() || exists(id))
+//        return true;
+//
+//    if (!load_by_id(id, true))
+//        return false;
+//
+//    if (m_blocks.empty())
+//        return false;
+//
+//    // 2. 构造文档字符串
+//    std::string text = "<html>" + m_blocks.back().head + "<body>";
+//    for (const auto& b : m_blocks.back().body_blocks)
+//        text += b.html;
+//    text += "</body></html>";
+//
+//    // 3. 在更新任何成员之前，先完成可能抛异常的操作
+//    auto doc = litehtml::document::createFromString(
+//        { text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+//    doc->render(g_cfg.document_width);
+//    float height = doc->height();
+//
+//    // 4. 现在再写回
+//    m_blocks.back().height = height;
+//    m_doc_cache.emplace_back(std::move(doc), height, id);
+//    return true;
+//}
+//bool VirtualDoc::insert_prev_chapter()
+//{
+//    ScrollPosition p = get_scroll_position();
+//    auto id = p.spine_id - 1;
+//    if (exists(id)) { return true; }
+//    return load_by_id(id, false);
+//}
+//bool VirtualDoc::insert_next_chapter()
+//{
+//    ScrollPosition p = get_scroll_position();
+//    auto id = p.spine_id + 1;
+//    if (exists(id)) { return true; }
+//
+//    return load_by_id(id, true);
+//}
 
 bool VirtualDoc::exists(int spine_id)
 {
+    if (m_blocks.empty()) return false;
     for (auto b: m_blocks)
     {
         if (b.spine_id == spine_id) { return true; }
@@ -6899,7 +7109,8 @@ void VirtualDoc::clear()
 {
     m_blocks.clear();
     g_offsetY = 0;
-    m_doc.reset();
+    m_doc_cache.clear();
+    m_height = 0;
 }
 
 

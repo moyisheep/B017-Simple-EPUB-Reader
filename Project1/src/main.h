@@ -837,7 +837,7 @@ public:
     ~VirtualDoc();
     void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
 
-    litehtml::document::ptr get_doc(int client_h, int& scrollY, int& y_offset);
+    litehtml::document::ptr get_doc(int client_h, float& scrollY, float& y_offset);
     void load_html(std::wstring& href);
     void clear();
     ScrollPosition get_scroll_position();
@@ -845,6 +845,7 @@ public:
     float get_height_by_id(int spine_id);
     void reload();
     bool exists(int spine_id);
+    void draw(int x, int y, int w, int h, float offsetY);
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -861,17 +862,40 @@ private:
 
     bool insert_next_chapter();
 
+    void workerLoop();
+
+
+
+
+
     float get_height();
+    bool insert_chapter(int spine_id);
     bool insert_prev_chapter();
 
 
     bool load_by_id(int spine_id, bool isPushBack);
-
-
-    litehtml::document::ptr m_doc;
+    struct DocCache
+    {
+        litehtml::document::ptr doc;
+        float height;
+        int spine_id;
+    };
     std::vector<OCFRef> m_spine;
     std::shared_ptr<EPUBBook> m_book;
     std::shared_ptr<SimpleContainer> m_container;
+    std::vector<DocCache> m_doc_cache;
+
+    // 放在 VirtualDoc 内，仅这 5 个
+    std::thread              m_worker;          // 后台线程
+    std::mutex               m_taskMtx;         // 任务队列锁
+    std::condition_variable  m_taskCv;          // 任务通知
+    struct Task {
+        int  chapterId;
+        bool insertAtFront;   // true=prev, false=next
+    };
+    std::queue<Task>         m_taskQueue;       // 待处理任务
+    std::atomic<bool>        m_workerBusy{ false }; // 是否正在干活
+
 
 
 
