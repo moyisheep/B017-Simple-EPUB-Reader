@@ -421,7 +421,7 @@ public:
     /* 返回一个 IRenderBackend，用于 litehtml 绘制 */
 
     /* 把画布内容贴到窗口（WM_PAINT 用）*/
-    virtual void present(int x, int y, litehtml::position* clip) = 0;
+    virtual void present(float x, float y, litehtml::position* clip) = 0;
 
     /* 尺寸 */
     virtual int  width()  const = 0;
@@ -448,7 +448,7 @@ public:
 
     std::vector<RECT> get_selection_rows() const;
 
-    void present(int x, int y, litehtml::position* clip) override;
+    void present(float x, float y, litehtml::position* clip) override;
     int width()  const override { return m_w; }
     int height() const override { return m_h; }
     litehtml::uint_ptr getContext() override;
@@ -808,7 +808,7 @@ private:
 struct ScrollPosition
 {
     int spine_id = 0;
-    int offset = 0;
+    float offset = 0.0f;
     float height = 0.0f;
 };
 
@@ -841,12 +841,16 @@ public:
     void load_html(std::wstring& href);
     void clear();
     ScrollPosition get_scroll_position();
+    void set_scroll_position(ScrollPosition sp);
     std::vector<HtmlBlock> m_blocks;
     float get_height_by_id(int spine_id);
     void reload();
     bool exists(int spine_id);
     //void draw(int x, int y, int w, int h, float offsetY);
     litehtml::document::ptr m_doc;
+    std::atomic<bool>        m_isReloading{ false }; 
+    float m_percent = 0.0;
+    float  m_height = 0.0f;
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -858,7 +862,7 @@ private:
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
 
-    float  m_height = 0.0f;
+
 
 
     bool insert_next_chapter();
@@ -893,8 +897,6 @@ private:
     };
     std::queue<Task>         m_taskQueue;       // 待处理任务
     std::atomic<bool>        m_workerBusy{ false }; // 是否正在干活
-
-
 
 
 };
@@ -948,10 +950,13 @@ public:
     void flushTimeRecord();
     void updateRecord();
     int64_t getTotalTime();
+    int64_t getBookTotalTime() const;
 
     BookRecord m_book_record;
 private:
     void initDB();
+
+
 
     sqlite3* m_dbBook = nullptr;
     sqlite3* m_dbTime = nullptr;
@@ -1140,7 +1145,7 @@ public:
     // API
     void SetSpineCount(int n);
 
-    void SetPosition(int spineId, int totalHeightPx, int offsetPx);
+    void SetPosition(int spineId, float totalHeightPx, float offsetPx);
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 private:
 
@@ -1353,4 +1358,18 @@ private:
     std::mutex                                   mtx_;
 
     FT_Library ft_ = nullptr;
+};
+
+class BusyGuard {
+public:
+    explicit BusyGuard(std::atomic<bool>& flag) : m_flag(flag) {
+        m_flag.store(true, std::memory_order_relaxed);
+    }
+    ~BusyGuard() {
+        m_flag.store(false, std::memory_order_relaxed);
+    }
+    BusyGuard(const BusyGuard&) = delete;
+    BusyGuard& operator=(const BusyGuard&) = delete;
+private:
+    std::atomic<bool>& m_flag;
 };
