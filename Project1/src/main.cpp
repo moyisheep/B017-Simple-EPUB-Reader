@@ -1602,7 +1602,7 @@ std::wstring OpenEpubWithDialog(HWND hwnd)
     if (GetOpenFileName(&ofn))
     {
         PostMessage(hwnd, WM_EPUB_OPEN, 0, (LPARAM)DupPath(szFile));
-        OutputDebugStringW(szFile);
+        //OutputDebugStringW(szFile);
     }
     return L"";
 }
@@ -2481,13 +2481,13 @@ void register_main_class()
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 {
+
     // 在 WinMain 最开头
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     // ---------- 1. 解析命令行 ----------
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    for (int i = 0; i < argc; ++i)
-        OutputDebugStringW((std::to_wstring(i) + L"=" + argv[i] + L"\n").c_str());
+
     wchar_t* firstFile = nullptr;
     if (argc > 1)
         firstFile = DupPath(argv[1]);   // 堆拷贝
@@ -2513,6 +2513,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
         CoTaskMemFree(firstFile);   // 无论发没发成功都要释放
         return 0;
     }
+ 
     ULONG_PTR gdiplusToken{};
     GdiplusStartupInput gdiplusStartupInput{};
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
@@ -2525,18 +2526,19 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 
     if (!hMenu) {
         OutputDebugStringW(L"LoadMenu 失败\n");
-        //MessageBox(nullptr, L"LoadMenu 失败", L"Error", MB_ICONERROR);
+        MessageBox(nullptr, L"LoadMenu 失败", L"Error", MB_ICONERROR);
         return 0;
     }
 
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
         SetProcessDPIAware();
 
+
     g_hWnd = CreateWindowW(MAIN_CLASS, a2w(g_cfg.appName).c_str(),
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, 0, 800, 600,
         nullptr, nullptr, h, nullptr);
-
+ 
 
 
 
@@ -2575,7 +2577,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
   
     // 新增：复制文本（Ctrl + C）
     gAccel.add(ID_EDIT_COPY, FCONTROL | FVIRTKEY, 'C');
-
 
 
     // 加载图标（可缩放，支持 32/48/256 像素）
@@ -2619,7 +2620,6 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     //EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
     EnableClearType();
   
-
 
     // ====================
     ShowWindow(g_hWnd, n);
@@ -6006,7 +6006,7 @@ void SimpleContainer::clear()
     m_d2dBitmapCache.clear();
     m_clipStack.clear();
     m_fontCache.clear();
-    //m_layoutCache.clear();
+    m_layoutCache.clear();
     m_brushPool.clear();
 
 }
@@ -6958,10 +6958,13 @@ ReadingRecorder::~ReadingRecorder()
 /* ---------- 初始化数据库 ---------- */
 void ReadingRecorder::initDB() {
     namespace fs = std::filesystem;
-    fs::create_directories("data");
+    fs::path db_path = exe_dir() / "data";
+    fs::create_directories(db_path);
+    fs::path db_book_path = db_path / "Books.db";
+    fs::path db_time_path = db_path / "Time.db";
 
     /* ---------- Books.db ---------- */
-    if (sqlite3_open("data/Books.db", &m_dbBook) != SQLITE_OK)
+    if (sqlite3_open(db_book_path.generic_string().c_str(), &m_dbBook) != SQLITE_OK)
         throw std::runtime_error("sqlite open failed");
 
     sqlite3_exec(m_dbBook, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
@@ -6994,7 +6997,7 @@ void ReadingRecorder::initDB() {
     sqlite3_exec(m_dbBook, sql, nullptr, nullptr, nullptr);
 
     /* ---------- Time.db ---------- */
-    if (sqlite3_open("data/Time.db", &m_dbTime) != SQLITE_OK)
+    if (sqlite3_open(db_time_path.generic_string().c_str(), &m_dbTime) != SQLITE_OK)
         throw std::runtime_error("sqlite open Time.db failed");
     sqlite3_exec(m_dbTime, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
@@ -7702,8 +7705,12 @@ void EPUBBook::LoadToc()
     }
 }
 
-
-bool ZipProvider::load(const std::wstring& file_path)
+ZipFileProvider::ZipFileProvider() {}
+ZipFileProvider::~ZipFileProvider()
+{
+    mz_zip_reader_end(&m_zip);           // 1. 先关闭旧 zip
+}
+bool ZipFileProvider::load(const std::wstring& file_path)
 {
     namespace fs = std::filesystem;
     if (!fs::exists(file_path))
@@ -7726,7 +7733,7 @@ bool ZipProvider::load(const std::wstring& file_path)
     m_zipIndex = ZipIndexW(m_zip);
     return true;
 }
-MemFile ZipProvider::get(const std::wstring& path)  const
+MemFile ZipFileProvider::get( std::wstring path)  
 {
     MemFile mf;
     std::string narrow_name = w2a(path);
@@ -7744,11 +7751,11 @@ MemFile ZipProvider::get(const std::wstring& path)  const
     return mf;
 }
 
-std::wstring ZipProvider::find(const std::wstring& path)
+std::wstring ZipFileProvider::find(const std::wstring& path)
 {
     return m_zipIndex.find(path);
 }
-MemFile LocalFileProvider::get(const std::wstring& path) const
+MemFile LocalFileProvider::get( std::wstring path) 
 {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -7775,7 +7782,11 @@ MemFile LocalFileProvider::get(const std::wstring& path) const
     return mf;        // NRVO / move
 }
 
-
+EPUBParser::EPUBParser(){}
+EPUBParser::~EPUBParser()
+{
+    m_fp.reset();
+}
 bool EPUBParser::load(std::shared_ptr<IFileProvider> fp)
 {
     m_fp = fp;
@@ -10432,4 +10443,42 @@ std::string EPUBBook::get_author()
 {
     auto titIt = ocf_pkg_.meta.find(L"dc:creator");
     return titIt != ocf_pkg_.meta.end() ? w2a(titIt->second) : "";
+}
+
+EPUBFileProvider::EPUBFileProvider()
+{
+    m_zfp = std::make_unique<ZipFileProvider>();
+    m_lfp = std::make_unique<LocalFileProvider>();
+}
+
+EPUBFileProvider::~EPUBFileProvider()
+{
+    m_file_cache.clear();
+}
+
+bool EPUBFileProvider::load(const std::wstring& file_path)
+{
+    m_zfp->load(file_path);
+    return false;
+}
+
+MemFile EPUBFileProvider::get(std::wstring path) 
+{
+    auto it = m_file_cache.find(path);
+    if (it != m_file_cache.end()) { return it->second; }
+
+    MemFile mf{};
+    if (fs::path(path).is_absolute()) { mf = m_lfp->get(path); }
+    else { mf = m_zfp->get(path); }
+ 
+    if (!mf.data.empty())
+    {
+        m_file_cache.emplace(path, mf);
+    }
+    return mf;
+}
+
+std::wstring EPUBFileProvider::find(const std::wstring& path)
+{
+    return std::wstring();
 }

@@ -944,16 +944,18 @@ public:
     virtual ~IFileProvider() = default;
     virtual bool load(const std::wstring& file_path) = 0;
     // 按路径返回原始二进制
-    virtual MemFile get(const std::wstring& path) const = 0;
+    virtual MemFile get(std::wstring path)  = 0;
     virtual std::wstring find(const std::wstring& path) = 0;
 };
 
-class ZipProvider : public IFileProvider 
+class ZipFileProvider : public IFileProvider 
 {
 public:
+    ZipFileProvider();
+    ~ZipFileProvider();
     bool load(const std::wstring& file_path) override;
-    MemFile get(const std::wstring& path) const override;
-    std::wstring find(const std::wstring& path);
+    MemFile get( std::wstring path)  override;
+    std::wstring find(const std::wstring& path) override;
 private:
     mz_zip_archive m_zip = {};
     ZipIndexW m_zipIndex;
@@ -961,16 +963,33 @@ private:
 
 class LocalFileProvider : public IFileProvider
 {
+public:
     bool load(const std::wstring& file_path) override { return true; };
     // 按路径返回原始二进制
-    MemFile get(const std::wstring& path) const override;
-    std::wstring find(const std::wstring& path) { return L""; }
+    MemFile get(std::wstring path)  override;
+    std::wstring find(const std::wstring& path) override { return L""; }
 };
 
+class EPUBFileProvider : public IFileProvider
+{
+public:
+    EPUBFileProvider();
+    ~EPUBFileProvider();
+    bool load(const std::wstring& file_path) override;
+    // 按路径返回原始二进制
+    MemFile get(std::wstring path)  override;
+    std::wstring find(const std::wstring& path) override;
+private:
+    std::unordered_map<std::wstring, MemFile> m_file_cache;
+    std::unique_ptr<ZipFileProvider> m_zfp;
+    std::unique_ptr<LocalFileProvider> m_lfp;
+};
 
 class EPUBParser
 {
 public:
+    EPUBParser();
+    ~EPUBParser();
     bool load(std::shared_ptr<IFileProvider> fp);
 private:
     bool parse_ocf();

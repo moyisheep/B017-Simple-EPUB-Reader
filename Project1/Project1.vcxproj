@@ -28,6 +28,9 @@
     <ClInclude Include="src\main.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="res\homepage.html" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
