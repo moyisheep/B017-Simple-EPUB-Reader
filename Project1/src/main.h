@@ -173,27 +173,6 @@ struct FontPair {
 
 // -------------- 运行时策略 -----------------
 enum class Renderer { GDI, D2D};
-// -------------- 抽象接口 -----------------
-class IRenderBackend {
-public:
-    virtual ~IRenderBackend() = default;
-
-    virtual void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) = 0;
-    virtual void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) = 0;
-    virtual void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) = 0;
-    virtual void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) = 0;
-    virtual void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) = 0;
-    virtual void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) = 0;
-    virtual void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) = 0;
-    virtual void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) = 0;
-    virtual litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) = 0;
-    virtual void				delete_font(litehtml::uint_ptr hFont) = 0;
-    virtual litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) = 0;
-    virtual	void set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) = 0;
-    virtual	void del_clip() = 0;
-
-    virtual void clear() = 0;
-};
 
 class AppBootstrap {
 public:
@@ -348,149 +327,9 @@ private:
     FileCollectionLoader* m_loader;
 
 };
-// -------------- DirectWrite-D2D 后端 -----------------
-class D2DBackend : public IRenderBackend {
-public:
-    D2DBackend();
- 
-    void record_char_boxes(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, const std::wstring& wtxt, const litehtml::position& pos);
 
 
 
-    void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
-
-    void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
-
-    void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
-    void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
-    void draw_radial_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::radial_gradient& gradient) override;
-    void draw_conic_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::conic_gradient& gradient) override;
-    void draw_borders(litehtml::uint_ptr hdc, const litehtml::borders& borders, const litehtml::position& draw_pos, bool root) override;
-    void	draw_list_marker(litehtml::uint_ptr hdc, const litehtml::list_marker& marker) override;
-
-    litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
-    void				delete_font(litehtml::uint_ptr hFont) override;
-    litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
-    static void build_rounded_rect_path(ComPtr<ID2D1GeometrySink>& sink, const litehtml::position& pos, const litehtml::border_radiuses& bdr);
-    void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
-    void	del_clip() override;
-
-
-
-    std::vector<std::wstring> split_font_list(const std::string& src);
-
-    bool is_all_zero(const litehtml::border_radiuses& r);
-
-    void clear() override;
-    void make_font_metrics(const ComPtr<IDWriteFont>& dwFont, const litehtml::font_description& descr, litehtml::font_metrics* fm);
- 
-private:
-    // 自动 AddRef/Release
-
-    Microsoft::WRL::ComPtr<IDWriteFontCollection> m_privateFonts;  // 新增
-    std::vector<std::wstring> m_tempFontFiles;
-    std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
-
-    static std::wstring toLower(std::wstring s);
-    //static std::optional<std::wstring> mapStatic(const std::wstring& key);
-    float m_baselineY = 0;
-    std::vector<ComPtr<ID2D1Layer>>  m_clipStack;  // 新增
-    ComPtr<IDWriteFontCollection> m_sysFontColl;
-    ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
-
-    ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
-
-    void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
-
-    std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
-    std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
-    FontCache m_fontCache;
-
-
-    ComPtr<IDWriteFactory>    m_dwrite;
-
-    ComPtr<IDWriteTextAnalyzer> m_analyzer;
-
-};
-
-
-class ICanvas {
-public:
-    virtual ~ICanvas() = default;
-
-    /* 返回一个 IRenderBackend，用于 litehtml 绘制 */
-
-    /* 把画布内容贴到窗口（WM_PAINT 用）*/
-    virtual void present(float x, float y, litehtml::position* clip) = 0;
-
-    /* 尺寸 */
-    virtual int  width()  const = 0;
-    virtual int  height() const = 0;
-
-    virtual litehtml::uint_ptr getContext() = 0;
-    virtual void BeginDraw() = 0;
-    virtual void EndDraw() = 0;
-    virtual void resize(int width, int height) = 0;
-
-    virtual void clear() = 0;
-
-    /* 工厂：根据当前策略创建画布 */
-    //static std::unique_ptr<ICanvas> create(int w, int h, Renderer which);
-};
-
-
-
-
-
-class D2DCanvas : public ICanvas {
-public:
-    D2DCanvas(int w, int h, HWND hwnd);
-
-    std::vector<RECT> get_selection_rows() const;
-
-    void present(float x, float y, litehtml::position* clip) override;
-    int width()  const override { return m_w; }
-    int height() const override { return m_h; }
-    litehtml::uint_ptr getContext() override;
-    void BeginDraw() override;
-    void EndDraw() override;
-    void resize(int width, int height) override;
-
-    void clear_selection();
-
-    void on_lbutton_dblclk(int x, int y);
-    void on_lbutton_up();
-    void on_lbutton_down(int x, int y);
-    void on_mouse_move(int x, int y);
-    void copy_to_clipboard();
-  
-
-
-    void clear() override;
-    ComPtr<ID2D1HwndRenderTarget> m_rt;
-    litehtml::document::ptr m_doc;
-    float m_zoom_factor = 1.0f;
-
-private:
-    int  m_w, m_h;
-    ComPtr<ID2D1Bitmap> m_bmp;
-    D2D1_MATRIX_3X2_F m_oldMatrix{};
-    HWND m_hwnd = nullptr;
-    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
-
-    int64_t hit_test(float x, float y);
-
-    bool   m_selecting = false;
-
-
-
-    // 当前选区
-    int64_t m_selStart = -1;   // 字符级偏移
-    int64_t m_selEnd = -1;   // 同上
-
-
-    ComPtr<ID2D1SolidColorBrush> m_selBrush;
-};
 
 
 
@@ -729,16 +568,13 @@ struct AppStates {
 // ---------- LiteHtml 容器 ----------
 class SimpleContainer : public litehtml::document_container {
 public:
-    explicit SimpleContainer();
+    SimpleContainer(int w, int h, HWND hwnd);
     ~SimpleContainer();
-    void clear();
+
 
     litehtml::pixel_t	get_default_font_size() const override;
     const char* get_default_font_name() const override;
 
-    bool isImageCached(std::string src);
-
-    void addImageCache(std::string hash, std::string svg);
 
 
     void	get_viewport(litehtml::position& viewport) const override;
@@ -780,27 +616,99 @@ public:
     litehtml::uint_ptr	create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override;
     void				delete_font(litehtml::uint_ptr hFont) override;
     litehtml::pixel_t	text_width(const char* text, litehtml::uint_ptr hFont) override;
+    void build_rounded_rect_path(ComPtr<ID2D1GeometrySink>& sink, const litehtml::position& pos, const litehtml::border_radiuses& bdr);
     void	set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
     void	del_clip() override;
     void	load_image(const char* src, const char* baseurl, bool redraw_on_ready) override;
     void	get_image_size(const char* src, const char* baseurl, litehtml::size& sz) override;
 
 
-    //自定义函数
-    void makeBackend();
+    void resize(int width, int height);
 
+    bool isImageCached(std::string src);
 
+    void addImageCache(std::string hash, std::string svg);
+    void clear();
 
+ 
+    void init_dpi();
+
+    LPCWSTR m_currentCursor = IDC_IBEAM;
     std::unordered_map<std::string, ImageFrame> m_img_cache;
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     litehtml::document::ptr m_doc;
-    void init_dpi();
-    std::unique_ptr<IRenderBackend> m_backend;
-    LPCWSTR m_currentCursor = IDC_IBEAM;
+    float m_zoom_factor = 1.0f;
+    int width()  const { return m_w; }
+    int height() const { return m_h; }
+    litehtml::uint_ptr getContext();
+    void clear_selection();
+
+    void on_lbutton_dblclk(int x, int y);
+    void on_lbutton_up();
+    void on_lbutton_down(int x, int y);
+    void on_mouse_move(int x, int y);
+    void copy_to_clipboard();
+    void present(float x, float y, litehtml::position* clip);
 private:
 
     float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
 
+    std::vector<RECT> get_selection_rows() const;
+    void BeginDraw() ;
+    void EndDraw() ;
+
+    ComPtr<ID2D1HwndRenderTarget> m_rt;
+
+
+    int  m_w, m_h;
+    ComPtr<ID2D1Bitmap> m_bmp;
+    D2D1_MATRIX_3X2_F m_oldMatrix{};
+    HWND m_hwnd = nullptr;
+    ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
+
+    int64_t hit_test(float x, float y);
+
+    bool   m_selecting = false;
+
+    // 当前选区
+    int64_t m_selStart = -1;   // 字符级偏移
+    int64_t m_selEnd = -1;   // 同上
+    std::vector<LineBoxes> m_lines;
+    std::wstring           m_plainText;       // 整篇纯文本
+
+    ComPtr<ID2D1SolidColorBrush> m_selBrush;
+    void record_char_boxes(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, const std::wstring& wtxt, const litehtml::position& pos);
+
+    std::vector<std::wstring> split_font_list(const std::string& src);
+
+    bool is_all_zero(const litehtml::border_radiuses& r);
+
+
+    // 自动 AddRef/Release
+
+    Microsoft::WRL::ComPtr<IDWriteFontCollection> m_privateFonts;  // 新增
+    std::vector<std::wstring> m_tempFontFiles;
+    std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBitmapCache;
+
+    static std::wstring toLower(std::wstring s);
+    //static std::optional<std::wstring> mapStatic(const std::wstring& key);
+    float m_baselineY = 0;
+    std::vector<ComPtr<ID2D1Layer>>  m_clipStack;  // 新增
+    ComPtr<IDWriteFontCollection> m_sysFontColl;
+    ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
+
+    ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
+
+    void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
+
+    std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
+    std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
+    FontCache m_fontCache;
+
+
+    ComPtr<IDWriteFactory>    m_dwrite;
+
+    ComPtr<IDWriteTextAnalyzer> m_analyzer;
 };
 
 
@@ -835,7 +743,7 @@ class VirtualDoc {
 public:
     VirtualDoc();
     ~VirtualDoc();
-    void load_book(std::shared_ptr<EPUBBook> book, std::shared_ptr<SimpleContainer> container, int render_width);
+    void load_book();
 
     litehtml::document::ptr get_doc(int client_h, float& scrollY, float& y_offset);
     void load_html(std::wstring& href);
