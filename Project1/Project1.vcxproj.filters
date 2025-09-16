@@ -35,4 +35,9 @@
   <ItemGroup>
     <None Include="res\homepage.html" />
   </ItemGroup>
+  <ItemGroup>
+    <Image Include="res\app.ico">
+      <Filter>资源文件</Filter>
+    </Image>
+  </ItemGroup>
 </Project>

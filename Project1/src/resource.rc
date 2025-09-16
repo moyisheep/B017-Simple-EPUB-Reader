@@ -100,3 +100,5 @@ BEGIN
     END
 END
 
+
+IDI_APPLICATION ICON "app.ico"

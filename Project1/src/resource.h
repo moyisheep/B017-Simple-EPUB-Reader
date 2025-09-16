@@ -3,15 +3,16 @@
 // π© resource.rc  π”√
 
 #define IDR_MENU_MAIN                   101
-#define IDR_TOOLBAR1                    101
+
 #define IDR_MENU_INFO                   102
-#define IDB_PNG1                        103
+
 #define IDR_TOOLBAR_MAIN                104
 #define IDC_FONT_SIZE                   105
 #define IDC_DOC_WIDTH                   106
 #define IDC_LINE_SPACE                  107
 #define IDR_POPUP						108
 
+#define IDB_ICON                        4000
 
 #define IDM_TOGGLE_CSS                  40001
 #define IDM_TOGGLE_JS                   40002

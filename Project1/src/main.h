@@ -542,11 +542,7 @@ struct AppStates {
     std::shared_ptr<std::atomic_bool> cancelToken;
 
     // ---- 状态机 ----
-    std::atomic_bool needRelayout{ true };   // 是否需要重新排版
-    std::atomic_bool isCaching{ false };   // 后台是否正在渲染
-    std::atomic_bool isUpdate{ false };   // 后台是否正在渲染
-    std::atomic_bool isTooltipUpdate{ false };   // 后台是否正在渲染
-    std::atomic_bool isImageviewUpdate{ false };   // 后台是否正在渲染
+
     bool isLoaded = false;
     // 工具：生成新令牌，旧令牌立即失效
     void newCancelToken() {
@@ -766,7 +762,7 @@ public:
     ~VirtualDoc();
     void load_book();
     void OnTreeSelChanged(std::wstring href);
-    litehtml::document::ptr get_doc(int client_h, float& scrollY, float& y_offset);
+    void update_doc(int client_h);
     void load_html(std::wstring& href);
     void clear();
     ScrollPosition get_scroll_position();
@@ -782,6 +778,7 @@ public:
     float m_percent = 0.0;
     float  m_height = 0.0f;
     std::string m_anchor_id = "";
+
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -793,7 +790,7 @@ private:
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
 
-
+    std::atomic<bool>        m_workerBusy{ false }; // 是否正在干活
 
 
     bool insert_next_chapter();
@@ -827,7 +824,7 @@ private:
         bool insertAtFront;   // true=prev, false=next
     };
     std::queue<Task>         m_taskQueue;       // 待处理任务
-    std::atomic<bool>        m_workerBusy{ false }; // 是否正在干活
+
 
 
 };
