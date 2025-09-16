@@ -49,6 +49,10 @@ constexpr UINT STATUSBAR_TOTAL_SPINE = 2;
 constexpr UINT STATUSBAR_CURRENT_OFFSET = 3;
 constexpr UINT STATUSBAR_TOTAL_TIME = 4;
 constexpr UINT STATUSBAR_LINK_INFO = 5;
+constexpr UINT STATUSBAR_FONT_SIZE = 6;
+constexpr UINT STATUSBAR_LINE_HEIGHT = 7;
+constexpr UINT STATUSBAR_DOC_WIDTH = 8;
+constexpr UINT STATUSBAR_DOC_ZOOM = 9;
 // 可随时改
 
 
@@ -1280,8 +1284,12 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 
 void convert_coordinate(POINT& pt)
 {
-    pt.x = pt.x - g_center_offset;
-    pt.y = pt.y + g_offsetY;
+    if(g_cMain)
+    {
+        pt.x = pt.x/ g_cMain->m_zoom_factor - g_center_offset;
+        pt.y = pt.y/g_cMain->m_zoom_factor + g_offsetY ;
+    }
+
 }
 
 
@@ -1313,11 +1321,19 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_cMain || !g_cMain->m_doc) { break; }
 
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        g_cMain->on_lbutton_down(pt.x, pt.y);
+        g_cMain->on_lbutton_down(pt.x/g_cMain->m_zoom_factor, pt.y/g_cMain->m_zoom_factor);
         convert_coordinate(pt);
         litehtml::position::vector redraw_boxes;
         g_cMain->m_doc->on_lbutton_down(pt.x, pt.y, 0, 0, redraw_boxes);
+        if (!redraw_boxes.empty()) {
+            for (auto r : redraw_boxes)
+            {
+                RECT rc{ r.left(), r.top(), r.right(), r.bottom() };
+                UpdateCache();
+                InvalidateRect(hwnd, &rc, true);
 
+            }
+        }
         break;
     }
     case WM_LBUTTONUP:
@@ -1328,20 +1344,33 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
 
-        //g_book->hide_tooltip();
-        if (!g_cMain->m_doc) { return 0; }
-        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        convert_coordinate(pt);
+        if (g_cMain && g_cMain->m_doc)
+        {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            g_cMain->on_lbutton_up();
+            convert_coordinate(pt);
 
-        litehtml::position::vector redraw_boxes;
-        g_cMain->m_doc->on_lbutton_up(pt.x, pt.y, 0, 0, redraw_boxes);
-        g_cMain->on_lbutton_up();
-        break;
+            litehtml::position::vector redraw_boxes;
+            g_cMain->m_doc->on_lbutton_up(pt.x, pt.y, 0, 0, redraw_boxes);
+            if (!redraw_boxes.empty()) {
+                for (auto r : redraw_boxes)
+                {
+                    RECT rc{ r.left(), r.top(), r.right(), r.bottom() };
+                    UpdateCache();
+                    InvalidateRect(hwnd, &rc, true);
+
+                }
+            }
+        }
+        return 0;
     }
     case WM_LBUTTONDBLCLK:
     {
-        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        g_cMain->on_lbutton_dblclk(pt.x, pt.y);
+        if (g_cMain)
+        {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            g_cMain->on_lbutton_dblclk(pt.x / g_cMain->m_zoom_factor, pt.y / g_cMain->m_zoom_factor);
+        }
         return 0;
     }
     case WM_MOUSEMOVE:
@@ -1351,28 +1380,28 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
         }
-        if (!g_cMain->m_doc) break;
-   
-        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        g_cMain->on_mouse_move(pt.x, pt.y);
-        convert_coordinate(pt);
-  
-        
-        
-        litehtml::position::vector redraw_boxes;
-        g_cMain->m_doc->on_mouse_over(pt.x, pt.y, 0, 0, redraw_boxes);
-        if (!redraw_boxes.empty()) {
-            for(auto r :redraw_boxes)
-            {
-                RECT rc{ r.left(), r.top(), r.right(), r.bottom()};
-                UpdateCache();
-                InvalidateRect(hwnd, &rc, true);
+        if (g_cMain && g_cMain->m_doc)
+        {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            g_cMain->on_mouse_move(pt.x / g_cMain->m_zoom_factor, pt.y / g_cMain->m_zoom_factor);
+            convert_coordinate(pt);
 
+
+
+            litehtml::position::vector redraw_boxes;
+            g_cMain->m_doc->on_mouse_over(pt.x, pt.y, 0, 0, redraw_boxes);
+            if (!redraw_boxes.empty()) {
+                for (auto r : redraw_boxes)
+                {
+                    RECT rc{ r.left(), r.top(), r.right(), r.bottom() };
+                    UpdateCache();
+                    InvalidateRect(hwnd, &rc, true);
+
+                }
             }
         }
-
   
-        break;
+        return 0;
     }
 
     case WM_USER_SCROLL:
@@ -1414,7 +1443,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         wchar_t* url = reinterpret_cast<wchar_t*>(wp);
-        g_book->OnTreeSelChanged(url);  // 现在安全地在主线程执行
+        g_vd->OnTreeSelChanged(url);  // 现在安全地在主线程执行
         free(url);
 
 
@@ -1461,7 +1490,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         GetClientRect(hwnd, &rc);
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         float factor = std::abs(zDelta / 120);
-        float step = std::max(10.0f, g_line_height*3);
+        float step = std::max(10.0f, g_line_height*g_cfg.line_height*factor);
         if (zDelta >= 0) { g_scrollY -= step; }
         else { g_scrollY += step; }
 
@@ -1502,7 +1531,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             float w = g_cfg.document_width;
             float h = rc.bottom - rc.top;
             //g_vd->draw(x, y, w, h, g_offsetY);
-            litehtml::position clip(x, 0, w, h);
+            litehtml::position clip(x, 0, w, h/g_cMain->m_zoom_factor);
             g_cMain->present(x, y, &clip);
 
         }
@@ -1538,14 +1567,15 @@ void UpdateCache()
     GetClientRect(g_hView, &rc);
     int w = rc.right, h = rc.bottom;
     if (w <= 0 || h <= 0) return;
-    
+    w /= g_cMain->m_zoom_factor;
+    h /= g_cMain->m_zoom_factor;
     //request_doc_async(h, g_scrollY, g_offsetY);
     g_vd->get_doc(h, g_scrollY, g_offsetY);
  
 
     g_states.isUpdate.store(true);
 
-    g_center_offset = std::max((w - g_cfg.document_width ) * 0.5, 0.0);
+    g_center_offset = (w - g_cfg.document_width ) * 0.5;
 }
 
 inline void DumpBookRecord()
@@ -1782,14 +1812,7 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
             GetClientRect(g_hTooltip, &rc);
             litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
             g_cTooltip->present(0, 0, &clip);
-            //g_cTooltip->BeginDraw();
-            //RECT rc;
-            //GetClientRect(g_hTooltip, &rc);
-            //litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
-            //g_cTooltip->m_doc->draw(
-            //    g_cTooltip->getContext(),   // 强制转换
-            //    0, 0, &clip);
-            //g_cTooltip->EndDraw();
+
 
         }
         return 0;
@@ -2055,8 +2078,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 清理旧数据
 
         g_cMain->clear();
+        g_cImage->clear();
+        g_cTooltip->clear();
         g_book->clear();
         g_toc->clear();
+        g_vd->clear();
         InvalidateRect(g_hView, nullptr, TRUE);
         InvalidateRect(g_hwndToc, nullptr, TRUE);
 
@@ -2106,7 +2132,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_cfg.document_width = record.docWidth > 0 ? record.docWidth : g_cfg.default_document_width;
         int spine_size = g_book->ocf_pkg_.spine.size();
         SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, spine_size, 0);
-        SetStatus(STATUSBAR_TOTAL_SPINE, (L"SPINE：" + std::to_wstring(spine_size)).c_str());
+        SetStatus(STATUSBAR_TOTAL_SPINE, (L"总数：" + std::to_wstring(spine_size)).c_str());
    
  
         g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
@@ -2268,10 +2294,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_EPUB_CACHE_UPDATED:
     {
         if (g_vd->m_isReloading.exchange(false)) { g_offsetY = g_vd->m_percent * g_vd->m_height; }
+
         float delta = static_cast<float>(lp);
         g_offsetY += delta;
         g_cMain->m_doc = std::move(g_vd->m_doc);
-
+        if (g_vd->m_isAnchor.exchange(false))
+        {
+            std::string cssSel = "[id=\"" + g_vd->m_anchor_id + "\"]";
+            if (auto el = g_cMain->m_doc->root()->select_one(cssSel.c_str())) {
+                g_offsetY = el->get_placement().y;
+            }
+        }
         UpdateCache();
         InvalidateRect(g_hView, nullptr, false);
         return 0;
@@ -2645,41 +2678,44 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 
 
 // ---------- 点击目录跳转 ----------
-void EPUBBook::OnTreeSelChanged(const wchar_t* href)
+void VirtualDoc::OnTreeSelChanged(std::wstring href)
 {
-    if (!href || !*href) return;
+    if (href.empty()) return;
 
 
     /* 1. 分离文件路径与锚点 */
-    std::wstring whref(href);
-    size_t pos = whref.find(L'#');
-    std::wstring file_path = (pos == std::wstring::npos) ? whref : whref.substr(0, pos);
-    std::string  id = (pos == std::wstring::npos) ? "" :
-        w2a(whref.substr(pos + 1));
 
-    if (file_path != g_last_html_path)
+    size_t pos = href.find(L'#');
+    std::wstring file_path = (pos == std::wstring::npos) ? href : href.substr(0, pos);
+    int spine_id = get_id_by_href(file_path);
+    m_anchor_id = (pos == std::wstring::npos) ? "" :
+        w2a(href.substr(pos + 1));
+
+    if (!exists(spine_id))
     {
-        //g_vd->load_book(g_book, g_container, g_cfg.document_width);
-        g_states.needRelayout.store(true);
-        g_vd->clear();
-        g_vd->load_html(file_path);
+        clear();
+        load_html(file_path);
 
-        g_last_html_path = file_path;
-        UpdateCache();
+        m_isAnchor.store(m_anchor_id.empty()? false: true);
+
+    }
+    else
+    {
+        if (!m_anchor_id.empty())
+        {
+            std::wstring cssSel = a2w(m_anchor_id);   // 转成宽字符
+            // WM_APP + 3 约定为“跳转到锚点选择器”
+            PostMessageW(g_hView, WM_EPUB_ANCHOR,
+                reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
+        }
     }
 
 
 
 /* 3. 跳转到锚点 */
-    if (!id.empty())
-    {
-        std::wstring cssSel = a2w(id);   // 转成宽字符
-        // WM_APP + 3 约定为“跳转到锚点选择器”
-        PostMessageW(g_hView, WM_EPUB_ANCHOR,
-            reinterpret_cast<WPARAM>(_wcsdup(cssSel.c_str())), 0);
-    }
-    InvalidateRect(g_hView, nullptr, true);
-    UpdateWindow(g_hWnd);
+  
+    //InvalidateRect(g_hView, nullptr, true);
+    //UpdateWindow(g_hWnd);
 }
 
 // SimpleContainer.cpp
@@ -3157,12 +3193,12 @@ void SimpleContainer::get_media_features(litehtml::media_features& mf) const
 {
     // 1. 窗口客户区（物理像素）
     RECT rc;
-    GetClientRect(g_hWnd, &rc);
-    mf.width = MulDiv(rc.right - rc.left, GetDpiForWindow(g_hWnd), 96);
-    mf.height = MulDiv(rc.bottom - rc.top, GetDpiForWindow(g_hWnd), 96);
+    GetClientRect(m_hwnd, &rc);
+    mf.width = MulDiv(rc.right - rc.left, GetDpiForWindow(m_hwnd), 96);
+    mf.height = MulDiv(rc.bottom - rc.top, GetDpiForWindow(m_hwnd), 96);
 
     // 2. 屏幕物理分辨率
-    const UINT dpiX = GetDpiForWindow(g_hWnd);   // 也可用 GetDpiForSystem
+    const UINT dpiX = GetDpiForWindow(m_hwnd);   // 也可用 GetDpiForSystem
     mf.resolution = dpiX;
     mf.device_width = MulDiv(GetSystemMetricsForDpi(SM_CXSCREEN, dpiX), dpiX, 96);
     mf.device_height = MulDiv(GetSystemMetricsForDpi(SM_CYSCREEN, dpiX), dpiX, 96);
@@ -4841,9 +4877,8 @@ void EPUBBook::load_all_fonts() {
         m_fontBin[key] = { g_cfg.default_sans_serif };
         key = { L"monospace", 400, false, 0 };
         m_fontBin[key] = { g_cfg.default_monospace };
-        build_epub_font_index(g_book->ocf_pkg_, g_book.get());
+        build_epub_font_index();
 
-        //g_container->m_backend->load_all_fonts(fonts);
  
 }
 
@@ -4932,9 +4967,8 @@ std::wstring url_decode(const std::wstring& in)
 
 
 
-void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
+void EPUBBook::build_epub_font_index()
 {
-    if (!book) return;
 
     // 1. 创建临时目录
     static std::wstring tempDir = make_temp_dir();
@@ -4948,12 +4982,12 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
     const std::wregex rx_i(LR"(font-style\s*:\s*(italic|oblique))", std::regex::icase);
 
     // 3. 遍历所有 CSS
-    for (const auto& item : pkg.manifest)
+    for (const auto& item : ocf_pkg_.manifest)
     {
         if (item.media_type != L"text/css") continue;
 
-        std::wstring cssPath = pkg.opf_dir + item.href;
-        MemFile cssFile = book->read_zip(book->m_zipIndex.find(cssPath).c_str());
+        std::wstring cssPath = ocf_pkg_.opf_dir + item.href;
+        MemFile cssFile = read_zip(m_zipIndex.find(cssPath).c_str());
         if (cssFile.data.empty()) continue;
        
         std::wstring css = a2w({ (char*)cssFile.data.data(), cssFile.data.size() });
@@ -5000,8 +5034,8 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
                 }
 
                 // 解压
-                std::wstring fontPath = pkg.opf_dir + url;
-                MemFile fontFile = book->read_zip(book->m_zipIndex.find(fontPath).c_str());
+                std::wstring fontPath = ocf_pkg_.opf_dir + url;
+                MemFile fontFile = read_zip(m_zipIndex.find(fontPath).c_str());
                 if (fontFile.data.empty()) continue;
 
                 std::wstring hashHex = blake3_hex(fontFile.data);   // 32 字节 → 64 字符
@@ -5031,7 +5065,7 @@ void EPUBBook::build_epub_font_index(const OCFPackage& pkg, EPUBBook* book)
             if (family.empty() || paths.empty()) continue;
 
             FontKey key{ family, weight, italic, 0 };
-            book->m_fontBin[key] = std::move(paths);
+            m_fontBin[key] = std::move(paths);
         }
     }
 }
@@ -5330,7 +5364,7 @@ AppBootstrap::AppBootstrap() {
         g_toc->GetWindow(g_hwndToc);
         // 绑定目录点击 -> 章节跳转
         g_toc->SetOnNavigate([](const std::wstring& href) {
-            g_book->OnTreeSelChanged(href.c_str());
+            g_vd->OnTreeSelChanged(href.c_str());
             });
     }
     if (!g_cMain) { g_cMain = std::make_unique<SimpleContainer>(10, 10, g_hView); }
@@ -6648,7 +6682,7 @@ float VirtualDoc::get_height_by_id(int spine_id)
 }
 void VirtualDoc::reload()
 {
-    if (m_blocks.empty()) return;
+    if (m_blocks.empty() || m_workerBusy) return;
     if (g_cMain) { g_cMain->clear_selection(); }
     // 1. 记录当前滚动百分比
     ScrollPosition old = get_scroll_position();
@@ -6763,14 +6797,18 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
     ScrollPosition p = get_scroll_position();
 
     g_toc->SetHighlight(p);
-    SetStatus(STATUSBAR_CURRENT_SPINE, (L"Current Spine: " + std::to_wstring(p.spine_id)).c_str());
-    SetStatus(STATUSBAR_CURRENT_OFFSET, (L"Current Offset: " + std::to_wstring(p.offset)).c_str());
+
+    SetStatus(STATUSBAR_CURRENT_SPINE, (L"当前项: " + std::to_wstring(p.spine_id)).c_str());
+    SetStatus(STATUSBAR_CURRENT_OFFSET, (L"当前位移: " + std::to_wstring(p.offset)).c_str());
  
     auto time_string = seconds2string(g_recorder->getBookTotalTime());
     SetStatus(STATUSBAR_TOTAL_TIME, (L"阅读时长：" + time_string).c_str());
+    SetStatus(STATUSBAR_FONT_SIZE, (L"字体大小：" + std::to_wstring(g_cfg.font_size)).c_str());
+    SetStatus(STATUSBAR_LINE_HEIGHT, (L"行间距：" + std::to_wstring(g_cfg.line_height)).c_str());
+    SetStatus(STATUSBAR_DOC_WIDTH, (L"文档宽度：" + std::to_wstring(g_cfg.document_width)).c_str());
+    SetStatus(STATUSBAR_DOC_ZOOM, (L"文档缩放倍数：" + std::to_wstring(g_cMain->m_zoom_factor)).c_str());
     g_scrollbar->SetPosition(p.spine_id, p.height, p.offset);
-    //SendMessage(g_hViewScroll, SBM_SETPOSITION,
-    //        p.spine_id, MAKELPARAM(p.height, p.offset));
+
     
 
     return nullptr;
@@ -6931,7 +6969,6 @@ void VirtualDoc::clear()
     m_blocks.clear();
     g_offsetY = 0;
     g_scrollY = 0;
-    //m_doc_cache.clear();
     m_height = 0;
 }
 
@@ -10448,7 +10485,7 @@ std::string EPUBBook::get_author()
 EPUBFileProvider::EPUBFileProvider()
 {
     m_zfp = std::make_unique<ZipFileProvider>();
-    m_lfp = std::make_unique<LocalFileProvider>();
+    //m_lfp = std::make_unique<LocalFileProvider>();
 }
 
 EPUBFileProvider::~EPUBFileProvider()
@@ -10482,3 +10519,4 @@ std::wstring EPUBFileProvider::find(const std::wstring& path)
 {
     return std::wstring();
 }
+

@@ -426,7 +426,7 @@ public:
     void parse_toc_(void);                        // 解析 TOC
 
     std::wstring get_chapter_name_by_id(int spine_id);
-    void OnTreeSelChanged(const wchar_t* href);
+    //void OnTreeSelChanged(const wchar_t* href);
     bool load(const wchar_t* epub_path);
     MemFile read_zip(const wchar_t* file_name) const;
     std::string load_html(const std::wstring& path) const;
@@ -474,7 +474,7 @@ public:
     std::wstring           m_tooltip_url;          // 缓存当前 url
     std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
 
-    void build_epub_font_index(const OCFPackage& pkg, EPUBBook* book);
+    void build_epub_font_index();
     std::unordered_map<FontKey, std::vector<std::wstring>> m_fontBin;
 
     EPUBBook() noexcept {}
@@ -562,7 +562,28 @@ struct AppStates {
 
 
 
+class LayoutCache {
+public:
+    using Map = std::unordered_map<LayoutKey,
+        Microsoft::WRL::ComPtr<IDWriteTextLayout>>;
 
+    // 2. 提供线程安全、可重复调用的清空接口
+    void clear() {
+        Map empty;
+        std::lock_guard<std::mutex> lk(mtx_);
+        map_.swap(empty);          // 把旧 map 整个换出来
+    }                              // 析构在锁外完成
+
+    // 3. 其余接口按需封装
+    auto& operator[](const LayoutKey& k) { return map_[k]; }
+    auto  find(const LayoutKey& k) { return map_.find(k); }
+    auto  begin() { return map_.begin(); }
+    auto  end() { return map_.end(); }
+
+private:
+    Map          map_;
+    std::mutex   mtx_;
+};
 
 
 // ---------- LiteHtml 容器 ----------
@@ -701,7 +722,7 @@ private:
 
     void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
 
-    std::unordered_map<LayoutKey, ComPtr<IDWriteTextLayout>> m_layoutCache;
+    LayoutCache m_layoutCache;
     std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
     FontCache m_fontCache;
 
@@ -744,7 +765,7 @@ public:
     VirtualDoc();
     ~VirtualDoc();
     void load_book();
-
+    void OnTreeSelChanged(std::wstring href);
     litehtml::document::ptr get_doc(int client_h, float& scrollY, float& y_offset);
     void load_html(std::wstring& href);
     void clear();
@@ -757,8 +778,10 @@ public:
     //void draw(int x, int y, int w, int h, float offsetY);
     litehtml::document::ptr m_doc;
     std::atomic<bool>        m_isReloading{ false }; 
+    std::atomic<bool>        m_isAnchor{ false };
     float m_percent = 0.0;
     float  m_height = 0.0f;
+    std::string m_anchor_id = "";
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -979,6 +1002,7 @@ public:
     // 按路径返回原始二进制
     MemFile get(std::wstring path)  override;
     std::wstring find(const std::wstring& path) override;
+ 
 private:
     std::unordered_map<std::wstring, MemFile> m_file_cache;
     std::unique_ptr<ZipFileProvider> m_zfp;
