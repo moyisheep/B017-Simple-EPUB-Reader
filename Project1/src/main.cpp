@@ -43,12 +43,10 @@ constexpr UINT SBM_SETPOSITION(WM_USER + 12);
 constexpr UINT WM_EPUB_OPEN(WM_USER + 13);
 
 
-constexpr UINT STATUSBAR_INFO = 0;
-constexpr UINT STATUSBAR_CURRENT_SPINE = 1;
-constexpr UINT STATUSBAR_TOTAL_SPINE = 2;
-constexpr UINT STATUSBAR_CURRENT_OFFSET = 3;
+constexpr UINT STATUSBAR_INFO = 1;
+constexpr UINT STATUSBAR_SPINE_INFO = 2;
+constexpr UINT STATUSBAR_OFFSET_INFO = 3;
 constexpr UINT STATUSBAR_TOTAL_TIME = 4;
-constexpr UINT STATUSBAR_LINK_INFO = 5;
 constexpr UINT STATUSBAR_FONT_SIZE = 6;
 constexpr UINT STATUSBAR_LINE_HEIGHT = 7;
 constexpr UINT STATUSBAR_DOC_WIDTH = 8;
@@ -1015,8 +1013,10 @@ inline void SetStatus(int pane, const wchar_t* msg)
     // 2. 拼成一条字符串
     std::wstring text;
     for (const auto& kv : vec)
+    {
+        if (kv.first == 0) { continue; }
         text += kv.second + L"    ";
-
+    }
     // 3. 一次性写到状态栏第 0 栏
     SendMessageW(g_hStatus, SB_SETTEXT, 0, reinterpret_cast<LPARAM>(text.c_str()));
 }
@@ -1468,7 +1468,20 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         return 0;
     }
-
+    case WM_MBUTTONDOWN:  // 鼠标中键按下
+    {
+        // 检测Ctrl键是否按下
+        if (GetKeyState(VK_CONTROL) & 0x8000)
+        {
+            // Ctrl+中键被按下
+            g_cMain->m_zoom_factor = 1.0f;
+            UpdateCache();
+            // 3. 重绘
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;  // 已处理该消息
+        }
+        break;
+    }
     case WM_MOUSEWHEEL:
     {
         if (g_cMain) { g_cMain->clear_selection(); }
@@ -2049,10 +2062,82 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_KEYDOWN:
+    {
+        RECT rc; GetClientRect(hwnd, &rc);
+        float page = rc.bottom - rc.top;      // 一页高度，可按需要改
+        float line = g_line_height;       // 一行高度
+
+        switch (wp)
+        {
+        case VK_UP:          // ↑
+            g_offsetY -= line;
+            break;
+
+        case VK_DOWN:        // ↓
+            g_offsetY += line;
+            break;
+
+        case VK_PRIOR:       // PageUp
+            g_offsetY -= page;
+            break;
+
+        case VK_NEXT:        // PageDown
+            g_offsetY += page;
+            break;
+
+        default:
+            return DefWindowProc(hwnd, msg, wp, lp);
+        }
+
+        // 限制范围
+
+        // 通知渲染/排版
+        UpdateCache();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     case WM_LBUTTONDBLCLK:
     {
         OpenEpubWithDialog(hwnd);
         return 0;
+    }
+    case WM_CONTEXTMENU:
+    {
+        HWND hwndFrom = (HWND)wp;
+        if (hwndFrom == g_hView || hwndFrom == g_hwndToc)
+        {
+            // 1. 取出屏幕坐标
+            int x = GET_X_LPARAM(lp);
+            int y = GET_Y_LPARAM(lp);
+
+            // 2. 如果是由键盘触发（x == -1 && y == -1），
+            //    把菜单放到窗口左上角
+            if (x == -1 && y == -1)
+            {
+                RECT rc;
+                GetWindowRect(hwndFrom, &rc);
+                x = rc.left + 10;
+                y = rc.top + 10;
+            }
+
+            // 3. 弹出菜单
+            HMENU hPopup = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_POPUP));
+            HMENU hSub = GetSubMenu(hPopup, 0);
+            CheckMenuItem(hSub, IDM_TOGGLE_TOC_WINDOW,
+                g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED);
+
+            TrackPopupMenuEx(
+                hSub,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON ,
+                x, y,
+                g_hWnd,
+                nullptr
+            );
+
+            DestroyMenu(hPopup);
+        }
+        break;
     }
     // ---------- WM_EPUB_OPEN ----------
     case WM_EPUB_OPEN:
@@ -2132,7 +2217,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_cfg.document_width = record.docWidth > 0 ? record.docWidth : g_cfg.default_document_width;
         int spine_size = g_book->ocf_pkg_.spine.size();
         SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, spine_size, 0);
-        SetStatus(STATUSBAR_TOTAL_SPINE, (L"总数：" + std::to_wstring(spine_size)).c_str());
+
    
  
         g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
@@ -2232,8 +2317,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             MoveWindow(g_hHomepage, 0, 0, cx, cyClient, TRUE);
 
         }
-        //InvalidateRect(hwnd, nullptr, TRUE);
-        //UpdateWindow(hwnd);
+
         return 0;
     }
     case WM_LOAD_ERROR:
@@ -2425,8 +2509,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_vd) { g_vd->reload(); }
             break;
         case ID_EDIT_COPY:
-            g_cMain->copy_to_clipboard();
+        {
+             g_cMain->copy_to_clipboard(); 
             break;
+        }
         case ID_FILE_OPEN:
         {
             OpenEpubWithDialog(hwnd);   // 就是之前那段 IFileOpenDialog 代码
@@ -2435,8 +2521,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_FILE_EXIT:
             PostQuitMessage(0);
             break;
-        
-
+        case ID_ZOOM_BIGGER:
+            g_cMain->m_zoom_factor = std::max(g_cMain->m_zoom_factor + 0.1f,  5.0f);
+            break;
+        case ID_ZOOM_SMALLER:
+            g_cMain->m_zoom_factor = std::min(g_cMain->m_zoom_factor - 0.1f, 0.25f);
+            break;
+        case ID_ZOOM_RESET:
+            g_cMain->m_zoom_factor = 1.0f;
+            break;
         }
     }
     }
@@ -2527,7 +2620,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     LocalFree(argv);
 
     // ---------- 2. 单例检测 ----------
-    CreateMutex(nullptr, TRUE, L"EPUBLite_SingleInstance");
+    CreateMutex(nullptr, TRUE, L"SimpleEPUBReader_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
         if (firstFile)
@@ -2568,7 +2661,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 
 
     g_hWnd = CreateWindowW(MAIN_CLASS, a2w(g_cfg.appName).c_str(),
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
         CW_USEDEFAULT, 0, 800, 600,
         nullptr, nullptr, h, nullptr);
  
@@ -2610,6 +2703,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
   
     // 新增：复制文本（Ctrl + C）
     gAccel.add(ID_EDIT_COPY, FCONTROL | FVIRTKEY, 'C');
+    gAccel.add(ID_FILE_OPEN, FCONTROL | FVIRTKEY, 'O');
 
 
     // 加载图标（可缩放，支持 32/48/256 像素）
@@ -3561,6 +3655,8 @@ void replace_svg_with_img(std::string& html,
             }
 
             g_cMain->addImageCache(hash, patchedSvg);
+            g_cImage->m_img_cache[hash] = g_cMain->m_img_cache[hash];
+            g_cTooltip->m_img_cache[hash] = g_cMain->m_img_cache[hash];
 
         }
         std::ostringstream imgTag;
@@ -3733,7 +3829,8 @@ void replace_math_with_svg(std::string& html)
             std::string svg = m2s.convert(mathml);
             if (svg.empty()) continue;
             g_cMain->addImageCache(hash, svg);
-
+            g_cImage->m_img_cache[hash] = g_cMain->m_img_cache[hash];
+            g_cTooltip->m_img_cache[hash] = g_cMain->m_img_cache[hash];
         }
         std::string imgTag;
         imgTag =  R"(<img class="math-png" src=")" + hash
@@ -4739,8 +4836,8 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
 void SimpleContainer::delete_font(litehtml::uint_ptr h)
 {
     if (!h) return;
-    //auto* fp = reinterpret_cast<FontPair*>(h);
-    //delete fp;              // 4. 真正释放
+    auto* fp = reinterpret_cast<FontPair*>(h);
+    delete fp;              // 4. 真正释放
 }
 
 litehtml::pixel_t SimpleContainer::text_width(const char* text,
@@ -6645,28 +6742,7 @@ void VirtualDoc::load_html(std::wstring& href)
  
     insert_chapter(id);
   
-    //load_by_id(id, true);
-    //// 先渲染好加载的章节
-    //{
-    //    std::string text;
-    //    text += "<html>" + m_blocks.back().head + "<body>";
-    //    for (auto hb : m_blocks)
-    //    {
-    //        for (auto b : hb.body_blocks)
-    //        {
-    //            text += b.html;
-    //        }
-    //    }
 
-    //    text += "</body></html>";
-    //    m_doc = litehtml::document::createFromString({ text.c_str(), litehtml::encoding::utf_8 }, m_container.get());
-    //    m_doc->render(g_cfg.document_width);
-    //    m_blocks.back().height = m_doc->height();
-    //    m_height = m_doc->height();
-    //}
-
-    //id -= 1;
-    //load_by_id(m_top_block, id, false);
 }
 
 float VirtualDoc::get_height_by_id(int spine_id)
@@ -6721,15 +6797,18 @@ bool VirtualDoc::load_by_id( int spine_id, bool isPushBack)
 
 ScrollPosition VirtualDoc::get_scroll_position()
 {
-
+    RECT rc;
+    GetClientRect(g_hView, &rc);
     ScrollPosition pos{};
     if (m_blocks.empty()) { return pos; }
+  
     pos.offset = g_offsetY;
     for (auto hb: m_blocks)
     {
         pos.spine_id = hb.spine_id;
         pos.height = hb.height;
-        if ((pos.offset - hb.height) < 0) {break; }
+  
+        if ((pos.offset - hb.height) <= 0) {break; }
         pos.offset -= hb.height;
     }
 
@@ -6779,15 +6858,16 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
         insert_prev_chapter();
 
     }
+
     if (y_offset > static_cast<float>(m_height - client_h*2.0f))
     {
         insert_next_chapter();
 
     }
 
-    if (m_height > 0 &&y_offset > (m_height - (client_h * 0.5f)))
+    if (m_height > 0 &&y_offset > m_height - client_h)
     {
-        y_offset = m_height - client_h * 0.5f;
+        y_offset = m_height - client_h;
     }
     if (m_height> 0 &&y_offset < 0) { y_offset = 0; }
 
@@ -6798,8 +6878,10 @@ litehtml::document::ptr VirtualDoc::get_doc(int client_h, float& scrollY, float&
 
     g_toc->SetHighlight(p);
 
-    SetStatus(STATUSBAR_CURRENT_SPINE, (L"当前项: " + std::to_wstring(p.spine_id)).c_str());
-    SetStatus(STATUSBAR_CURRENT_OFFSET, (L"当前位移: " + std::to_wstring(p.offset)).c_str());
+    std::wstring spine_info = L"阅读进度：" + std::to_wstring(p.spine_id) + L" / " + std::to_wstring(m_spine.size());
+    std::wstring offset_info = L"当前位移：" + std::to_wstring(p.offset) + L" / " + std::to_wstring(p.height);
+    SetStatus(STATUSBAR_SPINE_INFO, spine_info.c_str());
+    SetStatus(STATUSBAR_OFFSET_INFO, offset_info.c_str());
  
     auto time_string = seconds2string(g_recorder->getBookTotalTime());
     SetStatus(STATUSBAR_TOTAL_TIME, (L"阅读时长：" + time_string).c_str());
@@ -6876,7 +6958,7 @@ bool VirtualDoc::insert_chapter(int spine_id)
 bool VirtualDoc::insert_prev_chapter()
 {
     if (m_workerBusy.load(std::memory_order_relaxed)) return false;
-    int id = get_scroll_position().spine_id - 1;
+    int id = m_blocks.empty()? 0:m_blocks.front().spine_id - 1;
     if (id < 0 || exists(id)) return false;
     m_workerBusy.store(true, std::memory_order_relaxed);
     {
@@ -6892,7 +6974,7 @@ bool VirtualDoc::insert_next_chapter()
 {
 
     if (m_workerBusy.load(std::memory_order_relaxed)) return false;
-    int id = get_scroll_position().spine_id + 1;
+    int id = m_blocks.empty() ? 0 : m_blocks.back().spine_id + 1;
     if (id >= static_cast<int>(m_spine.size()) || exists(id)) return false;
 
     m_workerBusy.store(true, std::memory_order_relaxed);
@@ -8311,11 +8393,12 @@ void ScrollBarEx::OnMouseMove(int x, int y)
         RECT rc; GetClientRect(m_hwnd, &rc);
         int h = rc.bottom - rc.top;
         float ratio = std::max(0.0f, std::min(1.0f, static_cast<float>(pt.y) / static_cast<float>(h)));
-
+       
         float newTop = (m_pos.height) * ratio ;
 
+        g_scrollY = 0;
         if (g_vd) { g_vd->set_scroll_position(ScrollPosition{m_pos.spine_id, newTop, m_pos.height}); }
-        g_offsetY = newTop;
+        //g_offsetY = newTop;
         UpdateCache();
 
     }

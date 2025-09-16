@@ -10,6 +10,9 @@
 #define IDC_FONT_SIZE                   105
 #define IDC_DOC_WIDTH                   106
 #define IDC_LINE_SPACE                  107
+#define IDR_POPUP						108
+
+
 #define IDM_TOGGLE_CSS                  40001
 #define IDM_TOGGLE_JS                   40002
 
@@ -34,6 +37,9 @@
 #define ID_EDIT_COPY            40021
 #define ID_FILE_OPEN            40022
 #define ID_FILE_EXIT            40023
+#define ID_ZOOM_BIGGER         40024
+#define ID_ZOOM_SMALLER        40025
+#define ID_ZOOM_RESET          40026
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED

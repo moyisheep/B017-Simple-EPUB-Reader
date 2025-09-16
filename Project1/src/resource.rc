@@ -50,9 +50,33 @@ BEGIN
     POPUP "&设置"
     BEGIN
         MENUITEM "&启用 EPUB CSS",                IDM_TOGGLE_CSS, CHECKED
-        MENUITEM "启用 JavaScript(&J)",           IDM_TOGGLE_JS, CHECKED
         MENUITEM "启用 全局 CSS",                   IDM_TOGGLE_GLOBAL_CSS, CHECKED
-        MENUITEM "悬停预览",                        IDM_TOGGLE_HOVER_PREVIEW, CHECKED
+        MENUITEM "启用 悬停预览",                        IDM_TOGGLE_HOVER_PREVIEW, CHECKED
+        MENUITEM SEPARATOR     // ← 分隔符
+        POPUP "字体大小"           // ← 二级菜单
+        BEGIN
+            MENUITEM "+ 增大", ID_FONT_BIGGER
+            MENUITEM "- 减小", ID_FONT_SMALLER
+            MENUITEM "o 恢复", ID_FONT_RESET
+        END
+        POPUP "行间距"           // ← 二级菜单
+        BEGIN
+            MENUITEM "+ 增大", ID_LINE_HEIGHT_UP
+            MENUITEM "- 减小", ID_LINE_HEIGHT_DOWN
+            MENUITEM "o 恢复", ID_LINE_HEIGHT_RESET
+        END
+        POPUP "文档宽度"           // ← 二级菜单
+        BEGIN
+            MENUITEM "+ 增大", ID_WIDTH_BIGGER
+            MENUITEM "- 减小", ID_WIDTH_SMALLER
+            MENUITEM "o 恢复", ID_WIDTH_RESET
+        END
+        POPUP "文档缩放倍率"           // ← 二级菜单
+        BEGIN
+            MENUITEM "+ 增大", ID_ZOOM_BIGGER
+            MENUITEM "- 减小", ID_ZOOM_SMALLER
+            MENUITEM "o 恢复", ID_ZOOM_RESET
+        END
     END
     POPUP "&显示"
     BEGIN
@@ -65,5 +89,14 @@ END
 
 
 
+IDR_POPUP MENU
+BEGIN
+    POPUP ""
+    BEGIN
+        MENUITEM "复制", ID_EDIT_COPY
+        MENUITEM "显示目录栏", IDM_TOGGLE_TOC_WINDOW
+        MENUITEM "刷新", ID_EPUB_RELOAD
 
+    END
+END
 
