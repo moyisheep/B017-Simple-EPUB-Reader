@@ -486,6 +486,7 @@ struct AppSettings {
     int record_flush_interval_ms = 10 * 1000;
     int tooltip_delay_ms = 300;
     int update_interval_ms = 20;
+    int scroll_update_interval_ms = 16;
 
     int font_size = 16;
     float line_height = 1.5f; //倍数
@@ -510,7 +511,8 @@ struct AppSettings {
 
     // 1) GDI+ 颜色（A=255 不透明）
     Gdiplus::Color scrollbar_slider_color{ 255, 238, 165, 102 };
-    Gdiplus::Color scrollbar_dot_color{ 255, 238, 165, 102 };
+    Gdiplus::Color scrollbar_dot_color_highlight{ 255, 238, 165, 102 };
+    Gdiplus::Color scrollbar_dot_color{ 209, 202, 197, 80 };
     COLORREF highlight_color_cr = RGB(238, 165, 102);  // #eea566
 
     // 2) D2D1 颜色（保持原透明度 0.4，可按需改）
@@ -748,18 +750,7 @@ private:
 
     ComPtr<IDWriteTextAnalyzer> m_analyzer;
 
-    Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> m_backRT;
-    Microsoft::WRL::ComPtr<ID2D1Bitmap>             m_backBmp;
-
-    // 一次性参数快照
-    struct Snapshot {
-        float x = 0, y = 0;
-        litehtml::position clip{};
-        bool clip_valid = false;
-    };
-    std::atomic<bool>   m_dirty{ true };   // 需要重画
-    Snapshot            m_snap;          // 只给后台线程读
-    std::thread m_worker;   // 放在类尾部即可
+    std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBmpCache;
 };
 
 
@@ -812,7 +803,7 @@ public:
     float m_percent = 0.0;
     float  m_height = 0.0f;
     std::string m_anchor_id = "";
-
+    std::atomic<bool>        m_workerBusy{ false }; // 是否正在干活
 private:
     HtmlBlock get_html_block(std::string html, int spine_id);
     void merge_block(HtmlBlock& dst, HtmlBlock& src, bool isAddToBottom = true);
@@ -824,7 +815,7 @@ private:
     bool gumbo_tag_is_void(GumboTag tag);
     void serialize_element(const GumboElement& el, std::ostream& out);
 
-    std::atomic<bool>        m_workerBusy{ false }; // 是否正在干活
+
 
 
     bool insert_next_chapter();
@@ -1152,7 +1143,7 @@ private:
     int LINE_W = 2;      // 竖线宽
     int GUTTER_W = 14;     // 整个滚动条宽
 
-    bool m_mouseIn = true;
+    bool m_mouseIn = false;
     struct ThumbState
     {
         bool hot = false;

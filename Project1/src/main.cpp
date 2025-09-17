@@ -70,7 +70,7 @@ static MMRESULT g_tooltipTimer = 0;
 static MMRESULT g_updateTimer = 0;
 static MMRESULT g_scrollTimer = 0;
 std::atomic<float> g_velocity{ 0 };     // 像素/秒
-LARGE_INTEGER g_freq;
+
 
 int g_center_offset = 0;
 
@@ -1254,12 +1254,8 @@ void convert_coordinate(POINT& pt)
 
 void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
 {
-    static LARGE_INTEGER last;
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    float dt = float(now.QuadPart - last.QuadPart) / float(g_freq.QuadPart);
-    last = now;
-    if (dt <= 0.0f || dt > 0.1f) dt = 0.001f;   // 防断点
+
+    float dt = 0.016f;   // 防断点
 
     // 物理惯性：v = v * e^(-k*dt)
     const float friction = 8.0f;   // 越大越快停
@@ -1278,6 +1274,8 @@ void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
     g_offsetY.store(newY, std::memory_order_relaxed);
     g_velocity.store(v, std::memory_order_relaxed);
 
+    UpdateCache();
+    
     InvalidateRect(g_hView, nullptr, FALSE);
 
     // 速度接近 0 时停止定时器
@@ -1378,10 +1376,15 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_LBUTTONDBLCLK:
     {
+        if (!g_tickTimer)
+        {
+            g_tickTimer = timeSetEvent(g_cfg.record_update_interval_ms, 0, Tick, 0, TIME_ONESHOT);
+        }
         if (g_cMain)
         {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             g_cMain->on_lbutton_dblclk(pt.x / g_cMain->m_zoom_factor, pt.y / g_cMain->m_zoom_factor);
+            InvalidateRect(hwnd, nullptr, false);
         }
         return 0;
     }
@@ -1512,16 +1515,19 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         // 每格 3 行 → 每行像素 * 3
-        float pxPerLine = g_cMain->m_line_height * g_cfg.line_height;
+        float pxPerLine = g_cfg.font_size * g_cfg.line_height;
         float pxDelta = -zDelta / 120.0f * pxPerLine * 3.0f;   // 负号：上滚为负
 
         // 累加速度，而不是直接改目标
-        g_velocity.fetch_add(pxDelta * 12.0f, std::memory_order_relaxed);
-
+        //g_velocity.fetch_add(pxDelta * 12.0f, std::memory_order_relaxed);
+      
         // 启动 1 kHz 高精度定时器
-        if (g_scrollTimer == 0) {
-            g_scrollTimer = timeSetEvent(1, 0, OnScrollTimer, 0, TIME_PERIODIC);
-        }
+        //if (g_scrollTimer == 0) {
+        //    g_scrollTimer = timeSetEvent(g_cfg.scroll_update_interval_ms, 0, OnScrollTimer, 0, TIME_PERIODIC);
+        //}
+        float cur = g_offsetY.load(std::memory_order_relaxed);
+        cur += pxDelta;
+        g_offsetY.store(cur, std::memory_order_relaxed);
         // 更新阅读记录
         if (!g_tickTimer)
         {
@@ -1550,7 +1556,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PAINT:
         PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
  
-        if (g_cMain  && g_cMain->m_doc )
+        if (g_cMain  && g_cMain->m_doc && !(g_offsetY.load(std::memory_order_relaxed) == 0 && g_vd->m_workerBusy.load(std::memory_order_relaxed)))
         {
             OutputDebugStringA("[View] WM_PAINT\n");
             RECT rc;
@@ -1601,7 +1607,7 @@ void UpdateCache()
     g_vd->update_doc(h);
  
 
-    g_center_offset = (w - g_cfg.document_width ) * 0.5;
+    g_center_offset = std::max((w - g_cfg.document_width) * 0.5f, 0.0f);;
 }
 
 inline void DumpBookRecord()
@@ -2088,7 +2094,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             std::memory_order_relaxed));
 
         UpdateCache();
-        InvalidateRect(hwnd, nullptr, FALSE);
+        InvalidateRect(g_hView, nullptr, FALSE);
         return 0;
     }
 
@@ -2227,6 +2233,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         //UpdateWindow(g_hView);
 
         SetStatus(STATUSBAR_INFO, L"加载完成");
+        SetForegroundWindow(hwnd);          // 关键：把输入焦点抢过来
         return 0;
     }
 
@@ -2527,13 +2534,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PostQuitMessage(0);
             break;
         case ID_ZOOM_BIGGER:
-            g_cMain->m_zoom_factor = std::max(g_cMain->m_zoom_factor + 0.1f,  5.0f);
+            g_cMain->m_zoom_factor = std::min(g_cMain->m_zoom_factor + 0.1f,  5.0f);
+            if (g_vd) { g_vd->reload(); }
             break;
         case ID_ZOOM_SMALLER:
-            g_cMain->m_zoom_factor = std::min(g_cMain->m_zoom_factor - 0.1f, 0.25f);
+            g_cMain->m_zoom_factor = std::max(g_cMain->m_zoom_factor - 0.1f, 0.25f);
+            if (g_vd) { g_vd->reload(); }
             break;
         case ID_ZOOM_RESET:
             g_cMain->m_zoom_factor = 1.0f;
+            if (g_vd) { g_vd->reload(); }
             break;
         }
     }
@@ -2653,7 +2663,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     g_hInst = h;
     InitCommonControls();
     register_main_class();
-    QueryPerformanceFrequency(&g_freq);
+
     // 在 CreateWindow 之前
     HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MENU_MAIN));
 
@@ -2794,17 +2804,7 @@ void VirtualDoc::OnTreeSelChanged(std::wstring href)
 
     if (spine_id != get_scroll_position().spine_id)
     {
-        {
-            std::lock_guard<std::mutex> lk(m_taskMtx);
-            m_taskQueue = {};          // 清空未开始的任务
-        }
-
-        // 2. 等当前任务结束
-        while (m_workerBusy.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        m_blocks.clear();
-        m_height = 0.0f;
+        clear();
         insert_chapter(spine_id);
 
         m_isAnchor.store(m_anchor_id.empty()? false: true);
@@ -3253,7 +3253,7 @@ static const std::unordered_map<std::string, LPCWSTR> kSysCursors = {
 };
 void SimpleContainer::set_cursor(const char* cursor)
 {
-    m_currentCursor = IDC_ARROW;           // 默认箭头
+    //m_currentCursor = IDC_ARROW;           // 默认箭头
 
     if (!cursor) return;
 
@@ -4142,65 +4142,6 @@ static litehtml::position clip_box(const litehtml::background_layer& layer,
 // ----------------------------------------------------------
 // 主函数：draw_image
 // ----------------------------------------------------------
-//void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
-//    const litehtml::background_layer& layer,
-//    const std::string& url,
-//    const std::string& base_url)
-//{
-//    if (url.empty()) return;
-//    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
-//
-//    /* ---------- 1. 取缓存位图 ---------- */
-//    auto it = m_img_cache.find(url);
-//    if (it == m_img_cache.end()) return;
-//    const ImageFrame& frame = it->second;
-//    if (frame.rgba.empty()) return;
-//
-//    ComPtr<ID2D1Bitmap> bmp;
-//
-//    D2D1_BITMAP_PROPERTIES bp =
-//        D2D1::BitmapProperties(
-//            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-//                D2D1_ALPHA_MODE_PREMULTIPLIED));
-//    rt->CreateBitmap(
-//        D2D1::SizeU(frame.width, frame.height),
-//        frame.rgba.data(),
-//        frame.stride,
-//        bp,
-//        &bmp);
-//
-//    if (!bmp) return;
-//
-//    /* ---------- 2. 计算目标矩形 ---------- */
-//    D2D1_RECT_F dst = D2D1::RectF(
-//        float(layer.border_box.left()),
-//        float(layer.border_box.top()),
-//        float(layer.border_box.right()),
-//        float(layer.border_box.bottom()));
-//
-//    /* ---------- 3. 计算绘制区域（cover / contain / stretch） ---------- */
-//    float imgW = float(bmp->GetPixelSize().width);
-//    float imgH = float(bmp->GetPixelSize().height);
-//    if (imgW == 0 || imgH == 0) return;
-//
-//    float dstW = dst.right - dst.left;
-//    float dstH = dst.bottom - dst.top;
-//
-//    // 这里只演示 cover（填满 + 居中）
-//    float scale = std::max(dstW / imgW, dstH / imgH);
-//    float bgW = imgW * scale;
-//    float bgH = imgH * scale;
-//    float bgX = dst.left + (dstW - bgW) * 0.5f;
-//    float bgY = dst.top + (dstH - bgH) * 0.5f;
-//
-//    D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
-//
-//    /* ---------- 4. 绘制 ---------- */
-//    rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-//        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-//        D2D1::RectF(0, 0, imgW, imgH));
-//
-//}
 void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     const litehtml::background_layer& layer,
     const std::string& url,
@@ -4209,56 +4150,62 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     if (url.empty()) return;
     auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
 
-    /* 1. 取缓存位图 */
+    /* ---------- 1. 取缓存位图 ---------- */
     auto it = m_img_cache.find(url);
     if (it == m_img_cache.end()) return;
     const ImageFrame& frame = it->second;
     if (frame.rgba.empty()) return;
 
-    ComPtr<ID2D1Bitmap> bmp;
-    D2D1_BITMAP_PROPERTIES bp =
-        D2D1::BitmapProperties(
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                D2D1_ALPHA_MODE_PREMULTIPLIED));
-    if (FAILED(rt->CreateBitmap(
-        D2D1::SizeU(frame.width, frame.height),
-        frame.rgba.data(),
-        frame.stride,
-        bp,
-        &bmp)) || !bmp)
-        return;
 
-    /* 2. 目标矩形 */
+    /* ---------- 2. 取/建 D2D 位图 ---------- */
+    ComPtr<ID2D1Bitmap>& bmp = m_d2dBmpCache[url];   // 引用现有或新建
+    if (!bmp) {
+        D2D1_BITMAP_PROPERTIES bp =
+            D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D2D1_ALPHA_MODE_PREMULTIPLIED));
+        rt->CreateBitmap(
+            D2D1::SizeU(frame.width, frame.height),
+            frame.rgba.data(),
+            frame.stride,
+            bp,
+            &bmp);
+        if (!bmp) return;
+    }
+
+
+
+    /* ---------- 2. 计算目标矩形 ---------- */
     D2D1_RECT_F dst = D2D1::RectF(
         float(layer.border_box.left()),
         float(layer.border_box.top()),
         float(layer.border_box.right()),
         float(layer.border_box.bottom()));
-    OutputDebugStringA(
-        (std::to_string(layer.border_box.width) + " x " +
-            std::to_string(layer.border_box.height) + "\n").c_str());
-    /* 3. 计算 contain 比例（不裁剪） */
-    float imgW = float(frame.width);
-    float imgH = float(frame.height);
+
+    /* ---------- 3. 计算绘制区域（cover / contain / stretch） ---------- */
+    float imgW = float(bmp->GetPixelSize().width);
+    float imgH = float(bmp->GetPixelSize().height);
     if (imgW == 0 || imgH == 0) return;
 
     float dstW = dst.right - dst.left;
     float dstH = dst.bottom - dst.top;
-    float scale = std::min(dstW / imgW, dstH / imgH);   // contain
 
+    // 这里只演示 cover（填满 + 居中）
+    float scale = std::max(dstW / imgW, dstH / imgH);
     float bgW = imgW * scale;
     float bgH = imgH * scale;
-
-    /* 4. 居中绘制，保证完全落在 dst 内 */
     float bgX = dst.left + (dstW - bgW) * 0.5f;
     float bgY = dst.top + (dstH - bgH) * 0.5f;
 
     D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
 
-    /* 5. 绘制整张位图 */
+    /* ---------- 4. 绘制 ---------- */
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        D2D1::RectF(0, 0, imgW, imgH));
+
 }
+
 inline bool SimpleContainer::is_all_zero(const litehtml::border_radiuses& r)
 {
     return r.top_left_x == 0 && r.top_left_y == 0 &&
@@ -5516,11 +5463,12 @@ void SimpleContainer::resize(int w, int h)
     m_h = h;
 
     if (m_rt) {
+        m_d2dBmpCache.clear();   // 释放所有旧位图
         D2D1_SIZE_U size{ static_cast<UINT32>(w), static_cast<UINT32>(h) };
         if (SUCCEEDED(m_rt->Resize(size))) return;   // DPI 不变时直接 Resize
         m_rt.Reset();                               // 失败就重建
     }
-
+    m_d2dBmpCache.clear();   // 释放所有旧位图
     /* 重新创建 HwndRenderTarget */
     RECT rc; GetClientRect(m_hwnd, &rc);
     D2D1_RENDER_TARGET_PROPERTIES rtp =
@@ -5709,7 +5657,8 @@ std::string EPUBBook::html_of_anchor_paragraph(litehtml::document* doc, const st
                 std::strcmp(cls, "fig") != 0 &&
                 std::strcmp(cls, "figimage") != 0 &&
                 std::strcmp(cls, "figure") != 0 &&
-                std::strcmp(cls, "reflist") != 0))
+                std::strcmp(cls, "reflist") != 0 &&
+                std::strcmp(cls, "illustype_image") != 0))
         {
             p = p->parent();
         }
@@ -6038,7 +5987,7 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     /* 3) 创建 HwndRenderTarget（直接画到窗口） */
     hr = m_d2dFactory->CreateHwndRenderTarget(
         D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1_RENDER_TARGET_TYPE_HARDWARE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                 D2D1_ALPHA_MODE_PREMULTIPLIED),
             dpiX, dpiY),
@@ -6049,8 +5998,26 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
                 static_cast<UINT>(m_h * scale))),
         &m_rt);
     if (FAILED(hr)) {
-        OutputDebugStringA("CreateHwndRenderTarget failed\n");
-        return;
+        OutputDebugStringA("CreateHwndRenderTarget hardware failed\n");
+
+        // 回退到默认
+        hr = m_d2dFactory->CreateHwndRenderTarget(
+            D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D2D1_ALPHA_MODE_PREMULTIPLIED),
+                dpiX, dpiY),
+            D2D1::HwndRenderTargetProperties(
+                m_hwnd,
+                D2D1::SizeU(
+                    static_cast<UINT>(m_w * scale),
+                    static_cast<UINT>(m_h * scale))),
+            &m_rt);
+        if (FAILED(hr)) 
+        {
+            OutputDebugStringA("CreateHwndRenderTarget failed\n");
+            return;
+        }
     }
     /* 4) DirectWrite 工厂 */
     IDWriteFactory* pRaw = nullptr;
@@ -6138,11 +6105,11 @@ void SimpleContainer::clear()
 {
 
     m_img_cache.clear();
-
+    m_d2dBmpCache.clear();
     m_anchor_map.clear();
     m_doc.reset();
     m_privateFonts.Reset();
-    m_d2dBitmapCache.clear();
+
     m_clipStack.clear();
     m_fontCache.clear();
     m_layoutCache.clear();
@@ -6774,20 +6741,8 @@ void VirtualDoc::reload()
     if ( old.height > 0.0f)          // 旧文档高度
         m_percent = double(old.offset) / old.height;
 
-    // 2. 重新加载
-        // 1. 停止提交新任务
-    {
-        std::lock_guard<std::mutex> lk(m_taskMtx);
-        m_taskQueue = {};          // 清空未开始的任务
-    }
 
-    // 2. 等当前任务结束
-    while (m_workerBusy.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    m_blocks.clear();
-    m_height = 0.0f;
-    //clear();
+    clear();
     insert_chapter(old.spine_id);
 
     m_isReloading.store(true);
@@ -6899,8 +6854,8 @@ void VirtualDoc::update_doc(int client_h)
 
     g_toc->SetHighlight(p);
 
-    std::wstring spine_info = L"阅读进度：" + std::to_wstring(p.spine_id + 1) + L" / " + std::to_wstring(m_spine.size());
-    std::wstring offset_info = L"当前位移：" + std::to_wstring(p.offset) + L" / " + std::to_wstring(p.height);
+    std::wstring spine_info = L"总进度：" + std::to_wstring(p.spine_id + 1) + L" / " + std::to_wstring(m_spine.size());
+    std::wstring offset_info = L"当前进度：" + std::to_wstring((int)p.offset) + L" / " + std::to_wstring((int)p.height);
     SetStatus(STATUSBAR_SPINE_INFO, spine_info.c_str());
     SetStatus(STATUSBAR_OFFSET_INFO, offset_info.c_str());
  
@@ -8250,7 +8205,7 @@ LRESULT CALLBACK ScrollBarEx::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 void ScrollBarEx::OnPaint()
 {
-    OutputDebugStringA("[ScrollbarEx] WM_PAINT\n");
+
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(m_hwnd, &ps);
 
@@ -8279,92 +8234,65 @@ void ScrollBarEx::OnPaint()
         Gdiplus::Graphics g(memDC);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-        /* ---------- 滚动条模式 ---------- */
-        if (m_mouseIn)
+        const bool crowded = (m_count > 500);
+        if (m_count >= 1 && m_count < 30) dot_r = 2;
+        else if (m_count >= 30 && m_count < 100) dot_r = 2;
+        else if (m_count >= 100) dot_r = 1;
+        const double step = static_cast<double>(H) / m_count;
+
+        /* 串起所有点的浅色细线 */
+        if (m_count > 1)
         {
-            /* 3. 顶部/底部横线 */
-            const int aboveCnt = m_pos.spine_id;
-            const int belowCnt = m_count - aboveCnt - 1;
-
-
-
-            /*  竖线 */
-            Gdiplus::Pen linePen(Gdiplus::Color(220, 220, 220), 3);
-            g.DrawLine(&linePen, CX, 0, CX, H);
-
-            /*  章节线 */
-            Gdiplus::Pen markPen(Gdiplus::Color(200, 200, 200), 1);
-            for (int i = 0; i < aboveCnt; i++)
-            {
-                g.DrawLine(&markPen, 0, 2 * i, W, 2 * i);
-            }
-            for (int i = 0; i < belowCnt; i++)
-            {
-                g.DrawLine(&markPen, 0, H - (2 * i), W, H - (2 * i));
-            }
-
-            /*  滑块 */
-            const double ratio = (m_pos.height > 0)
-                ? std::max(0.0f, std::min(1.0f, m_pos.offset / m_pos.height))
-                : 0.0;
-
-            int thumbY = static_cast<int>(ratio * (H - thumbH));
-            thumbY = std::max(0, std::min(thumbY, H - thumbH));
-
-            Gdiplus::Rect r(CX - 6, thumbY, 12, thumbH);
-            Gdiplus::GraphicsPath path;
-            path.AddArc(r.X, r.Y, 6, 6, 180, 90);
-            path.AddArc(r.X + r.Width - 6, r.Y, 6, 6, 270, 90);
-            path.AddArc(r.X + r.Width - 6, r.Y + r.Height - 6, 6, 6, 0, 90);
-            path.AddArc(r.X, r.Y + r.Height - 6, 6, 6, 90, 90);
-            path.CloseFigure();
-            Gdiplus::SolidBrush thumbBrush(g_cfg.scrollbar_slider_color);
-            g.FillPath(&thumbBrush, &path);
-
-
- 
+            Gdiplus::Pen linkPen(Gdiplus::Color(220, 220, 220), 1);
+            g.DrawLine(&linkPen, CX, 0, CX, H );
         }
-        /* ---------- 圆点模式 ---------- */
-        else
+
+
+
+        for (int i = 0; i < m_count; ++i)
         {
-            const bool crowded = (m_count > 500);
-            if (m_count >= 1 && m_count < 30) dot_r = 2;
-            else if (m_count >= 30 && m_count < 100) dot_r = 2;
-            else if (m_count >= 100) dot_r = 1;
-            const double step = static_cast<double>(H) / m_count;
-
-            /* 串起所有点的浅色细线 */
-            if (m_count > 1)
-            {
-                Gdiplus::Pen linkPen(Gdiplus::Color(220, 220, 220), 1);
-                g.DrawLine(&linkPen, CX, step, CX, H - step);
-            }
-
-            for (int i = 0; i < m_count; ++i)
-            {
-                /* 拥挤时只画当前点 */
-                if (i == m_pos.spine_id) continue;
+            /* 拥挤时只画当前点 */
+            if (i == m_pos.spine_id) continue;
      
 
-                const int y = static_cast<int>((i + 0.5) * step);
+            const int y = static_cast<int>((i + 0.5) * step);
     
 
-                const int r = dot_r;
-                Gdiplus::Color c =  Gdiplus::Color(200, 200, 200);
+            const int r = dot_r;
+            Gdiplus::Color c =  Gdiplus::Color(200, 200, 200);
 
-                Gdiplus::SolidBrush br(c);
-                g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
-            }
-            /* 画当前章节的点 */
-            {
-                Gdiplus::Color c = g_cfg.scrollbar_dot_color;
-               
-                int r = ACTIVE_R;
-                int y = (m_pos.spine_id + 0.5) * step;
-                Gdiplus::SolidBrush br(c);
-                g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
-            }
+            Gdiplus::SolidBrush br(c);
+            g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
         }
+        /* 画当前章节的点 */
+        {
+            Gdiplus::Color c = g_cfg.scrollbar_dot_color_highlight;
+               
+            int r = ACTIVE_R;
+            int y = (m_pos.spine_id + 0.5) * step;
+            Gdiplus::SolidBrush br(c);
+            g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
+        }
+
+        /* 1. 计算竖线中心 Y 坐标（比例 0~1） */
+        double ratio = 0.0;
+        if (m_pos.height > 0)          // 防 0
+            ratio = std::clamp(static_cast<double>(m_pos.offset) / m_pos.height, 0.0, 1.0);
+
+        /* 2. 竖线几何：宽 2，高 8，贴在最右边缘（假设可用宽度为 W） */
+  
+        int line_w = 2;
+        int barY = static_cast<int>((ratio * H) - (line_w / 2.0));   // 居中在比例位置
+
+        /* 3. 画竖线 */
+      
+        Gdiplus::Pen linePen(g_cfg.scrollbar_dot_color_highlight, line_w);
+        g.DrawLine(&linePen,
+            0,
+            barY,
+            W,
+            barY);
+
     }
     BitBlt(hdc, 0, 0, W, H, memDC, 0, 0, SRCCOPY);
     SelectObject(memDC, oldBmp);
@@ -8391,14 +8319,14 @@ bool ScrollBarEx::HitThumb(const POINT& pt) const
 
 void ScrollBarEx::OnLButtonDown(int x, int y)
 {
-    POINT pt{ x, y };
-    if (HitThumb(pt))
-    {
-        SetCapture(m_hwnd);
-        m_thumb.drag = true;
+    //POINT pt{ x, y };
+    //if (HitThumb(pt))
+    //{
+    //    SetCapture(m_hwnd);
+    //    m_thumb.drag = true;
 
 
-    }
+    //}
 }
 void ScrollBarEx::OnMouseLeave(int x, int y)
 {
@@ -8407,48 +8335,48 @@ void ScrollBarEx::OnMouseMove(int x, int y)
 {
 
  
-    /* 悬停高亮（可选） */
-    POINT pt{ x, y };
-    bool in = HitThumb(pt);
-    if (in != m_thumb.hot)
-    {
-        m_thumb.hot = in;
-        InvalidateRect(m_hwnd, nullptr, FALSE);
-    }
+    ///* 悬停高亮（可选） */
+    //POINT pt{ x, y };
+    //bool in = HitThumb(pt);
+    //if (in != m_thumb.hot)
+    //{
+    //    m_thumb.hot = in;
+    //    InvalidateRect(m_hwnd, nullptr, FALSE);
+    //}
 
-    if (m_thumb.drag)
-    {
+    //if (m_thumb.drag)
+    //{
    
-        RECT rc; GetClientRect(m_hwnd, &rc);
-        int h = rc.bottom - rc.top;
-        float ratio = std::max(0.0f, std::min(1.0f, static_cast<float>(pt.y) / static_cast<float>(h)));
-       
-        float newTop = (m_pos.height) * ratio ;
+    //    RECT rc; GetClientRect(m_hwnd, &rc);
+    //    int h = rc.bottom - rc.top;
+    //    float ratio = std::max(0.0f, std::min(1.0f, static_cast<float>(pt.y) / static_cast<float>(h)));
+    //   
+    //    float newTop = (m_pos.height) * ratio ;
 
 
-        if (g_vd) { g_vd->set_scroll_position(ScrollPosition{m_pos.spine_id, newTop, m_pos.height}); }
-        //g_offsetY = newTop;
-        UpdateCache();
+    //    if (g_vd) { g_vd->set_scroll_position(ScrollPosition{m_pos.spine_id, newTop, m_pos.height}); }
 
-    }
+    //    UpdateCache();
+
+    //}
 }
 
 void ScrollBarEx::OnLButtonUp()
 {
-    if (m_thumb.drag)
-    {
-        ReleaseCapture();
-        m_thumb.drag = false;
-        InvalidateRect(m_hwnd, nullptr, FALSE);
-    }
+    //if (m_thumb.drag)
+    //{
+    //    ReleaseCapture();
+    //    m_thumb.drag = false;
+    //    InvalidateRect(m_hwnd, nullptr, FALSE);
+    //}
 
 }
 
 void ScrollBarEx::OnRButtonUp()
 {
-     m_mouseIn = !m_mouseIn;
-     InvalidateRect(m_hwnd, nullptr, false);     
-     UpdateWindow(m_hwnd); 
+     //m_mouseIn = !m_mouseIn;
+     //InvalidateRect(m_hwnd, nullptr, false);     
+     //UpdateWindow(m_hwnd); 
 }
 
 int64_t SimpleContainer::hit_test(float x, float y)
@@ -8466,6 +8394,7 @@ int64_t SimpleContainer::hit_test(float x, float y)
 void SimpleContainer::on_lbutton_down(int x, int y)
 {
     m_selecting = true;
+
     m_selStart = m_selEnd = hit_test((float)x, (float)y);
     UpdateCache();
 }
@@ -8474,6 +8403,9 @@ void SimpleContainer::on_mouse_move(int x, int y)
 {
     if (m_selecting)
     {
+        m_currentCursor = IDC_IBEAM;
+        SetCursor(LoadCursor(nullptr, m_currentCursor));
+
         auto result = hit_test((float)x, (float)y);
         if (result >= 0) 
         { 
@@ -8493,6 +8425,9 @@ void SimpleContainer::on_mouse_move(int x, int y)
 void SimpleContainer::on_lbutton_up()
 {
     m_selecting = false;
+
+    m_currentCursor = IDC_ARROW;
+    SetCursor(LoadCursor(nullptr, m_currentCursor));
     UpdateCache();
     //copy_to_clipboard();
 }
