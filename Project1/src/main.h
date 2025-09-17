@@ -674,6 +674,7 @@ public:
     std::unordered_map<std::string, ImageFrame> m_img_cache;
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     litehtml::document::ptr m_doc;
+    float m_line_height = 1.0f;
     float m_zoom_factor = 1.0f;
     int width()  const { return m_w; }
     int height() const { return m_h; }
@@ -746,6 +747,19 @@ private:
     ComPtr<IDWriteFactory>    m_dwrite;
 
     ComPtr<IDWriteTextAnalyzer> m_analyzer;
+
+    Microsoft::WRL::ComPtr<ID2D1BitmapRenderTarget> m_backRT;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap>             m_backBmp;
+
+    // 一次性参数快照
+    struct Snapshot {
+        float x = 0, y = 0;
+        litehtml::position clip{};
+        bool clip_valid = false;
+    };
+    std::atomic<bool>   m_dirty{ true };   // 需要重画
+    Snapshot            m_snap;          // 只给后台线程读
+    std::thread m_worker;   // 放在类尾部即可
 };
 
 

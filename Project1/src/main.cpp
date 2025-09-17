@@ -24,7 +24,7 @@ std::unique_ptr<VirtualDoc> g_vd;
 //static float g_scrollY = 0.0f;   // 当前像素偏移
 static std::atomic<float> g_offsetY{ 0.0f };
 static std::atomic<float> g_targetY{ 0.0f };
-static float g_line_height = 1.0f;
+
 
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
 constexpr UINT WM_EPUB_UPDATE_SCROLLBAR = WM_APP + 2;
@@ -54,7 +54,7 @@ constexpr UINT STATUSBAR_DOC_ZOOM = 9;
 
 AppStates g_states;
 AppSettings g_cfg;
-std::wstring g_last_html_path;
+
 enum class ImgFmt { PNG, JPEG, BMP, GIF, TIFF, SVG, UNKNOWN };
 
 void PreprocessHTML(std::string& html);
@@ -91,16 +91,7 @@ std::unique_ptr<ScrollBarEx> g_scrollbar;
     // 整篇文档的所有行
 
 
-static bool isWin10OrLater()
-{
-    static bool once = [] {
-        OSVERSIONINFOEXW os{ sizeof(os), 10, 0, 0, 0, {0}, 0, 0, 0, 0, 0 };
-        DWORDLONG mask = 0;
-        VER_SET_CONDITION(mask, VER_MAJORVERSION, VER_GREATER_EQUAL);
-        return ::VerifyVersionInfoW(&os, VER_MAJORVERSION, mask) != FALSE;
-        }();
-    return once;
-}
+
 // 工具：把路径拷到堆，返回指针
 inline wchar_t* DupPath(const wchar_t* src)
 {
@@ -1282,7 +1273,7 @@ void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
     RECT rc;
     GetClientRect(g_hView, &rc);
     float h = float(rc.bottom - rc.top);
-    newY = std::clamp(newY, 0.0f, std::max(0.0f, g_vd->m_height - h));
+    newY = std::clamp(newY, -1.0f, std::max(0.0f, g_vd->m_height - h));
 
     g_offsetY.store(newY, std::memory_order_relaxed);
     g_velocity.store(v, std::memory_order_relaxed);
@@ -1514,34 +1505,14 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;   // 已处理，不再传递
         }
  
-        //RECT rc;
-        //GetClientRect(hwnd, &rc);
-        //float h = rc.bottom - rc.top;
-        //int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
-        //// 仅改 3 个数字 ↓↓↓
-        //float times = std::max(1.0f, std::abs(zDelta / 120.0f));
-        //float step = std::max(20.0f, g_line_height * g_cfg.line_height * times);   // ① 步长加大，滚一格就明显动
 
-        //float cur = g_offsetY.load(std::memory_order_relaxed);
-
-        //float newTarget;
-        //if (zDelta >= 0)
-        //    newTarget = std::clamp(cur - step, -1.0f, g_vd->m_height - h);
-        //else
-        //    newTarget = std::clamp(cur + step, -1.0f, g_vd->m_height - h);
-
-        //g_targetY.store(newTarget, std::memory_order_relaxed);
-        //// ② 把 16 ms 改成 8 ms（125 Hz），肉眼立刻更跟手
-        //if (g_scrollTimer == 0) {
-        //    g_scrollTimer = timeSetEvent(8, 0, OnScrollTimer, 0, TIME_PERIODIC);
-        //}
         RECT rc;
         GetClientRect(hwnd, &rc);
         float h = float(rc.bottom - rc.top);
 
         int zDelta = GET_WHEEL_DELTA_WPARAM(wp);
         // 每格 3 行 → 每行像素 * 3
-        float pxPerLine = g_line_height * g_cfg.line_height;
+        float pxPerLine = g_cMain->m_line_height * g_cfg.line_height;
         float pxDelta = -zDelta / 120.0f * pxPerLine * 3.0f;   // 负号：上滚为负
 
         // 累加速度，而不是直接改目标
@@ -1577,10 +1548,11 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_PAINT:
-
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+ 
         if (g_cMain  && g_cMain->m_doc )
         {
-
+            OutputDebugStringA("[View] WM_PAINT\n");
             RECT rc;
             GetClientRect(g_hView, &rc);
             int x = g_center_offset;
@@ -1591,7 +1563,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_cMain->present(x, y, &clip);
 
         }
-   
+        EndPaint(hwnd, &ps);
         return 0;
 
     case WM_ERASEBKGND:
@@ -1699,6 +1671,7 @@ LRESULT CALLBACK ImageviewProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_PAINT:
     {
+
         if (!IsWindowVisible(g_hImageview)) { return 0; }
         if (!g_cImage)
         {
@@ -1706,8 +1679,11 @@ LRESULT CALLBACK ImageviewProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
             break;
         }
 
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+
 
         {
+            OutputDebugStringA("[ImageView] WM_PAINT\n");
             RECT rc;
             GetClientRect(g_hImageview, &rc);
             litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
@@ -1715,6 +1691,7 @@ LRESULT CALLBACK ImageviewProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 
 
         }
+        EndPaint(hwnd, &ps);
         return 0;
     }
 
@@ -1829,8 +1806,11 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
             break;
         }
 
-
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+        /* D2D 渲染 */
+ 
         {
+            OutputDebugStringA("[Tooltip] WM_PAINT\n");
             RECT rc;
             GetClientRect(g_hTooltip, &rc);
             litehtml::position clip(0, 0, rc.right - rc.left, rc.bottom - rc.top);
@@ -1838,6 +1818,7 @@ LRESULT CALLBACK TooltipProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 
 
         }
+        EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_DESTROY:
@@ -1877,10 +1858,10 @@ LRESULT CALLBACK HomepageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             OutputDebugStringA("[TooltipProc] self or doc null\n");
             break;
         }
-  
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
         if (!g_states.isLoaded && g_cHome->m_doc)
         {
-
+            OutputDebugStringA("[Homepage] WM_PAINT\n");
             RECT rc;
             GetClientRect(hwnd, &rc);
             float width = rc.right - rc.left;
@@ -1891,7 +1872,7 @@ LRESULT CALLBACK HomepageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_cHome->present(0, 0, &clip);
 
         }
-
+        EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_DESTROY:
@@ -1918,7 +1899,7 @@ const wchar_t VIEW_CLASS[] = L"ViewClass";
 void register_view_class()
 {
     WNDCLASSW wc{};
-    wc.style = CS_HREDRAW | CS_VREDRAW;   // 关键
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
     wc.lpfnWndProc = ViewWndProc;
     wc.hInstance = g_hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
@@ -2083,7 +2064,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     {
         RECT rc; GetClientRect(hwnd, &rc);
         float page = rc.bottom - rc.top;
-        float line = g_line_height;
+        float line = g_cMain->m_line_height;
 
         float delta = 0.f;
         switch (wp)
@@ -2204,6 +2185,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_PAINT:
     {
+        PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        OutputDebugStringA("[HWND] WM_PAINT\n");
         break;
     }
     case WM_EPUB_PARSED: {
@@ -2229,10 +2213,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
    
  
-        g_last_html_path = g_book->ocf_pkg_.spine[spine_id].href;
-      
+
         g_vd->load_book();
-        g_vd->load_html(g_last_html_path);
+        g_vd->load_html(g_book->ocf_pkg_.spine[spine_id].href);
 
         UpdateCache();          // 复用前面给出的 UpdateCache()
 
@@ -2616,7 +2599,7 @@ const wchar_t MAIN_CLASS[] = L"SimpleEPUBReader";
 void register_main_class()
 {
     WNDCLASSEX w{ sizeof(WNDCLASSEX) };
-    w.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // 关键
+    w.style = CS_HREDRAW | CS_VREDRAW ;   // 关键
     w.hIcon = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_APPLICATION));
     w.hIconSm = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_APPLICATION)); // 小图标
     w.lpfnWndProc = WndProc;
@@ -4159,6 +4142,65 @@ static litehtml::position clip_box(const litehtml::background_layer& layer,
 // ----------------------------------------------------------
 // 主函数：draw_image
 // ----------------------------------------------------------
+//void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
+//    const litehtml::background_layer& layer,
+//    const std::string& url,
+//    const std::string& base_url)
+//{
+//    if (url.empty()) return;
+//    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+//
+//    /* ---------- 1. 取缓存位图 ---------- */
+//    auto it = m_img_cache.find(url);
+//    if (it == m_img_cache.end()) return;
+//    const ImageFrame& frame = it->second;
+//    if (frame.rgba.empty()) return;
+//
+//    ComPtr<ID2D1Bitmap> bmp;
+//
+//    D2D1_BITMAP_PROPERTIES bp =
+//        D2D1::BitmapProperties(
+//            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+//                D2D1_ALPHA_MODE_PREMULTIPLIED));
+//    rt->CreateBitmap(
+//        D2D1::SizeU(frame.width, frame.height),
+//        frame.rgba.data(),
+//        frame.stride,
+//        bp,
+//        &bmp);
+//
+//    if (!bmp) return;
+//
+//    /* ---------- 2. 计算目标矩形 ---------- */
+//    D2D1_RECT_F dst = D2D1::RectF(
+//        float(layer.border_box.left()),
+//        float(layer.border_box.top()),
+//        float(layer.border_box.right()),
+//        float(layer.border_box.bottom()));
+//
+//    /* ---------- 3. 计算绘制区域（cover / contain / stretch） ---------- */
+//    float imgW = float(bmp->GetPixelSize().width);
+//    float imgH = float(bmp->GetPixelSize().height);
+//    if (imgW == 0 || imgH == 0) return;
+//
+//    float dstW = dst.right - dst.left;
+//    float dstH = dst.bottom - dst.top;
+//
+//    // 这里只演示 cover（填满 + 居中）
+//    float scale = std::max(dstW / imgW, dstH / imgH);
+//    float bgW = imgW * scale;
+//    float bgH = imgH * scale;
+//    float bgX = dst.left + (dstW - bgW) * 0.5f;
+//    float bgY = dst.top + (dstH - bgH) * 0.5f;
+//
+//    D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
+//
+//    /* ---------- 4. 绘制 ---------- */
+//    rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
+//        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+//        D2D1::RectF(0, 0, imgW, imgH));
+//
+//}
 void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     const litehtml::background_layer& layer,
     const std::string& url,
@@ -4167,58 +4209,56 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     if (url.empty()) return;
     auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
 
-    /* ---------- 1. 取缓存位图 ---------- */
+    /* 1. 取缓存位图 */
     auto it = m_img_cache.find(url);
     if (it == m_img_cache.end()) return;
     const ImageFrame& frame = it->second;
     if (frame.rgba.empty()) return;
 
     ComPtr<ID2D1Bitmap> bmp;
-
     D2D1_BITMAP_PROPERTIES bp =
         D2D1::BitmapProperties(
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                 D2D1_ALPHA_MODE_PREMULTIPLIED));
-    rt->CreateBitmap(
+    if (FAILED(rt->CreateBitmap(
         D2D1::SizeU(frame.width, frame.height),
         frame.rgba.data(),
         frame.stride,
         bp,
-        &bmp);
+        &bmp)) || !bmp)
+        return;
 
-    if (!bmp) return;
-
-    /* ---------- 2. 计算目标矩形 ---------- */
+    /* 2. 目标矩形 */
     D2D1_RECT_F dst = D2D1::RectF(
         float(layer.border_box.left()),
         float(layer.border_box.top()),
         float(layer.border_box.right()),
         float(layer.border_box.bottom()));
-
-    /* ---------- 3. 计算绘制区域（cover / contain / stretch） ---------- */
-    float imgW = float(bmp->GetPixelSize().width);
-    float imgH = float(bmp->GetPixelSize().height);
+    OutputDebugStringA(
+        (std::to_string(layer.border_box.width) + " x " +
+            std::to_string(layer.border_box.height) + "\n").c_str());
+    /* 3. 计算 contain 比例（不裁剪） */
+    float imgW = float(frame.width);
+    float imgH = float(frame.height);
     if (imgW == 0 || imgH == 0) return;
 
     float dstW = dst.right - dst.left;
     float dstH = dst.bottom - dst.top;
+    float scale = std::min(dstW / imgW, dstH / imgH);   // contain
 
-    // 这里只演示 cover（填满 + 居中）
-    float scale = std::max(dstW / imgW, dstH / imgH);
     float bgW = imgW * scale;
     float bgH = imgH * scale;
+
+    /* 4. 居中绘制，保证完全落在 dst 内 */
     float bgX = dst.left + (dstW - bgW) * 0.5f;
     float bgY = dst.top + (dstH - bgH) * 0.5f;
 
     D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
 
-    /* ---------- 4. 绘制 ---------- */
+    /* 5. 绘制整张位图 */
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-        D2D1::RectF(0, 0, imgW, imgH));
-
+        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 }
-
 inline bool SimpleContainer::is_all_zero(const litehtml::border_radiuses& r)
 {
     return r.top_left_x == 0 && r.top_left_y == 0 &&
@@ -4861,7 +4901,7 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
     }
 
     *fm = fcp.fm;
-    g_line_height = fm->height;
+    m_line_height = fm->height;
     FontPair* fp = new FontPair{ fcp.fmt, descr };
 
     return reinterpret_cast<litehtml::uint_ptr>(fp);
@@ -6735,7 +6775,19 @@ void VirtualDoc::reload()
         m_percent = double(old.offset) / old.height;
 
     // 2. 重新加载
-    clear();
+        // 1. 停止提交新任务
+    {
+        std::lock_guard<std::mutex> lk(m_taskMtx);
+        m_taskQueue = {};          // 清空未开始的任务
+    }
+
+    // 2. 等当前任务结束
+    while (m_workerBusy.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    m_blocks.clear();
+    m_height = 0.0f;
+    //clear();
     insert_chapter(old.spine_id);
 
     m_isReloading.store(true);
@@ -6825,9 +6877,9 @@ void VirtualDoc::update_doc(int client_h)
 
     float offsetY = g_offsetY.load(std::memory_order_relaxed);
 
-    //OutputDebugStringA("[before] ");
-    //OutputDebugStringA(std::to_string(offsetY).c_str());
-    //OutputDebugStringA("\n");
+    OutputDebugStringA("[before] ");
+    OutputDebugStringA(std::to_string(offsetY).c_str());
+    OutputDebugStringA("\n");
 
 
     if (offsetY < 0)
@@ -7601,6 +7653,7 @@ void TocPanel::EnsureVisible(int line)
 
 void TocPanel::OnPaint(HDC hdc)
 {
+    OutputDebugStringA("[TocPanel] WM_PAINT\n");
     RECT rc; GetClientRect(m_hwnd, &rc);
     /* 1. 先把整块客户区刷成背景色，解决残影 */
     FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
@@ -8197,6 +8250,7 @@ LRESULT CALLBACK ScrollBarEx::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 void ScrollBarEx::OnPaint()
 {
+    OutputDebugStringA("[ScrollbarEx] WM_PAINT\n");
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(m_hwnd, &ps);
 
@@ -8544,8 +8598,19 @@ void SimpleContainer::present(float x, float y, litehtml::position* clip)
     m_lines.clear();
     m_plainText.clear();
 
-    BeginDraw();
+    m_rt->BeginDraw();
+    m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
 
+    // 1. 保存原始矩阵
+    m_rt->GetTransform(&m_oldMatrix);
+
+    // 3. 以鼠标位置为中心整体缩放
+    m_rt->SetTransform(
+        D2D1::Matrix3x2F::Scale(
+            m_zoom_factor,
+            m_zoom_factor,
+            D2D1::Point2F(static_cast<float>(0),
+                static_cast<float>(0))));
     m_doc->draw(getContext(),   // 强制转换
         x, y, clip);
 
@@ -8570,10 +8635,9 @@ void SimpleContainer::present(float x, float y, litehtml::position* clip)
             m_rt->FillRectangle(r, m_selBrush.Get());
         }
     }
-
-    EndDraw();
-
-
+    // 恢复原始矩阵
+    m_rt->SetTransform(m_oldMatrix);
+    m_rt->EndDraw();
 
 }
 // 判断是否为单词边界（空格、标点、换行）
