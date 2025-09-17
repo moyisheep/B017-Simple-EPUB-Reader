@@ -124,6 +124,7 @@ using namespace Gdiplus;
 #include <commdlg.h>   // OPENFILENAMEW, GetOpenFileNameW
 #pragma comment(lib, "comdlg32.lib")
 #include <shobjidl.h> // 包含任务对话框头文件
+#include <cstring>   // for memcpy
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -275,23 +276,7 @@ private:
     };
 };
 // 全局缓存（也可放 D2DBackend 内）
-struct LayoutKey {
-    std::wstring txt;
-    std::string  fontKey;
-    float        maxW;
-    bool operator==(const LayoutKey& o) const {
-        return txt == o.txt && fontKey == o.fontKey && maxW == o.maxW;
-    }
-};
-namespace std {
-    template<> struct hash<LayoutKey> {
-        size_t operator()(const LayoutKey& k) const noexcept {
-            return hash<std::wstring>()(k.txt) ^
-                hash<std::string>()(k.fontKey) ^
-                hash<float>()(k.maxW);
-        }
-    };
-}
+
 struct FontCachePair 
 {
     ComPtr<IDWriteTextFormat> fmt;
@@ -551,34 +536,69 @@ struct AppStates {
     }
 };
 
+// ------------------------------------------------------------------
+struct LayoutKey {
+    std::wstring txt;
+    std::string  fontKey;
+    float        maxW;
 
+    bool operator==(const LayoutKey& o) const noexcept {
+        return txt == o.txt && fontKey == o.fontKey && maxW == o.maxW;
+    }
+};
 
+// ------------------------------------------------------------------
+namespace std {
+    template<>
+    struct hash<LayoutKey> {
+        size_t operator()(const LayoutKey& k) const noexcept {
+            size_t h1 = std::hash<std::wstring>{}(k.txt);
+            size_t h2 = std::hash<std::string>{}(k.fontKey);
 
+            // C++17 兼容：把 float 按位拷到 uint32_t
+            uint32_t u;
+            static_assert(sizeof(float) == sizeof(uint32_t));
+            std::memcpy(&u, &k.maxW, sizeof(float));
+            size_t h3 = std::hash<uint32_t>{}(u);
 
-
+            return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2)) ^ (h3 + 0x9e3779b9);
+        }
+    };
+}
 
 
 class LayoutCache {
 public:
+    LayoutCache() = default;   // 补上
+
     using Map = std::unordered_map<LayoutKey,
-        Microsoft::WRL::ComPtr<IDWriteTextLayout>>;
+        Microsoft::WRL::ComPtr<IDWriteTextLayout>,
+        std::hash<LayoutKey>>;
 
-    // 2. 提供线程安全、可重复调用的清空接口
-    void clear() {
-        Map empty;
+    void set(const LayoutKey& k, const Microsoft::WRL::ComPtr<IDWriteTextLayout>& layout) {
         std::lock_guard<std::mutex> lk(mtx_);
-        map_.swap(empty);          // 把旧 map 整个换出来
-    }                              // 析构在锁外完成
+        map_[k] = layout;        // ComPtr 直接拷贝，引用计数自动管理
+    }
 
-    // 3. 其余接口按需封装
-    auto& operator[](const LayoutKey& k) { return map_[k]; }
-    auto  find(const LayoutKey& k) { return map_.find(k); }
-    auto  begin() { return map_.begin(); }
-    auto  end() { return map_.end(); }
+    Microsoft::WRL::ComPtr<IDWriteTextLayout> get(const LayoutKey& k) const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = map_.find(k);
+        return it != map_.end() ? it->second : nullptr;
+    }
 
+    void clear() noexcept {
+        Map empty;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            map_.swap(empty);
+        }
+    }
+
+    LayoutCache(const LayoutCache&) = delete;
+    LayoutCache& operator=(const LayoutCache&) = delete;
 private:
-    Map          map_;
-    std::mutex   mtx_;
+    mutable std::mutex mtx_;
+    Map                map_;
 };
 
 
@@ -1314,6 +1334,7 @@ public:
         m_flag.store(true, std::memory_order_relaxed);
     }
     ~BusyGuard() {
+        OutputDebugStringA("BusyGuard::~BusyGuard() - workerBusy = false\n");
         m_flag.store(false, std::memory_order_relaxed);
     }
     BusyGuard(const BusyGuard&) = delete;
