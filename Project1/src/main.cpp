@@ -2600,6 +2600,18 @@ void register_main_class()
     RegisterClassEx(&w);
 }
 
+void LogToFile(const std::string& message)
+{
+    fs::path debug_path = exe_dir() / "debug_log.txt";
+    std::ofstream log(debug_path, std::ios::app);
+    if (log.is_open())
+    {
+        log << message << std::endl;
+    }
+}
+
+
+
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 {
@@ -2609,7 +2621,10 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     // ---------- 1. 解析命令行 ----------
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-
+    //std::wstring txt = L"argc:" + std::to_wstring(argc) + L"\n";
+    //txt += L"argv: ";
+    //for (int i = 0; i < argc; i++) { txt = txt + argv[i] + L", "; }
+    //LogToFile(w2a(txt));
     wchar_t* firstFile = nullptr;
     if (argc > 1)
         firstFile = DupPath(argv[1]);   // 堆拷贝
@@ -2619,6 +2634,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     CreateMutex(nullptr, TRUE, L"SimpleEPUBReader_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
+        //LogToFile("[firstFile]\n");
         if (firstFile)
         {
             HWND hPrev = FindWindow(MAIN_CLASS, nullptr);
@@ -3791,7 +3807,20 @@ void replace_math_with_svg(std::string& html)
     for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
         /* 1. 取 MathML 原文 */
         std::string mathml = html.substr(it->start, it->end - it->start);
+        size_t altimgPos = mathml.find("altimg=\"");
+        if (altimgPos != std::string::npos) {
+            // 提取 altimg 属性值
+            size_t valueStart = altimgPos + 8; // 跳过 "altimg=\""
+            size_t valueEnd = mathml.find('"', valueStart);
+            if (valueEnd != std::string::npos) {
+                std::string altimgSrc = mathml.substr(valueStart, valueEnd - valueStart);
 
+                // 直接构建 img 标签
+                std::string imgTag = R"(<img class="math-png" src=")" + altimgSrc + R"(" alt="math"></img>)";
+                html.replace(it->start, it->end - it->start, imgTag);
+                continue; // 跳过后续转换流程
+            }
+        }
         std::string hash = blade16(mathml);
         if (!g_cMain)continue;
         if(!g_cMain->isImageCached(hash))
@@ -8230,7 +8259,7 @@ LRESULT CALLBACK ScrollBarEx::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 void ScrollBarEx::OnPaint()
 {
-
+    OutputDebugStringA("[ScrollBarEx] WM_PAINT\n");
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(m_hwnd, &ps);
 
