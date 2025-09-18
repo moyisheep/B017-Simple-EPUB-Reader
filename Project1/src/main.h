@@ -476,7 +476,7 @@ struct AppSettings {
     bool enableGlobalCSS = false;
     bool enablePreprocessHTML = true;
     bool enableHoverPreview = true;
-    bool enableImagePreview = true;
+    bool enableClickPreview = true;
 
     bool displayTOC = true;
     bool displayStatusBar = true;
@@ -516,7 +516,7 @@ struct AppSettings {
     Gdiplus::Color scrollbar_dot_color_highlight{ 255, 238, 165, 102 };
     Gdiplus::Color scrollbar_dot_color{ 209, 202, 197, 80 };
     COLORREF highlight_color_cr = RGB(238, 165, 102);  // #eea566
-    COLORREF hover_color_cr = RGB(219, 140, 75);  
+    COLORREF hover_color_cr = RGB(240, 240, 240);  
     // 2) D2D1 颜色（保持原透明度 0.4，可按需改）
     D2D1::ColorF highlight_color_d2d{
         238.0f / 255.0f,  // R
@@ -711,7 +711,7 @@ private:
     int64_t hit_test(float x, float y);
 
     bool   m_selecting = false;
-    bool m_isSelected = false;
+
     // 当前选区
     int64_t m_selStart = -1;   // 字符级偏移
     int64_t m_selEnd = -1;   // 同上
@@ -979,6 +979,7 @@ private:
     int                        m_totalH = 0;
     int                        m_selLine = -1;
     OnNavigate                 m_onNavigate;
+    HWND m_hTip = nullptr;
     
     HFONT m_hFont = nullptr;
     HWND m_hwnd = nullptr;
@@ -986,6 +987,7 @@ private:
     int m_marginLeft = 10;  // 左侧留白
     int m_marginBottom = 10;
     HBRUSH   m_hightlightBrush;
+    HBRUSH   m_hoverBrush;
     int m_curTarget = 0;
     int m_curHover = -1;
 };
@@ -1131,7 +1133,7 @@ private:
 
 
     void OnPaint();
-    bool HitThumb(const POINT& pt) const;
+
     void OnLButtonDown(int x, int y);
     void OnMouseLeave(int x, int y);
     void OnMouseMove(int x, int y);

@@ -41,6 +41,8 @@
 #define ID_ZOOM_BIGGER         40024
 #define ID_ZOOM_SMALLER        40025
 #define ID_ZOOM_RESET          40026
+#define IDM_TOGGLE_CLICK_PREVIEW        40027
+
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED

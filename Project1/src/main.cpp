@@ -1336,13 +1336,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         litehtml::position::vector redraw_boxes;
         g_cMain->m_doc->on_lbutton_down(pt.x, pt.y, 0, 0, redraw_boxes);
         if (!redraw_boxes.empty()) {
-            for (auto r : redraw_boxes)
-            {
-                RECT rc{ r.left(), r.top(), r.right(), r.bottom() };
-                UpdateCache();
-                InvalidateRect(hwnd, &rc, true);
-
-            }
+            InvalidateRect(hwnd, nullptr, false);
         }
         return 0;
     }
@@ -1363,14 +1357,9 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             litehtml::position::vector redraw_boxes;
             g_cMain->m_doc->on_lbutton_up(pt.x, pt.y, 0, 0, redraw_boxes);
             if (!redraw_boxes.empty()) {
-                for (auto r : redraw_boxes)
-                {
-                    RECT rc{ r.left(), r.top(), r.right(), r.bottom() };
-                    UpdateCache();
-                    InvalidateRect(hwnd, &rc, true);
-
-                }
+                InvalidateRect(hwnd, nullptr, false);
             }
+   
         }
         return 0;
     }
@@ -1406,14 +1395,9 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             litehtml::position::vector redraw_boxes;
             g_cMain->m_doc->on_mouse_over(pt.x, pt.y, 0, 0, redraw_boxes);
             if (!redraw_boxes.empty()) {
-                for (auto r : redraw_boxes)
-                {
-                    RECT rc{ r.left(), r.top(), r.right(), r.bottom() };
-                    UpdateCache();
-                    InvalidateRect(hwnd, &rc, true);
-
-                }
+                InvalidateRect(hwnd, nullptr, false);
             }
+      
         }
   
         return 0;
@@ -1461,19 +1445,15 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_MOUSELEAVE:
     {
-
-        litehtml::position::vector redraw_box;
-        g_cMain->m_doc->on_mouse_leave(redraw_box);
-
-        if (!redraw_box.empty())
+        if(g_cMain && g_cMain->m_doc)
         {
-            for (auto box : redraw_box)
-            {
-                RECT r(box.left(), box.top(), box.right(), box.bottom());
-                InvalidateRect(hwnd, &r, false);
+            litehtml::position::vector redraw_boxes;
+            g_cMain->m_doc->on_mouse_leave(redraw_boxes);
+            if (!redraw_boxes.empty()) {
+                InvalidateRect(hwnd, nullptr, false);
             }
-            UpdateCache();
         }
+
 
         return 0;
     }
@@ -2327,7 +2307,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         {
             SetCapture(hwnd); g_dragging = true;
         }
-        return 0;
+        break;
     }
 
     case WM_MOUSEMOVE:
@@ -2339,12 +2319,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_splitX = x;
             PostMessage(hwnd, WM_SIZE, 0, 0);
         }
-        return 0;
+        break;
     }
     case WM_LBUTTONUP:
     {
         if (g_dragging) { ReleaseCapture(); g_dragging = false; }
-        return 0;
+        break;
     }
     case WM_SETCURSOR:
     {
@@ -2436,26 +2416,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
                 MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
             break;
+        case IDM_TOGGLE_CLICK_PREVIEW:
+            g_cfg.enableClickPreview = !g_cfg.enableClickPreview;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CLICK_PREVIEW,
+                MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
+            break;
+
 
         case IDM_TOGGLE_TOC_WINDOW:
 
             g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
                 MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
-            if (g_cfg.displayTOC) { ShowWindow(g_hToc, SW_SHOW); }
-            else { ShowWindow(g_hToc, SW_HIDE); }
-            // 让主窗口重新布局
+
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
+        case IDM_TOGGLE_SCROLLBAR_WINDOW:
+        {
+            g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLLBAR_WINDOW,
+                MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
 
+            PostMessage(g_hWnd, WM_SIZE, 0, 0);
+            break;
+        }
         case IDM_TOGGLE_STATUS_WINDOW:
 
             g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
                 MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
-            if (g_cfg.displayStatusBar) { ShowWindow(g_hStatus, SW_SHOW); }
-            else { ShowWindow(g_hStatus, SW_HIDE); }
-            // 让主窗口重新布局
+
+
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
 
@@ -2744,12 +2735,10 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
  
     
        
-    EnableMenuItem(hMenu, IDM_TOGGLE_JS, MF_BYCOMMAND | MF_GRAYED);
+
 
     EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
-    EnableMenuItem(hMenu, IDM_TOGGLE_SCROLLBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
-    //EnableMenuItem(hMenu, IDM_TOGGLE_STATUS_WINDOW, MF_BYCOMMAND | MF_GRAYED);
-    //EnableMenuItem(hMenu, IDM_TOGGLE_TOC_WINDOW, MF_BYCOMMAND | MF_GRAYED);
+
     EnableClearType();
   
 
@@ -3041,7 +3030,7 @@ bool SimpleContainer::on_element_click(const litehtml::element::ptr& el)
     OutputDebugStringA(el->get_tagName());
     OutputDebugStringA("\n");
     el->set_pseudo_class(litehtml::_hover_, true);
-    if (std::strcmp(el->get_tagName(), "img") == 0 && g_cfg.enableImagePreview && !g_book->find_link_in_chain(el))
+    if (std::strcmp(el->get_tagName(), "img") == 0 && g_cfg.enableClickPreview && !g_book->find_link_in_chain(el))
     {   
 
         g_book->show_imageview(el);
@@ -7500,61 +7489,66 @@ void TocPanel::OnMouseMove(int x, int y)
         if (GetCapture() == m_hwnd)
             ReleaseCapture();          // 释放捕获
         m_curHover = -1;
-        if (g_book) g_book->cancel_delayed_tooltip();
+        if (m_hTip) { ShowWindow(m_hTip, SW_HIDE); }
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return;
     }
 
     int line = HitTest(y);
-    if (line < 0)
+    if (line < 0 )
     {
         m_curHover = -1;
-        if (g_book) g_book->cancel_delayed_tooltip();
+        if (m_hTip) { ShowWindow(m_hTip, SW_HIDE); }
         SetCursor(LoadCursor(nullptr, IDC_ARROW));
         return;
     }
-    if (m_curHover == line) { return; }
+    if (m_curHover == line) {  return; }
+    if (line == m_selLine) { m_curHover = -1; if (m_hTip) { ShowWindow(m_hTip, SW_HIDE); }return; }
+
+    m_curHover = line;
+    SetCursor(LoadCursor(nullptr, IDC_HAND));
+    std::wstring wtxt = m_nodes[m_visible[line]].nav->label;
+    // 2. 判断文字是否被截断
+    HDC hdc = GetDC(m_hwnd);
+    HFONT old = (HFONT)SelectObject(hdc, m_hFont);   // 你的字体
+    SIZE sz{};
+    GetTextExtentPoint32W(hdc, wtxt.c_str(), (int)wtxt.size(), &sz);
+    int indent = m_nodes[m_visible[line]].nav->order * 16 + m_marginLeft;
+    int fullW =  sz.cx + indent;
+
+    SelectObject(hdc, old);
+    ReleaseDC(m_hwnd, hdc);
+
+    // 3. 可用宽度 = 客户区宽 - 左边缩进
+    int clientW = rc.right - rc.left;   // 根据你实际缩进计算
+
+    bool truncated = (fullW > clientW);
+
+
+
+    //if (truncated)
     {
-        if (line != m_curHover && IsWindowVisible(g_hTooltip))
-            g_book->cancel_delayed_tooltip();
+        RECT rc; GetWindowRect(m_hwnd, &rc);
+        int x = (m_nodes[m_visible[line]].nav->order * 16 + 12) + m_marginLeft + rc.left;
+        int y = (m_marginTop + line * m_lineH - m_scrollY) + rc.top;
 
-        m_curHover = line;
-        SetCursor(LoadCursor(nullptr, IDC_HAND));
-        std::wstring wtxt = m_nodes[m_visible[line]].nav->label;
-        // 2. 判断文字是否被截断
-        HDC hdc = GetDC(m_hwnd);
-        HFONT old = (HFONT)SelectObject(hdc, m_hFont);   // 你的字体
-        SIZE sz{};
-        GetTextExtentPoint32W(hdc, wtxt.c_str(), (int)wtxt.size(), &sz);
-        int indent = m_nodes[m_visible[line]].nav->order * 16 + m_marginLeft;
-        int fullW =  sz.cx + indent;
+        SetWindowText(m_hTip, wtxt.c_str());
+        SetWindowFont(m_hTip, m_hFont, TRUE);
 
-        SelectObject(hdc, old);
-        ReleaseDC(m_hwnd, hdc);
-
-        // 3. 可用宽度 = 客户区宽 - 左边缩进
-        int clientW = rc.right - rc.left;   // 根据你实际缩进计算
-
-        bool truncated = (fullW > clientW);
-
-        if (line != m_curHover)
-        {
-            m_curHover = line;
-            if (g_book) g_book->cancel_delayed_tooltip();   // 先清旧
-        }
-
-        if (truncated)
-        {
-            // 4. 立即显示完整文字
-            std::string txt ="<p>"  + w2a(wtxt)  + "</p>";
-            if (g_book) g_book->delayed_show_tooltip(txt, fullW, 100);  // 0 = 不限制宽度
-        }
-        else
-        {
-            // 文字完整，不需要 tooltip
-            if (g_book) g_book->cancel_delayed_tooltip();
-        }
+        SetWindowLong(m_hTip, GWL_STYLE,
+            GetWindowLong(m_hTip, GWL_STYLE) | WS_BORDER);
+      
+        ShowWindow(m_hTip, SW_SHOWNOACTIVATE);
+        MoveWindow(m_hTip, x, y, fullW, m_lineH, true);
+        InvalidateRect(m_hTip, NULL, TRUE);
+        UpdateWindow(m_hTip);
     }
+    //else
+    //{
+    //    // 文字完整，不需要 tooltip
+    //    if (m_hTip) { ShowWindow(m_hTip, SW_HIDE); }
+    //}
+  
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 void TocPanel::OnMouseLeave(int x, int y)
@@ -7577,6 +7571,14 @@ TocPanel::TocPanel()
     // 1. 在 WM_CREATE / 初始化时创建一次
   
     m_hightlightBrush = CreateSolidBrush(g_cfg.highlight_color_cr);
+    m_hoverBrush = CreateSolidBrush(g_cfg.hover_color_cr);
+    m_hTip = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST ,
+        L"STATIC", L"",
+        WS_POPUP | SS_LEFT | SS_NOPREFIX,
+        0, 0, 0, 0,
+        m_hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
+    ShowWindow(m_hTip, SW_HIDE);
 
 }
 TocPanel::~TocPanel()
@@ -7645,7 +7647,8 @@ void TocPanel::OnPaint(HDC hdc)
                 m_marginTop + (i + 1) * m_lineH - m_scrollY };
 
         // 高亮当前选择
-        HBRUSH br = (i == m_selLine)
+
+        HBRUSH   br = (i == m_selLine)
             ? m_hightlightBrush
             : GetSysColorBrush(COLOR_WINDOW);
         FillRect(hdc, &r, br);
@@ -7659,18 +7662,11 @@ void TocPanel::OnPaint(HDC hdc)
             sign[0] = n.expanded ? L'−' : L'+';
 
         SetBkMode(hdc, TRANSPARENT);
-        if (i == m_curHover && i != m_selLine)
-        {
-            SetTextColor(hdc, g_cfg.hover_color_cr);
-        }
-        else
-        {
-            SetTextColor(hdc, GetSysColor(i == m_selLine
-                ? COLOR_HIGHLIGHTTEXT
-                : COLOR_WINDOWTEXT));
-        }
 
 
+        SetTextColor(hdc, GetSysColor(i == m_selLine
+            ? COLOR_HIGHLIGHTTEXT
+            : COLOR_WINDOWTEXT));
         // 文字再缩进：左侧留白 + 层级缩进
         int textLeft = m_marginLeft + indent;
         TextOutW(hdc, textLeft, r.top + 2, sign, lstrlenW(sign));
@@ -7686,7 +7682,7 @@ void TocPanel::OnLButtonDown(int x, int y)
 {
     int line = HitTest(y);
     if (line < 0) return;
-
+    ShowWindow(m_hTip, SW_HIDE);
     const Node& n = m_nodes[m_visible[line]];
     m_curTarget = m_visible[line];
     if (n.childIdx.empty())
@@ -7820,6 +7816,7 @@ void TocPanel::OnVScroll(int code, int pos)
 }
 void TocPanel::OnMouseWheel(int delta)
 {
+    ShowWindow(m_hTip, SW_HIDE);
     // 每 120 单位滚一行；可根据需要改成多行或整页
     int lines = delta / WHEEL_DELTA;          // WHEEL_DELTA = 120
     for (int i = 0; i < abs(lines); ++i)
@@ -8197,10 +8194,9 @@ void ScrollBarEx::SetPosition(int spineId, float totalHeightPx, float offsetPx)
 {
     if (spineId >= 0 && spineId < m_count)
     {
-        RECT rc; GetClientRect(m_hwnd, &rc);
-        float h = rc.bottom - rc.top;
+
         m_pos.spine_id = spineId;
-        m_pos.height = totalHeightPx - h;
+        m_pos.height = totalHeightPx;
         m_pos.offset = offsetPx;
 
         InvalidateRect(m_hwnd, nullptr, false);
@@ -8329,33 +8325,11 @@ void ScrollBarEx::OnPaint()
     DeleteDC(memDC);
     EndPaint(m_hwnd, &ps);
 }
-bool ScrollBarEx::HitThumb(const POINT& pt) const
-{
 
-    if (m_count <= 0) return false;
-    if (!m_mouseIn)return false;
-    RECT rc; GetClientRect(m_hwnd, &rc);
-    int H = rc.bottom - rc.top;
-    const double ratio = (m_pos.height > 0)
-        ? std::max(0.0f, std::min(1.0f, m_pos.offset / m_pos.height))
-        : 0.0;
-
-    int thumbY = static_cast<int>(ratio * (H - thumbH));
-    thumbY = std::max(0, std::min(thumbY, H - thumbH));
-    if (pt.y >= thumbY && (pt.y) <= (thumbY + thumbH))return true;
-    return false;
-}
 
 void ScrollBarEx::OnLButtonDown(int x, int y)
 {
-    //POINT pt{ x, y };
-    //if (HitThumb(pt))
-    //{
-    //    SetCapture(m_hwnd);
-    //    m_thumb.drag = true;
 
-
-    //}
 }
 void ScrollBarEx::OnMouseLeave(int x, int y)
 {
@@ -8364,48 +8338,17 @@ void ScrollBarEx::OnMouseMove(int x, int y)
 {
 
  
-    ///* 悬停高亮（可选） */
-    //POINT pt{ x, y };
-    //bool in = HitThumb(pt);
-    //if (in != m_thumb.hot)
-    //{
-    //    m_thumb.hot = in;
-    //    InvalidateRect(m_hwnd, nullptr, FALSE);
-    //}
-
-    //if (m_thumb.drag)
-    //{
-   
-    //    RECT rc; GetClientRect(m_hwnd, &rc);
-    //    int h = rc.bottom - rc.top;
-    //    float ratio = std::max(0.0f, std::min(1.0f, static_cast<float>(pt.y) / static_cast<float>(h)));
-    //   
-    //    float newTop = (m_pos.height) * ratio ;
-
-
-    //    if (g_vd) { g_vd->set_scroll_position(ScrollPosition{m_pos.spine_id, newTop, m_pos.height}); }
-
-    //    UpdateCache();
-
-    //}
 }
 
 void ScrollBarEx::OnLButtonUp()
 {
-    //if (m_thumb.drag)
-    //{
-    //    ReleaseCapture();
-    //    m_thumb.drag = false;
-    //    InvalidateRect(m_hwnd, nullptr, FALSE);
-    //}
+
 
 }
 
 void ScrollBarEx::OnRButtonUp()
 {
-     //m_mouseIn = !m_mouseIn;
-     //InvalidateRect(m_hwnd, nullptr, false);     
-     //UpdateWindow(m_hwnd); 
+
 }
 
 int64_t SimpleContainer::hit_test(float x, float y)
@@ -8424,7 +8367,7 @@ void SimpleContainer::on_lbutton_down(int x, int y)
 {
     m_selecting = true;
 
-    m_selStart = m_selEnd = hit_test((float)x, (float)y);
+    m_selStart = m_selEnd = -1;
     UpdateCache();
 }
 
@@ -8438,25 +8381,21 @@ void SimpleContainer::on_mouse_move(int x, int y)
         auto result = hit_test((float)x, (float)y);
         if (result >= 0) 
         {
-            m_isSelected = true;
             if (m_selStart < 0) { m_selStart = result; }
             m_selEnd = result; 
             UpdateCache();
             InvalidateRect(m_hwnd, nullptr, false);
             UpdateWindow(m_hwnd);
         }
- 
-
-
 
     }
 }
 
 void SimpleContainer::on_lbutton_up()
 {
-    if (!m_isSelected) { clear_selection(); }
+
     m_selecting = false;
-    m_isSelected = false;
+
     m_currentCursor = IDC_ARROW;
     SetCursor(LoadCursor(nullptr, m_currentCursor));
     InvalidateRect(g_hView, nullptr, false);
@@ -8653,7 +8592,6 @@ void SimpleContainer::clear_selection()
 void SimpleContainer::on_lbutton_dblclk(int x, int y)
 {
     if (m_plainText.empty() || m_lines.empty()) return;
-
     /* 1. 字符偏移 */
     size_t clickPos = hit_test(x, y);
     if (clickPos == size_t(-1) || clickPos >= m_plainText.size())
