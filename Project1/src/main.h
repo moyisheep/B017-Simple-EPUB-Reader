@@ -86,8 +86,7 @@ using namespace Gdiplus;
 
 
 #include <atomic>
-#include <thread>
-#include <queue>
+
 #include <mutex>
 #include <condition_variable>
 #include <array>
@@ -449,22 +448,25 @@ public:
 
     std::string get_title();
     std::string get_author();
-    void show_tooltip(const std::string html);
+
+    void delayed_show_tooltip(std::string txt, unsigned width=300, unsigned delayMs=300);
+    void cancel_delayed_tooltip();
+    void show_tooltip(const std::string html, int width);
     void hide_imageview();
     void hide_tooltip();
     static std::string get_anchor_html(litehtml::document* doc, const std::string& anchor);
     void clear();
     void LoadToc();
-    HWND                   m_tooltip{ nullptr };   // 你的缩略图窗口
-    std::wstring           m_tooltip_url;          // 缓存当前 url
-    std::vector<std::pair<std::wstring, std::vector<uint8_t>>> collect_epub_fonts();
+
 
     void build_epub_font_index();
     std::unordered_map<FontKey, std::vector<std::wstring>> m_fontBin;
 
     EPUBBook() noexcept {}
     ~EPUBBook();
-
+private:
+    struct TooltipPayload {  std::string html; unsigned width;};
+    MMRESULT m_tooltipTimer = 0;
 };
 
 
@@ -514,7 +516,7 @@ struct AppSettings {
     Gdiplus::Color scrollbar_dot_color_highlight{ 255, 238, 165, 102 };
     Gdiplus::Color scrollbar_dot_color{ 209, 202, 197, 80 };
     COLORREF highlight_color_cr = RGB(238, 165, 102);  // #eea566
-
+    COLORREF hover_color_cr = RGB(219, 140, 75);  
     // 2) D2D1 颜色（保持原透明度 0.4，可按需改）
     D2D1::ColorF highlight_color_d2d{
         238.0f / 255.0f,  // R
@@ -701,7 +703,7 @@ private:
 
 
     int  m_w, m_h;
-    ComPtr<ID2D1Bitmap> m_bmp;
+
     D2D1_MATRIX_3X2_F m_oldMatrix{};
     HWND m_hwnd = nullptr;
     ComPtr<ID2D1Factory1> m_d2dFactory = nullptr;   // 原来是 ID2D1Factory = nullptr;
@@ -709,7 +711,7 @@ private:
     int64_t hit_test(float x, float y);
 
     bool   m_selecting = false;
-
+    bool m_isSelected = false;
     // 当前选区
     int64_t m_selStart = -1;   // 字符级偏移
     int64_t m_selEnd = -1;   // 同上
@@ -751,6 +753,7 @@ private:
     ComPtr<IDWriteTextAnalyzer> m_analyzer;
 
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBmpCache;
+    std::mutex m_imgCacheMutex;
 };
 
 
@@ -850,8 +853,8 @@ private:
     };
     std::queue<Task>         m_taskQueue;       // 待处理任务
 
-
-
+    std::condition_variable m_cvFinish;
+    std::atomic<bool> m_cancelFlag{ false };
 };
 
 
@@ -933,6 +936,8 @@ public:
         int  spineId = -1;      //
     };
 
+
+
     TocPanel();
     ~TocPanel();
     void clear();
@@ -963,7 +968,8 @@ private:
     void OnLButtonDown(int x, int y);
 
     float getAnchorOffsetY(const std::wstring& href);
-
+    void OnMouseMove(int x, int y);
+    void OnMouseLeave(int x, int y);
     // 数据
     std::vector<Node>          m_nodes;
     std::vector<size_t>        m_roots;
@@ -981,6 +987,7 @@ private:
     int m_marginBottom = 10;
     HBRUSH   m_hightlightBrush;
     int m_curTarget = 0;
+    int m_curHover = -1;
 };
 
 //  file system

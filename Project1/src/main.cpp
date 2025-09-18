@@ -1,6 +1,6 @@
 ﻿#include "main.h"
 
-HWND  g_hwndToc = nullptr;    // 侧边栏 TreeView
+HWND  g_hToc = nullptr;    // 侧边栏 TreeView
 HIMAGELIST g_hImg = nullptr;   // 图标(可选)
 HWND      g_hWnd = nullptr;
 HWND g_hStatus = nullptr;   // 状态栏句柄
@@ -66,7 +66,7 @@ std::unique_ptr<ReadingRecorder> g_recorder;
 
 static MMRESULT g_tickTimer = 0;   // 0 表示当前没有定时器
 static MMRESULT g_flushTimer = 0;
-static MMRESULT g_tooltipTimer = 0;
+
 static MMRESULT g_updateTimer = 0;
 static MMRESULT g_scrollTimer = 0;
 std::atomic<float> g_velocity{ 0 };     // 像素/秒
@@ -75,7 +75,7 @@ std::atomic<float> g_velocity{ 0 };     // 像素/秒
 int g_center_offset = 0;
 
 
-static HWND  g_hwndSplit = nullptr;   // 分隔条
+
 static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
 static bool  g_dragging = false;     // 是否正在拖动
 static bool  g_imageview_dragging = false;
@@ -1526,7 +1526,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         //    g_scrollTimer = timeSetEvent(g_cfg.scroll_update_interval_ms, 0, OnScrollTimer, 0, TIME_PERIODIC);
         //}
         float cur = g_offsetY.load(std::memory_order_relaxed);
-        cur += pxDelta;
+        cur = std::clamp(cur + pxDelta, -h/2.0f, g_vd->m_height - h/2.0f);
         g_offsetY.store(cur, std::memory_order_relaxed);
         // 更新阅读记录
         if (!g_tickTimer)
@@ -1990,19 +1990,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             hwnd, nullptr, g_hInst, nullptr);
 
         // 2. 创建
-        g_hwndToc = CreateWindowExW(
-            WS_EX_COMPOSITED,          // 双缓冲
+        g_hToc = CreateWindowExW(
+            WS_EX_COMPOSITED ,          // 双缓冲
             TOC_CLASS,                 // 用注册的类名
             nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+            WS_CHILD   | WS_BORDER,
             0, 0, 200, 600,
             hwnd, (HMENU)100, g_hInst, nullptr);
 
-        g_hwndSplit = CreateWindowExW(
-            0, WC_STATICW, nullptr,
-            WS_CHILD | SS_ETCHEDVERT,
-            200, 0, 2, 600,          // 2 px 宽
-            hwnd, (HMENU)101, g_hInst, nullptr);
+
 
         g_hView = CreateWindowExW(
             0, VIEW_CLASS, nullptr,
@@ -2101,7 +2097,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CONTEXTMENU:
     {
         HWND hwndFrom = (HWND)wp;
-        if (hwndFrom == g_hView || hwndFrom == g_hwndToc)
+        if (hwndFrom == g_hView || hwndFrom == g_hToc)
         {
             // 1. 取出屏幕坐标
             int x = GET_X_LPARAM(lp);
@@ -2165,7 +2161,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_toc->clear();
         g_vd->clear();
         InvalidateRect(g_hView, nullptr, TRUE);
-        InvalidateRect(g_hwndToc, nullptr, TRUE);
+        InvalidateRect(g_hToc, nullptr, TRUE);
 
         // 启动新任务
         SetStatus(STATUSBAR_INFO, L"正在加载...");
@@ -2193,7 +2189,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     {
         PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
         EndPaint(hwnd, &ps);
-        OutputDebugStringA("[HWND] WM_PAINT\n");
         break;
     }
     case WM_EPUB_PARSED: {
@@ -2225,12 +2220,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         UpdateCache();          // 复用前面给出的 UpdateCache()
 
-        // 4) 触发一次轻量 WM_PAINT（只 BitBlt）
+        
         PostMessage(hwnd, WM_SIZE, 0, 0);
-        //PostMessage(g_hView, WM_SIZE, 0, 0);
-        //InvalidateRect(g_hView, nullptr, true);
- 
-        //UpdateWindow(g_hView);
 
         SetStatus(STATUSBAR_INFO, L"加载完成");
         SetForegroundWindow(hwnd);          // 关键：把输入焦点抢过来
@@ -2247,9 +2238,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int cyClient = rcClient.bottom;
         if (g_states.isLoaded)
         {
-            MoveWindow(g_hHomepage, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hTooltip, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hImageview, 0, 0, 0, 0, FALSE);
+
             ShowWindow(g_hHomepage, SW_HIDE);
             ShowWindow(g_hImageview, SW_HIDE);
             ShowWindow(g_hTooltip, SW_HIDE);
@@ -2276,35 +2265,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const int cy = cyClient - cyTB - cySB;
 
             /* 4. 目录宽度 & 竖线 */
+
+
+            // 最终宽度：显示 TOC 时取 g_splitX 与 idealTocW 的较大值
             const int tocW = g_cfg.displayTOC ? g_splitX : 0;
-            ShowWindow(g_hwndToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
-            ShowWindow(g_hwndSplit, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
+            ShowWindow(g_hToc, g_cfg.displayTOC ? SW_SHOW : SW_HIDE);
+
 
             /* 5. 滚动条宽度 */
             const int sbW = g_cfg.displayScrollBar ? 20 : 0;
             ShowWindow(g_hViewScroll, g_cfg.displayScrollBar ? SW_SHOW : SW_HIDE);
             ShowWindow(g_hView,  SW_SHOW );
             /* 6. 摆放子窗口（Y 起点统一为 cyTB） */
-            MoveWindow(g_hwndToc, 0, cyTB, tocW, cy, TRUE);
-            MoveWindow(g_hwndSplit, tocW, cyTB, 2, cy, TRUE);
-            MoveWindow(g_hView, tocW + 2, cyTB,
-                cx - tocW - 2 - sbW, cy, TRUE);      // 正文让出滚动条
-            MoveWindow(g_hViewScroll,
-                cx - sbW, cyTB, sbW, cy, TRUE);      // 滚动条贴最右
-            //UpdateCache();
+
+        /* 5. 用 SetWindowPos 摆位置，禁止立即重绘、禁止改 Z 序 */
+            SetWindowPos(g_hToc, NULL, 0, cyTB, tocW, cy,
+                SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE);
+  
+            SetWindowPos(g_hView, NULL, tocW , cyTB, cx - tocW - sbW, cy,
+                SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(g_hViewScroll, NULL, cx - sbW, cyTB, sbW, cy,
+                SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE);
+
+            /* 6. 统一重绘整个父窗口及其子窗口 */
+            RedrawWindow(hwnd, NULL, NULL,
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         }
         else
         {
-            MoveWindow(g_hStatus, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hwndSplit, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hwndToc, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hViewScroll, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hView, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hTooltip, 0, 0, 0, 0, FALSE);
-            MoveWindow(g_hImageview, 0, 0, 0, 0, FALSE);
+
             ShowWindow(g_hStatus, SW_HIDE);
-            ShowWindow(g_hwndSplit, SW_HIDE);
-            ShowWindow(g_hwndToc, SW_HIDE);
+
+            ShowWindow(g_hToc, SW_HIDE);
             ShowWindow(g_hViewScroll, SW_HIDE);
             ShowWindow(g_hView, SW_HIDE);
             ShowWindow(g_hImageview, SW_HIDE);
@@ -2335,7 +2327,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         {
             SetCapture(hwnd); g_dragging = true;
         }
-        break;
+        return 0;
     }
 
     case WM_MOUSEMOVE:
@@ -2347,12 +2339,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_splitX = x;
             PostMessage(hwnd, WM_SIZE, 0, 0);
         }
-        break;
+        return 0;
     }
     case WM_LBUTTONUP:
     {
         if (g_dragging) { ReleaseCapture(); g_dragging = false; }
-        break;
+        return 0;
     }
     case WM_SETCURSOR:
     {
@@ -2407,11 +2399,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DESTROY: {
         g_recorder->flush();
-        if (g_tooltipTimer)
-        {
-            timeKillEvent(g_tooltipTimer);
-            g_tooltipTimer = 0;
-        }
+
         PostQuitMessage(0);
         return 0;
     }
@@ -2454,8 +2442,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
                 MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
-            if (g_cfg.displayTOC) { ShowWindow(g_hwndToc, SW_SHOW); }
-            else { ShowWindow(g_hwndToc, SW_HIDE); }
+            if (g_cfg.displayTOC) { ShowWindow(g_hToc, SW_SHOW); }
+            else { ShowWindow(g_hToc, SW_HIDE); }
             // 让主窗口重新布局
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
@@ -2626,7 +2614,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 {
 
     // 在 WinMain 最开头
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    //CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     // ---------- 1. 解析命令行 ----------
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -2779,7 +2767,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
             DispatchMessage(&msg);
         }
     }
-    ::CoUninitialize();
+    //::CoUninitialize();
     GdiplusShutdown(gdiplusToken);
     return static_cast<int>(msg.wParam);
 }
@@ -2833,6 +2821,7 @@ void VirtualDoc::OnTreeSelChanged(std::wstring href)
 
 void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 {
+    std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     if (m_img_cache.contains(src)) return;
 
 
@@ -2892,6 +2881,7 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 
 
 void SimpleContainer::get_image_size(const char* src, const char* baseurl, litehtml::size& sz) {
+    std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
     auto img = m_img_cache[src];
     sz.width = img.width;
@@ -2928,11 +2918,13 @@ void SimpleContainer::get_viewport(litehtml::position& client) const
 }
 
 
+
 litehtml::element::ptr
 SimpleContainer::create_element(const char* tag,
     const litehtml::string_map& attrs,
     const std::shared_ptr<litehtml::document>& doc)
 {
+
 
     if (litehtml::t_strcasecmp(tag, "script") != 0)
         return nullptr;   // 让 litehtml 自己建别的节点
@@ -3075,37 +3067,11 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
         if (id.empty()) {  return; }
         html = g_book->html_of_anchor_paragraph(g_cMain->m_doc.get(), id);
   
-         //如果已存在，先杀掉
-        if (g_tooltipTimer)
-        {
-            timeKillEvent(g_tooltipTimer);
-            g_tooltipTimer = 0;
-        }
-
-        // 用 new 把 element 指针传进去
-        struct Payload { std::string html; };
-        auto* p = new Payload{ std::move(html)};
-
-        g_tooltipTimer = timeSetEvent(
-            g_cfg.tooltip_delay_ms,          // 延迟
-            1,                         // 分辨率 1ms
-            [](UINT, UINT, DWORD_PTR dwUser, DWORD_PTR, DWORD_PTR)
-            {
-                auto* t = reinterpret_cast<Payload*>(dwUser);
-                g_book->show_tooltip(std::move(t->html));
-                delete t;
-            },
-            reinterpret_cast<DWORD_PTR>(p),
-            TIME_ONESHOT);             // 一次性
+        if (g_book) { g_book->delayed_show_tooltip(std::move(html), g_cfg.tooltip_width, g_cfg.tooltip_delay_ms); }
     }
     else
     {
-        if (g_tooltipTimer)
-        {
-            timeKillEvent(g_tooltipTimer);
-            g_tooltipTimer = 0;
-        }
-        g_book->hide_tooltip();
+        if (g_book) { g_book->cancel_delayed_tooltip(); }   // 先杀旧计时器
     }
 }
 
@@ -4151,6 +4117,7 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
 
     /* ---------- 1. 取缓存位图 ---------- */
+    std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     auto it = m_img_cache.find(url);
     if (it == m_img_cache.end()) return;
     const ImageFrame& frame = it->second;
@@ -4988,7 +4955,6 @@ void SimpleContainer::del_clip()
 
 void EPUBBook::load_all_fonts() {
 
-        //auto fonts = collect_epub_fonts();
         FontKey key{ L"serif", 400, false, 0 };
         m_fontBin[key] = { g_cfg.default_serif };
         key = { L"sans-serif", 400, false, 0 };
@@ -4997,7 +4963,6 @@ void EPUBBook::load_all_fonts() {
         m_fontBin[key] = { g_cfg.default_monospace };
         build_epub_font_index();
 
- 
 }
 
 
@@ -5191,57 +5156,6 @@ void EPUBBook::build_epub_font_index()
 
 
 
-std::vector<std::pair<std::wstring, std::vector<uint8_t>>>
-EPUBBook::collect_epub_fonts()
-{
-    std::vector<std::pair<std::wstring, std::vector<uint8_t>>> fonts;
-    const std::set<std::wstring, CaseInsensitiveLess> font_exts = {
-        L".ttf", L".otf", L".woff", L".woff2"
-    };
-    std::unordered_set<std::wstring> used_names;
-
-    for (const auto& item : g_book->ocf_pkg_.manifest)
-    {
-        std::wstring href = item.href;
-        std::wstring ext;               // 最终扩展名，带前导点
-        size_t lastDot = href.find_last_of(L'.');
-        if (lastDot != std::wstring::npos && lastDot + 1 < href.size())
-        {
-            ext = href.substr(lastDot);   // 包含点
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        }
-        else
-        {
-            continue;   // 没有扩展名，跳过
-        }
-        if (!font_exts.count(ext)) continue;
-
-        std::wstring href_key = url_decode(item.href);
-        std::wstring wpath = g_book->m_zipIndex.find(href_key);
-        if (wpath.empty()) continue;
-
-        // 生成唯一文件名（不再用 index 参数）
-        std::wstring base = href;
-        std::wstring safe = make_safe_filename(base);   // 现在只接受一个参数
-        std::wstring unique = safe;
-        int counter = 1;
-        while (used_names.count(unique))
-        {
-            fs::path tmp(unique);
-            unique = tmp.stem().wstring() + L"_" + std::to_wstring(counter++) + tmp.extension().wstring();
-        }
-        used_names.insert(unique);
-
-        try
-        {
-            MemFile mf = g_book->read_zip(wpath.c_str());
-            if (!mf.data.empty())
-                fonts.emplace_back(std::move(unique), std::move(mf.data));
-        }
-        catch (...) { /* log & skip */ }
-    }
-    return fonts;
-}
 
 
 
@@ -5414,7 +5328,7 @@ AppBootstrap::AppBootstrap() {
     if (!g_toc) 
     { 
         g_toc = std::make_unique<TocPanel>(); 
-        g_toc->GetWindow(g_hwndToc);
+        g_toc->GetWindow(g_hToc);
         // 绑定目录点击 -> 章节跳转
         g_toc->SetOnNavigate([](const std::wstring& href) {
             g_vd->OnTreeSelChanged(href.c_str());
@@ -5461,14 +5375,14 @@ void SimpleContainer::resize(int w, int h)
 
     m_w = w;
     m_h = h;
-
+    m_d2dBmpCache.clear();   // 释放所有旧位图
     if (m_rt) {
-        m_d2dBmpCache.clear();   // 释放所有旧位图
+
         D2D1_SIZE_U size{ static_cast<UINT32>(w), static_cast<UINT32>(h) };
         if (SUCCEEDED(m_rt->Resize(size))) return;   // DPI 不变时直接 Resize
         m_rt.Reset();                               // 失败就重建
     }
-    m_d2dBmpCache.clear();   // 释放所有旧位图
+
     /* 重新创建 HwndRenderTarget */
     RECT rc; GetClientRect(m_hwnd, &rc);
     D2D1_RENDER_TARGET_PROPERTIES rtp =
@@ -5727,7 +5641,7 @@ void EPUBBook::show_imageview(const litehtml::element::ptr& el)
 
     InvalidateRect(g_hImageview, nullptr, true);
 }
-void EPUBBook::show_tooltip(const std::string txt)
+void EPUBBook::show_tooltip(const std::string txt, int width)
 {
     auto html = txt;
     //OutputDebugStringA(("[show_tooltip] " + std::to_string(x) + " " + std::to_string(y) + "\n").c_str());
@@ -5745,7 +5659,7 @@ void EPUBBook::show_tooltip(const std::string txt)
 
     g_cTooltip->m_doc = litehtml::document::createFromString(
         { html.c_str(), litehtml::encoding::utf_8 }, g_cTooltip.get());
-    int width = g_cfg.tooltip_width;
+
     g_cTooltip->m_doc->render(width);
     int height = g_cTooltip->m_doc->height();
 
@@ -5788,10 +5702,6 @@ void EPUBBook::hide_tooltip()
     if (g_hTooltip  && IsWindowVisible(g_hTooltip) )
     {
         ShowWindow(g_hTooltip, SW_HIDE);
-        if (g_cTooltip && g_cTooltip->m_doc)
-        {
-            g_cTooltip->m_doc.reset();
-        }
 
     }
 }
@@ -6103,7 +6013,7 @@ void ZipIndexW::build(mz_zip_archive& zip) {
 
 void SimpleContainer::clear()
 {
-
+    std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     m_img_cache.clear();
     m_d2dBmpCache.clear();
     m_anchor_map.clear();
@@ -6722,7 +6632,7 @@ void VirtualDoc::load_html(std::wstring& href)
 
 float VirtualDoc::get_height_by_id(int spine_id)
 {
-    for (auto b: m_blocks)
+    for (const auto& b: m_blocks)
     {
         if(b.spine_id == spine_id)
         {
@@ -6753,13 +6663,18 @@ bool VirtualDoc::load_by_id(int spine_id, bool isPushBack)
 {
     try
     {
+        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
         std::wstring href = get_href_by_id(spine_id);
         if (href.empty()) return false;
 
+        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
         std::string html = m_book->load_html(href);
         if (html.empty()) return false;
 
+        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
         PreprocessHTML(html);          // 可能抛异常
+
+        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
         auto block = get_html_block(html, spine_id);
 
         if (isPushBack)
@@ -6788,7 +6703,7 @@ ScrollPosition VirtualDoc::get_scroll_position()
     if (m_blocks.empty()) { return pos; }
   
     pos.offset = g_offsetY.load(std::memory_order_relaxed);
-    for (auto hb: m_blocks)
+    for (const auto& hb: m_blocks)
     {
         pos.spine_id = hb.spine_id;
         pos.height = hb.height;
@@ -6803,7 +6718,7 @@ ScrollPosition VirtualDoc::get_scroll_position()
 void VirtualDoc::set_scroll_position( ScrollPosition sp)
 {
     float offset = 0.0f;
-    for (auto& bk: m_blocks)
+    for (const auto& bk: m_blocks)
     {
         if (bk.spine_id == bk.spine_id)break;
         offset += bk.height;
@@ -6905,7 +6820,7 @@ float VirtualDoc::get_height()
 {
     float height = 0.0f;
     if (m_blocks.empty()) { return height; }
-    for (auto b: m_blocks)
+    for (const auto& b: m_blocks)
     {
         height += b.height;
     }
@@ -6961,23 +6876,38 @@ void VirtualDoc::workerLoop()
 {
     while (true)
     {
+        if (m_cancelFlag.load(std::memory_order_acquire))
+            break;                       // 整线程退出
         Task task;
         {
             std::unique_lock<std::mutex> lk(m_taskMtx);
-            m_taskCv.wait(lk, [this] { return !m_taskQueue.empty(); });
-
-            task = m_taskQueue.front();
+            m_taskCv.wait(lk, [this] {
+                /* 等待时也要能响应取消 */
+                return !m_taskQueue.empty() || m_cancelFlag.load(std::memory_order_acquire);
+                });
+            if (m_cancelFlag.load(std::memory_order_acquire))
+                break;                   // 被唤醒后发现取消
+            if (m_taskQueue.empty())
+                continue;                // 虚假唤醒
+            task = std::move(m_taskQueue.front());
             m_taskQueue.pop();
         }
         BusyGuard bg(m_workerBusy);   // 从这里开始置忙，析构时自动清 0
 
         OutputDebugStringA("[VirtualDod thread] 开始更新\n");
         // 1. 耗时 IO
+                /* ---------- 2. 耗时 IO ---------- */
+        if (m_cancelFlag.load(std::memory_order_acquire))
+            continue;                    // 直接丢弃本次任务
+
+
         if (!load_by_id(task.chapterId, !task.insertAtFront))
         {
-            OutputDebugStringA("[VirtualDod thread] load_by_id\n");
             continue;
         }
+
+        if (m_cancelFlag.load(std::memory_order_acquire))
+            continue;
 
         // 2. 组装 HTML
         float height = 0.0f;
@@ -6992,9 +6922,18 @@ void VirtualDoc::workerLoop()
      
         html += "</body></html>";
 
+        /* ---------- 4. render ---------- */
+        if (m_cancelFlag.load(std::memory_order_acquire))
+            continue;
+
         m_doc = litehtml::document::createFromString(
             { html.c_str(), litehtml::encoding::utf_8 }, m_container.get());
         m_doc->render(g_cfg.document_width);
+
+        /* ---------- 5. 计算高度 ---------- */
+        if (m_cancelFlag.load(std::memory_order_acquire))
+            continue;
+
         height = m_doc->height() - m_height;
  
         target.height = height;
@@ -7010,7 +6949,7 @@ void VirtualDoc::workerLoop()
 bool VirtualDoc::exists(int spine_id)
 {
     if (m_blocks.empty()) return false;
-    for (auto b: m_blocks)
+    for (const auto& b: m_blocks)
     {
         if (b.spine_id == spine_id) { return true; }
     }
@@ -7019,21 +6958,33 @@ bool VirtualDoc::exists(int spine_id)
 
 void VirtualDoc::clear()
 {
-    // 1. 停止提交新任务
+    // 1. 请求后台线程尽快结束当前任务
+    m_cancelFlag.store(true, std::memory_order_release);
+
+    // 2. 清空尚未开始的任务
     {
         std::lock_guard<std::mutex> lk(m_taskMtx);
-        m_taskQueue = {};          // 清空未开始的任务
+        m_taskQueue = {};
     }
 
-    // 2. 等当前任务结束
-    while (m_workerBusy.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // 3. 最多等 N 毫秒，避免永久阻塞
+    constexpr auto kMaxWait = std::chrono::milliseconds(500);
+    auto until = std::chrono::steady_clock::now() + kMaxWait;
+
+    std::unique_lock<std::mutex> lk(m_taskMtx);
+    m_cvFinish.wait_until(lk, until, [this] {
+        return !m_workerBusy.load(std::memory_order_acquire);
+        });
+    // 如果超时仍未结束，我们也不再等待，直接往下走
+    lk.unlock();
     m_blocks.clear();
     g_offsetY.store(0.0f, std::memory_order_relaxed);
     float v = g_offsetY.load(std::memory_order_relaxed);
 
     m_height = 0.0f;
+
+    // 5. 复位取消标志，供后续使用
+    m_cancelFlag.store(false, std::memory_order_relaxed);
 }
 
 
@@ -7510,8 +7461,7 @@ void TocPanel::Load(const OCFPackage& pkg)
 /* ---------- 内部实现 ---------- */
 LRESULT CALLBACK TocPanel::WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
-    if (m == WM_NCCREATE)
-        SetWindowLongPtr(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCT*)l)->lpCreateParams);
+
     TocPanel* self = (TocPanel*)GetWindowLongPtr(h, GWLP_USERDATA);
     return self ? self->HandleMsg(m, w, l) : DefWindowProc(h, m, w, l);
 }
@@ -7520,9 +7470,12 @@ LRESULT TocPanel::HandleMsg(UINT m, WPARAM w, LPARAM l)
 {
     switch (m)
     {
+
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: { PAINTSTRUCT ps; OnPaint(BeginPaint(m_hwnd, &ps)); EndPaint(m_hwnd, &ps); } return 0;
     case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
+    case WM_MOUSEMOVE: OnMouseMove(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
+    case WM_MOUSELEAVE: OnMouseLeave(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
     case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(w)); return 0;
     case WM_VSCROLL:     OnVScroll(LOWORD(w), HIWORD(w)); return 0;
     case WM_KEYDOWN:
@@ -7533,6 +7486,81 @@ LRESULT TocPanel::HandleMsg(UINT m, WPARAM w, LPARAM l)
     return DefWindowProc(m_hwnd, m, w, l);
 }
 
+void TocPanel::OnMouseMove(int x, int y)
+{
+    // 1. 先把鼠标“抓”住
+    if (GetCapture() != m_hwnd)
+        SetCapture(m_hwnd);
+
+    // 2. 判断坐标
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    if (!PtInRect(&rc, { x, y }))
+    {
+        // 真正离开了客户区
+        if (GetCapture() == m_hwnd)
+            ReleaseCapture();          // 释放捕获
+        m_curHover = -1;
+        if (g_book) g_book->cancel_delayed_tooltip();
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return;
+    }
+
+    int line = HitTest(y);
+    if (line < 0)
+    {
+        m_curHover = -1;
+        if (g_book) g_book->cancel_delayed_tooltip();
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+        return;
+    }
+    if (m_curHover == line) { return; }
+    {
+        if (line != m_curHover && IsWindowVisible(g_hTooltip))
+            g_book->cancel_delayed_tooltip();
+
+        m_curHover = line;
+        SetCursor(LoadCursor(nullptr, IDC_HAND));
+        std::wstring wtxt = m_nodes[m_visible[line]].nav->label;
+        // 2. 判断文字是否被截断
+        HDC hdc = GetDC(m_hwnd);
+        HFONT old = (HFONT)SelectObject(hdc, m_hFont);   // 你的字体
+        SIZE sz{};
+        GetTextExtentPoint32W(hdc, wtxt.c_str(), (int)wtxt.size(), &sz);
+        int indent = m_nodes[m_visible[line]].nav->order * 16 + m_marginLeft;
+        int fullW =  sz.cx + indent;
+
+        SelectObject(hdc, old);
+        ReleaseDC(m_hwnd, hdc);
+
+        // 3. 可用宽度 = 客户区宽 - 左边缩进
+        int clientW = rc.right - rc.left;   // 根据你实际缩进计算
+
+        bool truncated = (fullW > clientW);
+
+        if (line != m_curHover)
+        {
+            m_curHover = line;
+            if (g_book) g_book->cancel_delayed_tooltip();   // 先清旧
+        }
+
+        if (truncated)
+        {
+            // 4. 立即显示完整文字
+            std::string txt ="<p>"  + w2a(wtxt)  + "</p>";
+            if (g_book) g_book->delayed_show_tooltip(txt, fullW, 100);  // 0 = 不限制宽度
+        }
+        else
+        {
+            // 文字完整，不需要 tooltip
+            if (g_book) g_book->cancel_delayed_tooltip();
+        }
+    }
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+}
+void TocPanel::OnMouseLeave(int x, int y)
+{
+
+}
 TocPanel::TocPanel()
 {
     // 16 px 高，默认宽度，正常粗细，不斜体，不 underline，不 strikeout
@@ -7569,18 +7597,7 @@ void TocPanel::RebuildVisible()
     // 1. 总高度（像素）
     m_totalH = (int)m_visible.size() * m_lineH + m_marginTop + m_marginBottom;
 
-    // 2. 客户区高度（像素）
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    int clientH = rc.bottom - rc.top;
 
-    // 3. 设置滚动条
-    SCROLLINFO si{ sizeof(si) };
-    si.fMask = SIF_RANGE | SIF_PAGE;
-    si.nMin = 0;
-    si.nMax = m_totalH;          // 像素
-    si.nPage = clientH;          // 像素
-    SetScrollInfo(m_hwnd, SB_VERT, &si, TRUE);
 }
 
 int TocPanel::HitTest(int y) const
@@ -7603,7 +7620,7 @@ void TocPanel::EnsureVisible(int line)
     int y = line * m_lineH;
     if (y < m_scrollY) m_scrollY = y;
     else if (y + m_lineH > m_scrollY + rc.bottom) m_scrollY = y + m_lineH - rc.bottom;
-    SetScrollPos(m_hwnd, SB_VERT, m_scrollY, TRUE);
+    //SetScrollPos(m_hwnd, SB_VERT, m_scrollY, TRUE);
 }
 
 void TocPanel::OnPaint(HDC hdc)
@@ -7627,10 +7644,14 @@ void TocPanel::OnPaint(HDC hdc)
                 rc.right,
                 m_marginTop + (i + 1) * m_lineH - m_scrollY };
 
+        // 高亮当前选择
         HBRUSH br = (i == m_selLine)
             ? m_hightlightBrush
             : GetSysColorBrush(COLOR_WINDOW);
         FillRect(hdc, &r, br);
+
+
+
 
         int indent = n.nav->order * 16;
         WCHAR sign[2] = L"";
@@ -7638,9 +7659,17 @@ void TocPanel::OnPaint(HDC hdc)
             sign[0] = n.expanded ? L'−' : L'+';
 
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, GetSysColor(i == m_selLine
-            ? COLOR_HIGHLIGHTTEXT
-            : COLOR_WINDOWTEXT));
+        if (i == m_curHover && i != m_selLine)
+        {
+            SetTextColor(hdc, g_cfg.hover_color_cr);
+        }
+        else
+        {
+            SetTextColor(hdc, GetSysColor(i == m_selLine
+                ? COLOR_HIGHLIGHTTEXT
+                : COLOR_WINDOWTEXT));
+        }
+
 
         // 文字再缩进：左侧留白 + 层级缩进
         int textLeft = m_marginLeft + indent;
@@ -7786,7 +7815,7 @@ void TocPanel::OnVScroll(int code, int pos)
 
     m_scrollY = std::max(0, std::min(m_scrollY, maxY));
 
-    SetScrollPos(m_hwnd, SB_VERT, m_scrollY, TRUE);
+    //SetScrollPos(m_hwnd, SB_VERT, m_scrollY, TRUE);
     InvalidateRect(m_hwnd, nullptr, TRUE);
 }
 void TocPanel::OnMouseWheel(int delta)
@@ -8408,7 +8437,8 @@ void SimpleContainer::on_mouse_move(int x, int y)
 
         auto result = hit_test((float)x, (float)y);
         if (result >= 0) 
-        { 
+        {
+            m_isSelected = true;
             if (m_selStart < 0) { m_selStart = result; }
             m_selEnd = result; 
             UpdateCache();
@@ -8424,12 +8454,12 @@ void SimpleContainer::on_mouse_move(int x, int y)
 
 void SimpleContainer::on_lbutton_up()
 {
+    if (!m_isSelected) { clear_selection(); }
     m_selecting = false;
-
+    m_isSelected = false;
     m_currentCursor = IDC_ARROW;
     SetCursor(LoadCursor(nullptr, m_currentCursor));
-    UpdateCache();
-    //copy_to_clipboard();
+    InvalidateRect(g_hView, nullptr, false);
 }
 void SimpleContainer::copy_to_clipboard()
 {
@@ -10503,12 +10533,14 @@ FreeTypeTextMeasurer::measure(const std::wstring& text,
 
 bool SimpleContainer::isImageCached(std::string src)
 {
+    std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     if (m_img_cache.contains(src)) return true;
     return false;
 }
 
 void SimpleContainer::addImageCache(std::string hash, std::string svg)
 {
+    std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     auto doc = lunasvg::Document::loadFromData(svg);
     if (!doc) return;
 
@@ -10577,3 +10609,39 @@ std::wstring EPUBFileProvider::find(const std::wstring& path)
     return std::wstring();
 }
 
+
+
+
+// 2. 在 EPUBBook.cpp 里写
+void EPUBBook::delayed_show_tooltip(std::string txt, unsigned width, unsigned delayMs)
+{
+    if (m_tooltipTimer)
+    {
+        timeKillEvent(m_tooltipTimer);
+        m_tooltipTimer = 0;
+    }
+
+    auto* p = new TooltipPayload{ std::move(txt), width };
+
+    // 3. 用 + 号把 lambda 转成 C 函数指针
+    using CB = void CALLBACK(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR);
+    static CB* const proc = +[](UINT, UINT, DWORD_PTR dwUser, DWORD_PTR, DWORD_PTR)
+        {
+            auto* t = reinterpret_cast<TooltipPayload*>(dwUser);
+            g_book->show_tooltip(std::move(t->html), std::move(t->width));
+            delete t;
+        };
+
+    m_tooltipTimer = timeSetEvent(delayMs, 1, proc,
+        reinterpret_cast<DWORD_PTR>(p), TIME_ONESHOT);
+}
+
+void EPUBBook::cancel_delayed_tooltip()
+{
+    if (m_tooltipTimer)
+    {
+        timeKillEvent(m_tooltipTimer);
+        m_tooltipTimer = 0;
+    }
+    hide_tooltip();   // 立即隐藏已显示的 tooltip
+}
