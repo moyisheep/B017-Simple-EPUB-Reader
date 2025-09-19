@@ -274,6 +274,18 @@ static std::wstring make_temp_dir()
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }
+
+fs::path documents_dir()
+{
+    PWSTR pszPath = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, NULL, &pszPath)))
+    {
+        fs::path path(pszPath);
+        CoTaskMemFree(pszPath);
+        return path;
+    }
+    return L""; // 或抛出异常
+}
 // 完整的文档导出函数
 std::string get_document_html(litehtml::document::ptr doc) {
     if (!doc) return "";
@@ -851,6 +863,7 @@ static fs::path exe_dir()
     return fs::path(buf).parent_path();
 
 }
+
 
 // 工具：把文件内容读成字符串
 static std::string read_file(const fs::path& p)
@@ -1824,8 +1837,8 @@ LRESULT CALLBACK HomepageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             RECT rcClient;
             GetClientRect(hwnd, &rcClient);
-            float width = rcClient.right - rcClient.left;
-            float height = rcClient.bottom - rcClient.top;
+            int width = rcClient.right - rcClient.left;
+            int height = rcClient.bottom - rcClient.top;
             g_cHome->m_doc->render(width);
             g_cHome->resize(width, height);
         }
@@ -1850,9 +1863,9 @@ LRESULT CALLBACK HomepageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             OutputDebugStringA("[Homepage] WM_PAINT\n");
             RECT rc;
             GetClientRect(hwnd, &rc);
-            float width = rc.right - rc.left;
-            float height = rc.bottom - rc.top;
-            litehtml::position clip(0.0f, 0.0f, width, height);
+            int width = rc.right - rc.left;
+            int height = rc.bottom - rc.top;
+            litehtml::position clip(0, 0, width, height);
 
 
             g_cHome->present(0, 0, &clip);
@@ -2119,6 +2132,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!ext || _wcsicmp(ext, L".epub") != 0)
         {
             SetStatus(STATUSBAR_INFO, L"不是有效的 epub 文件");
+            OutputDebugStringW(L"不是有效的 epub 文件\n");
             CoTaskMemFree((void*)file);   // 释放堆拷贝
             return 0;
         }
@@ -2128,6 +2142,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_parse_task.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         {
             SetStatus(STATUSBAR_INFO, L"正在加载其他文件，请稍候…");
+            OutputDebugStringW(L"正在加载其他文件，请稍候…\n");
             CoTaskMemFree((void*)file);
             return 0;
         }
@@ -2602,7 +2617,8 @@ void register_main_class()
 
 void LogToFile(const std::string& message)
 {
-    fs::path debug_path = exe_dir() / "debug_log.txt";
+    fs::path debug_path = documents_dir() / g_cfg.appName / "debug_log.txt";
+   
     std::ofstream log(debug_path, std::ios::app);
     if (log.is_open())
     {
@@ -2615,16 +2631,21 @@ void LogToFile(const std::string& message)
 // ---------- 入口 ----------
 int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 {
+ 
 
-    // 在 WinMain 最开头
-    //CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     // ---------- 1. 解析命令行 ----------
     int argc = 0;
+    std::wstring cmd = GetCommandLineW();
+    LogToFile(w2a(L"[cmdline] " + cmd + L"\n"));
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    //std::wstring txt = L"argc:" + std::to_wstring(argc) + L"\n";
-    //txt += L"argv: ";
-    //for (int i = 0; i < argc; i++) { txt = txt + argv[i] + L", "; }
-    //LogToFile(w2a(txt));
+   
+    //调试
+    std::wstring txt = L"[argc] " + std::to_wstring(argc) + L"\n";
+    txt += L"[argv]\n";
+    for (int i = 0; i < argc; i++) { txt = txt  + argv[i] + L"\n"; }
+    txt += L"\n";
+    LogToFile(w2a(txt));
+
     wchar_t* firstFile = nullptr;
     if (argc > 1)
         firstFile = DupPath(argv[1]);   // 堆拷贝
@@ -2831,7 +2852,7 @@ void SimpleContainer::load_image(const char* src, const char* /*baseurl*/, bool)
 
 
     /* ---------- 1. 绝对路径优先 ---------- */
-    if (fs::path(src).is_absolute())
+    if (fs::exists(src))
     {
         std::error_code ec;
         size_t sz = fs::file_size(src, ec);
@@ -3129,7 +3150,7 @@ void SimpleContainer::split_text(
     /* 2. 创建 ICU 单词边界迭代器（系统默认 locale，支持多语言） */
     UErrorCode status = U_ZERO_ERROR;
     UBreakIterator* brk = ubrk_open(
-        UBRK_WORD, nullptr,
+        UBRK_LINE, nullptr,
         u16.data(), static_cast<int32_t>(u16.size()),
         &status);
     if (U_FAILURE(status)) return;
@@ -7028,7 +7049,7 @@ ReadingRecorder::~ReadingRecorder()
 /* ---------- 初始化数据库 ---------- */
 void ReadingRecorder::initDB() {
     namespace fs = std::filesystem;
-    fs::path db_path = exe_dir() / "data";
+    fs::path db_path = documents_dir() / g_cfg.appName / "data";
     fs::create_directories(db_path);
     fs::path db_book_path = db_path / "Books.db";
     fs::path db_time_path = db_path / "Time.db";

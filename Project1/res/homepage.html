@@ -9,386 +9,240 @@
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         
         body {
-            font-family: "STKaiti", "KaiTi", "SimSun", serif;
-            background-color: #f8f4e9;
-            background-image: 
-                linear-gradient(rgba(200, 184, 160, 0.1) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(200, 184, 160, 0.1) 1px, transparent 1px);
-            background-size: 30px 30px;
-            color: #3f3b36;
+            background: linear-gradient(135deg, #fafafa 0%, #ffffff 100%);
+            color: #333;
+            line-height: 1.6;
             min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
-            position: relative;
+            padding: 20px;
+        }
+        
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.1);
             overflow: hidden;
-            padding: 20px;
-        }
-        
-        .paper-container {
             position: relative;
-            max-width: 780px;
-            width: 100%;
-            padding: 60px 40px;
-            background-color: rgba(251, 247, 240, 0.95);
-            border: 1px solid #d6c7ae;
-            border-radius: 3px;
-            box-shadow: 
-                0 20px 50px rgba(0, 0, 0, 0.08),
-                0 0 0 1px rgba(0, 0, 0, 0.03),
-                inset 0 -8px 0 rgba(180, 166, 146, 0.2);
+        }
+        
+        /* 头部样式 */
+        .header {
+            background: #e57112;
+            padding: 30px 20px;
             text-align: center;
-            z-index: 10;
+            color: white;
         }
         
-        .top-decoration {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 45px;
-            background: linear-gradient(to bottom, rgba(209, 187, 158, 0.6), rgba(229, 212, 184, 0.4));
-            border-bottom: 1px solid #d6c7ae;
-        }
-        
-        .bottom-decoration {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            height: 45px;
-            background: linear-gradient(to top, rgba(209, 187, 158, 0.6), rgba(229, 212, 184, 0.4));
-            border-top: 1px solid #d6c7ae;
-        }
-        
-        .app-title {
-            font-size: 4.2rem;
-            letter-spacing: 10px;
-            margin-top: 15px;
+        .logo {
+            font-size: 2.5rem;
+            font-weight: bold;
             margin-bottom: 10px;
-            color: #3f3b36;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-            position: relative;
-            padding-bottom: 20px;
+            letter-spacing: 1px;
         }
         
-        .app-title::after {
-            content: "";
-            position: absolute;
-            bottom: 0;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 160px;
-            height: 3px;
-            background: linear-gradient(to right, #8e7e5f, #d6c7ae, #8e7e5f);
-            border-radius: 2px;
-        }
-        
-        .app-subtitle {
-            font-size: 1.5rem;
-            color: #6d5d47;
-            margin-bottom: 20px;
-            letter-spacing: 3px;
-            text-shadow: 1px 1px 1px rgba(0,0,0,0.05);
-        }
-        
-        .inspiration {
+        .subtitle {
             font-size: 1.1rem;
-            color: #8a7e6a;
-            max-width: 480px;
-            margin: 0 auto 40px;
-            line-height: 1.8;
-            padding: 10px 20px;
-            border: 1px dashed #d6c7ae;
-            border-radius: 3px;
-            background: rgba(255,255,255,0.5);
+            opacity: 0.9;
         }
         
-        .reading-prompt {
-            max-width: 580px;
-            margin: 0 auto;
-            padding: 40px 30px;
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
+        /* 内容区域 */
+        .content {
+            padding: 40px;
         }
         
-        .prompt-icon {
-            font-size: 5.5rem;
-            margin-bottom: 25px;
-            color: #8e7e5f;
-            text-shadow: 2px 2px 3px rgba(0,0,0,0.1);
-            animation: pulse 3s infinite ease-in-out;
+        .section {
+            margin-bottom: 40px;
         }
         
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 0.8; }
-            50% { transform: scale(1.07); opacity: 1; }
-            100% { transform: scale(1); opacity: 0.8; }
-        }
-        
-        .prompt-title {
-            font-size: 2rem;
-            margin-bottom: 30px;
-            color: #5b4a37;
-            text-shadow: 1px 1px 1px rgba(0,0,0,0.1);
-            letter-spacing: 3px;
-        }
-        
-        .feature-list {
-            width: 100%;
-            text-align: left;
-            padding: 20px;
-            background: rgba(255,255,255,0.4);
-            border: 1px solid #e0d0b9;
-            border-radius: 5px;
-            margin: 20px 0;
-        }
-        
-        .feature-title {
-            text-align: center;
-            font-size: 1.6rem;
-            color: #7d6b53;
+        .section-title {
+            font-size: 1.4rem;
+            color: #e57112;
             margin-bottom: 20px;
-            position: relative;
-            letter-spacing: 3px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
+            font-weight: 600;
         }
         
-        .feature-title::after {
+        /* 操作指南 */
+        .instructions-list {
+            list-style: none;
+            margin-left: 20px;
+        }
+        
+        .instructions-list li {
+            position: relative;
+            padding-left: 35px;
+            margin-bottom: 18px;
+            line-height: 1.7;
+        }
+        
+        .instructions-list li:before {
             content: "";
-            position: absolute;
-            bottom: -10px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 80px;
-            height: 2px;
-            background: #d0c3ac;
-        }
-        
-        .features {
-            list-style-type: none;
-            padding: 0 30px;
-        }
-        
-        .feature {
-            position: relative;
-            margin: 18px 0;
-            padding-left: 40px;
-            color: #5b4a37;
-            font-size: 1.1rem;
-        }
-        
-        .feature::before {
-            content: "›";
             position: absolute;
             left: 0;
-            top: 0;
-            color: #8e7e5f;
-            font-size: 2rem;
-            line-height: 1;
-        }
-        
-        .book-format {
-            font-style: italic;
-            color: #bd3331;
-            text-shadow: 0 0 1px rgba(189,51,49,0.3);
-        }
-        
-        .seal {
-            position: absolute;
-            bottom: 30px;
-            right: 40px;
-            width: 110px;
-            height: 110px;
-            border: 2px solid #bd3331;
+            top: 6px;
+            width: 22px;
+            height: 22px;
+            background: #f8e6d9;
             border-radius: 50%;
             display: flex;
-            justify-content: center;
             align-items: center;
-            font-size: 1.5rem;
-            color: #bd3331;
-            padding: 15px;
-            background: rgba(251, 247, 240, 0.9);
-            line-height: 1.3;
-            letter-spacing: 1px;
+            justify-content: center;
+            color: #e57112;
             font-weight: bold;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            z-index: 20;
         }
         
-        .ink-blot {
-            position: absolute;
-            opacity: 0.04;
-            filter: blur(8px);
-            z-index: 1;
-            pointer-events: none;
+        .instructions-list li:first-child:before { content: "1"; }
+        .instructions-list li:nth-child(2):before { content: "2"; }
+        .instructions-list li:nth-child(3):before { content: "3"; }
+        
+        /* 快捷键区域 */
+        .shortcuts-grid {
+            display: table;
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
         }
         
-        .ink-blot.one {
-            width: 360px;
-            height: 360px;
-            border-radius: 50%;
-            background: #5d8e9d;
-            top: -100px;
-            left: -100px;
+        .shortcut-row {
+            display: table-row;
         }
         
-        .ink-blot.two {
-            width: 320px;
-            height: 320px;
-            border-radius: 50%;
-            background: #bd3331;
-            bottom: -120px;
-            right: -100px;
+        .shortcut-row:nth-child(even) {
+            background-color: #f9f9f9;
         }
         
-        .ink-blot.three {
-            width: 220px;
-            height: 220px;
-            border-radius: 50%;
-            background: #8a9b6e;
-            top: 150px;
-            right: 180px;
+        .shortcut-key, .shortcut-desc {
+            display: table-cell;
+            padding: 12px 15px;
+            border-bottom: 1px solid #eee;
         }
         
-        .floating-icon {
-            position: absolute;
-            font-size: 3rem;
-            color: rgba(139, 128, 111, 0.25);
-            z-index: 2;
-            pointer-events: none;
+        .shortcut-key {
+            font-weight: 600;
+            width: 180px;
+            color: #e57112;
         }
         
-        .floating-icon.one {
-            top: 20%;
-            left: 8%;
-            transform: rotate(-25deg);
+        /* 页脚 */
+        .footer {
+            text-align: center;
+            padding: 25px;
+            background: #f8f8f8;
+            color: #777;
+            font-size: 0.9rem;
+            border-top: 1px solid #eee;
         }
         
-        .floating-icon.two {
-            bottom: 28%;
-            right: 12%;
-            transform: rotate(15deg);
-        }
-        
-        .floating-icon.three {
-            top: 45%;
-            left: 5%;
-            transform: rotate(-15deg);
-        }
-        
-        .floating-icon.four {
-            bottom: 35%;
-            right: 5%;
-            transform: rotate(10deg);
-        }
-        
-        .tips {
-            margin-top: 30px;
-            font-size: 1.1rem;
-            color: #8a7e6a;
-            max-width: 580px;
-            line-height: 1.8;
-        }
-        
-        .highlight {
-            color: #bd3331;
-            font-weight: bold;
-            letter-spacing: 1px;
-        }
-        
-        @media (max-width: 768px) {
-            .paper-container {
-                padding: 50px 20px;
+        /* 响应式设计 */
+        @media (max-width: 600px) {
+            .content {
+                padding: 30px 20px;
             }
             
-            .app-title {
-                font-size: 3.2rem;
-                letter-spacing: 8px;
+            .shortcut-key, .shortcut-desc {
+                padding: 10px 8px;
+                font-size: 0.9rem;
             }
             
-            .app-subtitle {
-                font-size: 1.3rem;
-            }
-            
-            .prompt-icon {
-                font-size: 4.2rem;
-            }
-            
-            .prompt-title {
-                font-size: 1.8rem;
-            }
-            
-            .seal {
-                width: 90px;
-                height: 90px;
-                font-size: 1.2rem;
-                bottom: 20px;
-                right: 20px;
+            .shortcut-key {
+                width: 140px;
             }
         }
     </style>
 </head>
 <body>
-    <!-- 水墨点背景 -->
-    <div class="ink-blot one"></div>
-    <div class="ink-blot two"></div>
-    <div class="ink-blot three"></div>
-    
-    <!-- 浮动装饰图标 -->
-    <div class="floating-icon one">📜</div>
-    <div class="floating-icon two">🖌️</div>
-    <div class="floating-icon three">🌸</div>
-    <div class="floating-icon four">📚</div>
-    
-    <!-- 页面容器 -->
-    <div class="paper-container">
-        <div class="top-decoration"></div>
-        
-        <!-- 应用标题 -->
-        <h1 class="app-title">墨香书阁</h1>
-        <p class="app-subtitle">—— 开卷有益 · 静心阅读 ——</p>
-        
-        <!-- 名言警句 -->
-        <div class="inspiration">
-            书山有路勤为径，学海无涯苦作舟<br>
-            书中自有黄金屋，书中自有颜如玉
+    <div class="container">
+        <!-- 头部区域 -->
+        <div class="header">
+            <div class="logo">Simple EPUB Reader</div>
+            <div class="subtitle">轻量、快速、易用的 EPUB 阅读体验</div>
         </div>
         
-        <!-- 阅读提示区域 -->
-        <div class="reading-prompt">
-            <div class="prompt-icon">📖</div>
-            <h2 class="prompt-title">开启您的阅读之旅</h2>
-            
-            <!-- 功能列表 -->
-            <div class="feature-list">
-                <h3 class="feature-title">阅读器功能</h3>
-                <ul class="features">
-                    <li class="feature">请使用顶部菜单中的 <span class="highlight">「打开文件」</span> 功能导入电子书</li>
-                    <li class="feature">支持拖拽电子书到阅读器窗口快速打开</li>
-                    <li class="feature">支持格式：<span class="book-format">EPUB</span>, <span class="book-format">PDF</span>, <span class="book-format">TXT</span>, <span class="book-format">MOBI</span></li>
-                    <li class="feature">自定义阅读界面 - 字体、大小、主题可选</li>
-                    <li class="feature">书签功能 - 记录您的阅读进度</li>
-                    <li class="feature">章节导航 - 快速定位书籍内容</li>
+        <!-- 主要内容区 -->
+        <div class="content">
+            <!-- 操作指南区域 -->
+            <div class="section">
+                <h2 class="section-title">如何开始阅读</h2>
+                <ul class="instructions-list">
+                    <li><strong>菜单栏打开</strong> - 使用顶部菜单栏：文件 → 打开，选择 EPUB 文件</li>
+                    <li><strong>拖放打开</strong> - 将 EPUB 文件直接拖放到此窗口即可打开</li>
+                    <li><strong>双击打开</strong> - 设置 EPUB 文件默认使用本程序打开后，直接双击文件打开</li>
                 </ul>
             </div>
             
-            <!-- 使用提示 -->
-            <div class="tips">
-                <p>您可以通过菜单栏中的 <span class="highlight">"文件"</span> → <span class="highlight">"打开"</span> 导入电子书</p>
-                <p>或使用快捷键 <span class="highlight">Ctrl + O</span> 选择本地电子书文件</p>
+            <!-- 快捷键区域 -->
+            <div class="section">
+                <h2 class="section-title">快捷键指南</h2>
+                <div class="shortcuts-grid">
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Tab</div>
+                        <div class="shortcut-desc">显示/隐藏目录窗口</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">F5</div>
+                        <div class="shortcut-desc">刷新当前文档</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + +</div>
+                        <div class="shortcut-desc">增大字体</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + -</div>
+                        <div class="shortcut-desc">减小字体</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + Backspace</div>
+                        <div class="shortcut-desc">重置字体大小</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + Shift + +</div>
+                        <div class="shortcut-desc">增加行高</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + Shift + -</div>
+                        <div class="shortcut-desc">减小行高</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + Shift + Backspace</div>
+                        <div class="shortcut-desc">重置行高</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Alt + +</div>
+                        <div class="shortcut-desc">增加文档宽度</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Alt + -</div>
+                        <div class="shortcut-desc">减小文档宽度</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Alt + Backspace</div>
+                        <div class="shortcut-desc">重置文档宽度</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + C</div>
+                        <div class="shortcut-desc">复制选中文本</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">Ctrl + O</div>
+                        <div class="shortcut-desc">打开 EPUB 文件</div>
+                    </div>
+                </div>
             </div>
         </div>
         
-        <div class="bottom-decoration"></div>
+        <!-- 页脚 -->
+        <div class="footer">
+            <p>Simple EPUB Reader | 轻量、快速、易用的 EPUB 阅读解决方案</p>
+        </div>
     </div>
-    
-    <!-- 印章元素 -->
-    <div class="seal">开卷<br>有益</div>
 </body>
 </html>

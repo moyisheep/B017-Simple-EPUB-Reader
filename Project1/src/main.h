@@ -3,18 +3,20 @@
 #define _WINSOCKAPI_
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-
+#define _USE_MATH_DEFINES
+#include "resource.h"
 #include <windows.h>
 #include <windowsx.h>   // 加这一行
+
 #include <mmsystem.h>
-#pragma comment(lib, "winmm.lib")
+
 #include <commctrl.h>
 #include <shellapi.h>
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <map>
-#define _USE_MATH_DEFINES
+
 #include <cmath>
 #include <memory>
 #include <string>
@@ -27,24 +29,21 @@
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
-#include <litehtml/render_item.h>
-#include <litehtml/html_tag.h>
-#include <litehtml/render_image.h>
 
-#pragma comment(lib, "comctl32.lib")
+
+
 #include <objidl.h>
 #include <filesystem>
 #include <gdiplus.h>
-#pragma comment(lib, "gdiplus.lib")
-#pragma comment(lib, "ole32.lib")
+
 using namespace Gdiplus;
-#pragma comment(lib, "comctl32.lib")
+
 #include <shlwapi.h>
 #include <regex>
-#pragma comment(lib, "shlwapi.lib")
+
 #include <sqlite3.h>
 #include <wininet.h>
-#include "resource.h"
+
 
 #include <gumbo.h>
 #include <unordered_set>
@@ -57,19 +56,17 @@ using namespace Gdiplus;
 
 #include <codecvt>
 #include <locale>
-#pragma comment(lib, "dwrite.lib")
+
 #include <d2d1_3.h>        // ID2D1DeviceContext / ID2D1Bitmap1
-#pragma comment(lib, "d2d1.lib")
+
 #include <dwrite_1.h>   // 需要 IDWriteTextFormat1
 #include <d2d1_1.h>       // D2D 1.1
 #include <d3d11.h>        // D3D11
 #include <dxgi1_2.h>  // DXGI 1.2
 
 #include <wincodec.h>
-#pragma comment(lib, "windowscodecs.lib")
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
+
+
 #include <cctype>
 
 #include <queue>
@@ -79,7 +76,7 @@ using namespace Gdiplus;
 #include <wrl/implements.h>   // 关键
 #include <iostream>
 
-#pragma comment(lib, "windowscodecs.lib")
+
 #ifndef HR
 #define HR(hr)  do { HRESULT _hr_ = (hr); if(FAILED(_hr_)) return 0; } while(0)
 #endif
@@ -87,15 +84,13 @@ using namespace Gdiplus;
 
 #include <atomic>
 
-#include <mutex>
+
 #include <condition_variable>
 #include <array>
-#include <d2d1.h>
 #include <d2d1helper.h>   // 保险起见，再带一次
 #include <shared_mutex>
 #include <cstdint>
 #include <cwctype>
-#include <locale>
 #include <unicode/unistr.h>
 #include <unicode/brkiter.h>
 #include <unicode/utypes.h>
@@ -104,7 +99,6 @@ using namespace Gdiplus;
 #include <unicode/rbbi.h>
 #include <unicode/ubrk.h>
 #include <unicode/ustring.h>
-#include <string>
 #include <functional>
 
 #include <cstring>
@@ -114,16 +108,27 @@ using namespace Gdiplus;
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
-#pragma comment(lib, "freetype.lib")
+
 #include FT_OUTLINE_H
 #include FT_GLYPH_H
 #include <Shlobj.h>      // SHGetKnownFolderPath
 #include <KnownFolders.h>
 #include <numeric>
 #include <commdlg.h>   // OPENFILENAMEW, GetOpenFileNameW
-#pragma comment(lib, "comdlg32.lib")
 #include <shobjidl.h> // 包含任务对话框头文件
-#include <cstring>   // for memcpy
+#include <mutex>
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "freetype.lib")
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "winmm.lib")
 using Microsoft::WRL::ComPtr;
 
 namespace fs = std::filesystem;
@@ -510,6 +515,8 @@ struct AppSettings {
     std::wstring default_serif = L"Georgia";
     std::wstring default_sans_serif = L"Verdana";
     std::wstring default_monospace = L"Consolas";
+
+
 
     // 1) GDI+ 颜色（A=255 不透明）
     Gdiplus::Color scrollbar_slider_color{ 255, 238, 165, 102 };
