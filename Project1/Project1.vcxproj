@@ -27,6 +27,7 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\3rdParty\stb_image.h" />
     <ClInclude Include="src\main.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>

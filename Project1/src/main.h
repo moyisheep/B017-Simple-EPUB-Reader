@@ -25,7 +25,7 @@
 #include <algorithm>
 #include <miniz/miniz.h>
 #include <tinyxml2.h>
-#include <lunasvg/lunasvg.h>
+#include <lunasvg/lunasvg.h>"    
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
@@ -117,6 +117,8 @@ using namespace Gdiplus;
 #include <commdlg.h>   // OPENFILENAMEW, GetOpenFileNameW
 #include <shobjidl.h> // 包含任务对话框头文件
 #include <mutex>
+#define STB_IMAGE_IMPLEMENTATION
+#include "3rdParty/stb_image.h"
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "freetype.lib")
@@ -139,6 +141,7 @@ struct ImageFrame
     uint32_t height = 0;
     uint32_t stride = 0;          // 每行字节数
     std::vector<uint8_t> rgba;     // 连续像素，8-bit * 4
+    std::vector<uint8_t> raw_data;     // 连续像素，8-bit * 4
 };
 struct FontKey {
     std::wstring family;
@@ -292,19 +295,16 @@ public:
     ~FontCache() = default;
     // 主入口：根据 litehtml 描述 + 可选私有集合，返回 TextFormat
     FontCachePair
-        get(litehtml::font_description& descr, IDWriteFontCollection* sysColl = nullptr);
+        get(std::wstring& familyName, const litehtml::font_description& descr, IDWriteFontCollection* sysColl = nullptr);
     ComPtr<IDWriteFontCollection> CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* path);
-
- 
 
     void clear();
 private:
-    litehtml::font_metrics make_metrics(ComPtr<IDWriteFont> font, litehtml::font_description& descr);
 
- 
+
     // 内部：真正创建
     FontCachePair
-        create(litehtml::font_description& descr, IDWriteFontCollection* sysColl);
+        create(const FontKey& key, IDWriteFontCollection* sysColl);
 
     // 工具：在指定集合里找家族
     bool findFamily(IDWriteFontCollection* coll,
@@ -312,7 +312,7 @@ private:
         Microsoft::WRL::ComPtr<IDWriteFontFamily>& family,
         UINT32& index);
 
-    std::unordered_map<std::string, FontCachePair> m_map;
+    std::unordered_map<FontKey, FontCachePair> m_map;
     mutable std::shared_mutex              m_mtx;
     Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
     std::unordered_map<std::wstring_view, ComPtr<IDWriteFontCollection>> collCache;
@@ -367,6 +367,8 @@ public:
     void parse_ocf_(void);                       // 主解析入口
     void parse_opf_(void);   // 解析 OPF
     void parse_toc_(void);                        // 解析 TOC
+
+
 
     std::wstring get_chapter_name_by_id(int spine_id);
     //void OnTreeSelChanged(const wchar_t* href);
@@ -650,6 +652,7 @@ public:
 
     LPCWSTR m_currentCursor = IDC_IBEAM;
     std::unordered_map<std::string, ImageFrame> m_img_cache;
+    std::unordered_map<std::string, std::string> m_css_cache;
     std::unordered_map<std::string, litehtml::element::ptr> m_anchor_map;
     litehtml::document::ptr m_doc;
     float m_line_height = 1.0f;

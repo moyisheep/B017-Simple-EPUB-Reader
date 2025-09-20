@@ -880,7 +880,15 @@ static std::string read_file(const fs::path& p)
 
 
 // 1. 仅内嵌 global.css
+static std::string get_global_css()
+{
+    fs::path file = exe_dir() / "res" / "global.css";
+    if (!fs::exists(file)) { return ""; }
+    std::string css = read_file(file);
+    css += ":root,body,p,li,div,h1,h2,h3,h4,h5,h6,span, ul{line-height:" + std::to_string(g_cfg.line_height) + ";}\n";
+    return css;
 
+}
 
 static void inject_global_css(std::string& html)
 {
@@ -905,7 +913,6 @@ static void inject_css(std::string& html)
 {
     std::ostringstream style;
     style << "<style>\n"
-        << ":root{font-size:" << g_cfg.font_size << "px;}\n"
         << ":root,body,p,li,div,h1,h2,h3,h4,h5,h6,span, ul{line-height:" << g_cfg.line_height << ";}\n"
         << "</style>\n";
 
@@ -925,51 +932,7 @@ void EnableClearType()
     if (!ct)
         SystemParametersInfoW(SPI_SETCLEARTYPE, TRUE, 0, SPIF_UPDATEINIFILE);
 }
-static HFONT CreateFontBetter(const wchar_t* faceW, int size, int weight,
-    bool italic, HDC hdcForDpi)
-{
-    LOGFONTW lf = { 0 };
-    lf.lfHeight = -MulDiv(size, GetDeviceCaps(hdcForDpi, LOGPIXELSY), 72);
-    lf.lfWeight = weight;
-    lf.lfItalic = italic ? TRUE : FALSE;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
-    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
-    lf.lfQuality = CLEARTYPE_QUALITY;          // ← 关键
-    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
-    const wchar_t* src = (faceW && *faceW) ? faceW : L"Microsoft YaHei";
-    wcsncpy_s(lf.lfFaceName, src, _TRUNCATE);   // 超长自动截断
 
-    // 让系统根据 FontLink 自动 fallback（中文、日文、符号都能匹配）
-    return CreateFontIndirectW(&lf);
-}
-//// 创建字体时顺带把度量算好
-//struct FontWrapper {
-//    HFONT hFont = nullptr;
-//    int   height = 0;
-//    int   ascent = 0;
-//    int   descent = 0;
-//
-//    explicit FontWrapper(const wchar_t* face, int size, int weight, bool italic)
-//    {
-//        HDC hdc = GetDC(nullptr);                    // 临时 HDC
-//        hFont = CreateFontBetter(face, size, weight, italic, hdc);
-//
-//        if (hFont) {
-//            HGDIOBJ old = SelectObject(hdc, hFont);
-//            TEXTMETRICW tm{};
-//            GetTextMetricsW(hdc, &tm);
-//            height = tm.tmHeight;
-//            ascent = tm.tmAscent;
-//            descent = tm.tmDescent;
-//            SelectObject(hdc, old);
-//        }
-//        ReleaseDC(nullptr, hdc);
-//    }
-//    ~FontWrapper() { if (hFont) DeleteObject(hFont); }
-//};
-
-// 3. 写文字
 // int -> wstring，保存不同片段
 static std::unordered_map<int, std::wstring> g_statusBuf;
 
@@ -1230,6 +1193,7 @@ void EPUBBook::parse_toc_()
 }
 
 
+
 static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 {
     ImageFrame frame;
@@ -1255,32 +1219,22 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
         break;
     }
 
-    default:   // PNG/JPEG/BMP/GIF/TIFF/…
+    default:
     {
-        IStream* pStream = SHCreateMemStream(mf.data.data(),
-            static_cast<UINT>(mf.data.size()));
-        if (!pStream) return {};
-        Gdiplus::Bitmap bmp(pStream, FALSE);
-        pStream->Release();
-        if (bmp.GetLastStatus() != Gdiplus::Ok) return {};
+        /* ---------- PNG/JPEG/BMP/... ---------- */
+        int w, h, comp;
+        stbi_uc* pixels = stbi_load_from_memory(
+            mf.data.data(), static_cast<int>(mf.data.size()),
+            &w, &h, &comp, 4);                 // 强制 4 通道 RGBA
+        if (!pixels) return {};
 
-        frame.width = bmp.GetWidth();
-        frame.height = bmp.GetHeight();
-        frame.stride = frame.width * 4;
-        frame.rgba.resize(frame.stride * frame.height);
-
-        Gdiplus::BitmapData data{};
-        Gdiplus::Rect rc(0, 0, frame.width, frame.height);
-        if (bmp.LockBits(&rc, Gdiplus::ImageLockModeRead,
-            PixelFormat32bppPARGB, &data) == Gdiplus::Ok)
-        {
-            for (uint32_t y = 0; y < frame.height; ++y)
-                memcpy(frame.rgba.data() + y * frame.stride,
-                    reinterpret_cast<uint8_t*>(data.Scan0) + y * data.Stride,
-                    frame.stride);
-            bmp.UnlockBits(&data);
-        }
-        break;
+        frame.width = w;
+        frame.height = h;
+        frame.stride = w * 4;
+        frame.rgba.assign(pixels, pixels + frame.stride * h);
+        for (size_t i = 0; i < frame.rgba.size(); i += 4)
+            std::swap(frame.rgba[i], frame.rgba[i + 2]);   // BGRA → RGBA
+        stbi_image_free(pixels);
     }
     }
     return frame;
@@ -1501,15 +1455,9 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         float pxPerLine = g_cfg.font_size * g_cfg.line_height;
         float pxDelta = -zDelta / 120.0f * pxPerLine * 3.0f;   // 负号：上滚为负
 
-        // 累加速度，而不是直接改目标
-        //g_velocity.fetch_add(pxDelta * 12.0f, std::memory_order_relaxed);
-      
-        // 启动 1 kHz 高精度定时器
-        //if (g_scrollTimer == 0) {
-        //    g_scrollTimer = timeSetEvent(g_cfg.scroll_update_interval_ms, 0, OnScrollTimer, 0, TIME_PERIODIC);
-        //}
+
         float cur = g_offsetY.load(std::memory_order_relaxed);
-        cur = std::clamp(cur + pxDelta, -1.0f, g_vd->m_height - h/2.0f);
+        cur = std::clamp(cur + pxDelta, 0.0f, std::max(g_vd->m_height - h/2.0f, 0.0f));
         g_offsetY.store(cur, std::memory_order_relaxed);
         // 更新阅读记录
         if (!g_tickTimer)
@@ -1521,15 +1469,6 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             g_cMain->m_doc->on_mouse_leave(redraw_box);
 
-            if (!redraw_box.empty())
-            {
-                for (auto box : redraw_box)
-                {
-                    RECT r(box.left(), box.top(), box.right(), box.bottom());
-                    InvalidateRect(hwnd, &r, false);
-                }
-
-            }
         }
         UpdateCache();
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -2066,7 +2005,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         float desired;
         do {
             desired = std::clamp(old + delta,
-                -1.0f,
+                0.0f,
                 g_vd->m_height - page);
         } while (!g_offsetY.compare_exchange_weak(old, desired,
             std::memory_order_relaxed,
@@ -2861,16 +2800,18 @@ void SimpleContainer::load_image(const char* src, const char* baseurl, bool redr
             return;
         }
 
-        auto dot = wpath.find_last_of(L'.');
-        std::wstring ext;
-        if (dot != std::wstring::npos && dot + 1 < wpath.size())
-        {
-            ext = wpath.substr(dot + 1);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        }
 
-        ImageFrame frame = decode_img(mf, ext.empty() ? nullptr : ext.c_str());
-        if (!frame.rgba.empty())
+
+        ImageFrame frame{};
+ 
+        int w, h, comp;
+        if (stbi_info_from_memory(mf.data.data(), static_cast<int>(mf.data.size()),
+            &w, &h, &comp)) {
+            frame.width = w;
+            frame.height = h;
+            frame.raw_data = std::move(mf.data);
+        }
+        if (!frame.raw_data.empty())
         {
             m_img_cache.emplace(src, std::move(frame));
         }
@@ -2889,7 +2830,7 @@ void SimpleContainer::load_image(const char* src, const char* baseurl, bool redr
 
 void SimpleContainer::get_image_size(const char* src, const char* baseurl, litehtml::size& sz) {
     std::lock_guard<std::mutex> lock(m_imgCacheMutex);
-    if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return; }
+    if (!m_img_cache.contains(src)) { sz.width = sz.height = 0; return;}
     auto img = m_img_cache[src];
     sz.width = img.width;
     sz.height = img.height;
@@ -2934,8 +2875,13 @@ void SimpleContainer::import_css(litehtml::string& text,
         //text.clear();           // 禁用所有外部/内部 CSS
         return;
     }
-    if (baseurl.empty()) 
-    {  
+    if (auto it = m_css_cache.find(url); it != m_css_cache.end())
+    {
+        text = it->second;
+        return;
+    }
+    if (baseurl.empty())
+    {
         std::wstring wdir = g_book->get_current_dir();
         baseurl = wdir.empty() ? "" : w2a(wdir);
     }
@@ -2945,8 +2891,9 @@ void SimpleContainer::import_css(litehtml::string& text,
         if (!mf.data.empty())
         {
             // 直接填到 text（litehtml 期望 UTF-8）
-            text.assign(reinterpret_cast<const char*>(mf.data.data()),
-                mf.data.size());
+            auto css = std::string(mf.data.begin(), mf.data.end());
+            m_css_cache.emplace(url, css);
+            text = css;
         }
         else
         {
@@ -2959,6 +2906,7 @@ void SimpleContainer::import_css(litehtml::string& text,
     std::wstring wpath = wdir.empty() ? L"" : g_book->resolve_path(wdir, a2w(url));
 
     baseurl = fs::path(wpath).parent_path().generic_string();
+
     // baseurl 保持原样即可
 }
 
@@ -2984,7 +2932,7 @@ void SimpleContainer::set_caption(const char* cap)
 // ---------- 3. base url -------------------------------------------------
 void SimpleContainer::set_base_url(const char* base)
 {
-
+    return;
 }
 
 // ---------- 4. 链接注册 --------------------------------------------------
@@ -3520,8 +3468,9 @@ void replace_svg_with_img(std::string& html,
         }
         std::ostringstream imgTag;
         imgTag << R"(<img src=")" << hash << R"(")";
-        //imgTag << " width=\"" << "100%" << "\"";
-        //imgTag << " height=\"" << "100%" << "\"";
+        imgTag << " display=\"block\" ";
+        imgTag << " width=\"100%\" ";
+        imgTag << " width=\"auto\" ";
         imgTag << " />";
 
         html.replace(it->start, it->end - it->start, imgTag.str());
@@ -3773,8 +3722,6 @@ void PreprocessHTML(std::string& html)
          std::wstring dir = make_temp_dir();
          replace_svg_with_img(html, dir);
      } 
-     if (g_cfg.enableGlobalCSS) { inject_global_css(html); }
-     //inject_css(html);
 
 }
 
@@ -3998,8 +3945,38 @@ ComPtr<ID2D1Bitmap> SimpleContainer::getBitmap(litehtml::uint_ptr hdc, std::stri
     /* ---------- 1. 取缓存位图 ---------- */
     std::lock_guard<std::mutex> lock(m_imgCacheMutex);
     auto it = m_img_cache.find(url);
-    if (it == m_img_cache.end()) return nullptr;
-    const ImageFrame& frame = it->second;
+  
+    if (it == m_img_cache.end()) { return nullptr; }
+ 
+    ImageFrame& frame  = it->second;
+
+    if(frame.rgba.empty())
+    {
+        if (!g_book) { return nullptr; }
+        
+        auto wpath = a2w(url);
+        auto dot = wpath.find_last_of(L'.');
+        std::wstring ext;
+        if (dot != std::wstring::npos && dot + 1 < wpath.size())
+        {
+            ext = wpath.substr(dot + 1);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+        }
+
+        frame = decode_img(MemFile{frame.raw_data}, ext.empty() ? nullptr : ext.c_str());
+        if (!frame.rgba.empty())
+        {
+            m_img_cache.emplace(url, frame);
+        }
+        else
+        {
+            OutputDebugStringA(("EPUB decode failed: " + std::string(url) + "\n").c_str());
+            return nullptr;
+        }
+
+        
+    }
+  
     if (frame.rgba.empty()) return nullptr;
 
 
@@ -4062,31 +4039,31 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
 
     D2D1_RECT_F drawRect = { bgX, bgY, bgX + bgW, bgY + bgH };
 
-    std::string border_txt = "[border_box] " + \
-        std::to_string(layer.border_box.left()) + ", " + \
-        std::to_string(layer.border_box.top()) + ", " + \
-        std::to_string(layer.border_box.right()) + ", " + \
-        std::to_string(layer.border_box.bottom()) + "\n";
-    std::string clip_txt = "[clip_box]   " + \
-        std::to_string(layer.clip_box.left()) + ", " + \
-        std::to_string(layer.clip_box.top()) + ", " + \
-        std::to_string(layer.clip_box.right()) + ", " + \
-        std::to_string(layer.clip_box.bottom()) + "\n";
-    std::string origin_txt = "[origin_box] " + \
-        std::to_string(layer.origin_box.left()) + ", " + \
-        std::to_string(layer.origin_box.top()) + ", " + \
-        std::to_string(layer.origin_box.right()) + ", " + \
-        std::to_string(layer.origin_box.bottom()) + "\n";
-    std::string draw_txt = "[draw_box]   " + \
-        std::to_string(drawRect.left) + ", " + \
-        std::to_string(drawRect.top) + ", " + \
-        std::to_string(drawRect.right) + ", " + \
-        std::to_string(drawRect.bottom) + "\n";
-    OutputDebugStringA(origin_txt.c_str());
-    OutputDebugStringA(border_txt.c_str());
-    OutputDebugStringA(clip_txt.c_str());
-    OutputDebugStringA(draw_txt.c_str());
-    OutputDebugStringA("\n");
+    //std::string border_txt = "[border_box] " + \
+    //    std::to_string(layer.border_box.left()) + ", " + \
+    //    std::to_string(layer.border_box.top()) + ", " + \
+    //    std::to_string(layer.border_box.right()) + ", " + \
+    //    std::to_string(layer.border_box.bottom()) + "\n";
+    //std::string clip_txt = "[clip_box]   " + \
+    //    std::to_string(layer.clip_box.left()) + ", " + \
+    //    std::to_string(layer.clip_box.top()) + ", " + \
+    //    std::to_string(layer.clip_box.right()) + ", " + \
+    //    std::to_string(layer.clip_box.bottom()) + "\n";
+    //std::string origin_txt = "[origin_box] " + \
+    //    std::to_string(layer.origin_box.left()) + ", " + \
+    //    std::to_string(layer.origin_box.top()) + ", " + \
+    //    std::to_string(layer.origin_box.right()) + ", " + \
+    //    std::to_string(layer.origin_box.bottom()) + "\n";
+    //std::string draw_txt = "[draw_box]   " + \
+    //    std::to_string(drawRect.left) + ", " + \
+    //    std::to_string(drawRect.top) + ", " + \
+    //    std::to_string(drawRect.right) + ", " + \
+    //    std::to_string(drawRect.bottom) + "\n";
+    //OutputDebugStringA(origin_txt.c_str());
+    //OutputDebugStringA(border_txt.c_str());
+    //OutputDebugStringA(clip_txt.c_str());
+    //OutputDebugStringA(draw_txt.c_str());
+    //OutputDebugStringA("\n");
     /* ---------- 4. 绘制 ---------- */
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
@@ -4716,19 +4693,7 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
     FontCachePair fcp;
     for (auto f : faces)
     {
-        litehtml::font_description fd;
-        fd.decoration_color = descr.decoration_line;
-        fd.decoration_line = descr.decoration_line;
-        fd.decoration_style = descr.decoration_style;
-        fd.decoration_thickness = descr.decoration_thickness;
-        fd.emphasis_color = descr.emphasis_color;
-        fd.emphasis_position = descr.emphasis_position;
-        fd.emphasis_style = descr.emphasis_style;
-        fd.family = w2a(f);
-        fd.size = descr.size;
-        fd.style = descr.style;
-        fd.weight = descr.weight;
-        fcp = m_fontCache.get(fd, m_sysFontColl.Get());
+        fcp = m_fontCache.get(f, descr, m_sysFontColl.Get());
         fcp.fmt;
         if (fcp.fmt) break;
         else
@@ -5305,30 +5270,11 @@ void SimpleContainer::resize(int w, int h)
     m_w = w;
     m_h = h;
     m_d2dBmpCache.clear();   // 释放所有旧位图
-    if (m_rt) {
+    if (!m_rt) { return; }
 
         D2D1_SIZE_U size{ static_cast<UINT32>(w), static_cast<UINT32>(h) };
         if (SUCCEEDED(m_rt->Resize(size))) return;   // DPI 不变时直接 Resize
-        m_rt.Reset();                               // 失败就重建
-    }
 
-    /* 重新创建 HwndRenderTarget */
-    RECT rc; GetClientRect(m_hwnd, &rc);
-    D2D1_RENDER_TARGET_PROPERTIES rtp =
-        D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                D2D1_ALPHA_MODE_PREMULTIPLIED),
-            0, 0, D2D1_RENDER_TARGET_USAGE_NONE,
-            D2D1_FEATURE_LEVEL_DEFAULT);
-
-    D2D1_HWND_RENDER_TARGET_PROPERTIES hrtp =
-        D2D1::HwndRenderTargetProperties(
-            m_hwnd,
-            D2D1::SizeU(rc.right, rc.bottom),
-            D2D1_PRESENT_OPTIONS_IMMEDIATELY);
-
-    m_d2dFactory->CreateHwndRenderTarget(&rtp, &hrtp, &m_rt);
 }
 
 
@@ -5519,11 +5465,11 @@ std::string EPUBBook::html_of_anchor_paragraph(litehtml::document* doc, const st
     std::string imgOnly = extract_first_img(inner);
     if (!imgOnly.empty())
     {
-        return "<style>img{display:block;width:100%;height:auto;}</style>" + imgOnly;
+        return "<style>img{display:block;width:100%;height:auto;}a{color:#3182ce;text-decoration:none;} </style>" + imgOnly;
     }
     else
     {
-        return "<style>img{display:block;width:100%;height:auto;}</style>" + inner;
+        return "<style>img{display:block;width:100%;height:auto;}a{color:#3182ce;text-decoration:none;} </style>" + inner;
     }
 }
 
@@ -5919,12 +5865,6 @@ void EPUBBook::clear()
 
 
 
-
-
-
-
-
-
 FontCache::FontCache() {
     DWriteCreateFactory(
         DWRITE_FACTORY_TYPE_SHARED,
@@ -5936,22 +5876,30 @@ FontCache::FontCache() {
 
 /* ---------------------------------------------------------- */
 FontCachePair
-FontCache::get(litehtml::font_description& descr,
+FontCache::get(std::wstring& familyName, const litehtml::font_description& descr,
      IDWriteFontCollection* sysColl) {
-
+    // 1. 构造键
+    FontKey key{
+        
+        std::wstring(familyName.begin(), familyName.end()),
+        descr.weight,
+        descr.style == litehtml::font_style_italic,
+        descr.size, 
+        
+    };
    
     // 2. 读缓存
     {
         std::shared_lock sl(m_mtx);
-        if (auto it = m_map.find(descr.hash()); it != m_map.end())
+        if (auto it = m_map.find(key); it != m_map.end())
             return it->second;
     }
 
     // 3. 未命中，创建并写入
-    auto fcp = create(descr, sysColl);
+    auto fcp = create(key, sysColl);
     {
         std::unique_lock ul(m_mtx);
-        m_map[descr.hash()] = fcp;          // 若并发重复，后写覆盖，无妨
+        m_map[key] = fcp;          // 若并发重复，后写覆盖，无妨
     }
     return fcp;
 }
@@ -5987,57 +5935,47 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
      return collection;
 }
 
- litehtml::font_metrics FontCache::make_metrics(ComPtr<IDWriteFont> font, litehtml::font_description& descr)
- {
-     DWRITE_FONT_METRICS m{};
-     font->GetMetrics(&m);
-     const float dip = descr.size / static_cast<float>(m.designUnitsPerEm);
-     litehtml::font_metrics fm{};
-     fm.font_size = descr.size;
-     fm.ascent = m.ascent * dip ;
-     fm.descent = m.descent * dip;
-     fm.height = (m.ascent + m.descent + m.lineGap) * dip ;
-     fm.x_height = m.xHeight * dip;
-
-     fm.ch_width = fm.font_size * 3 / 5;
-     if (descr.style == litehtml::font_style_italic || descr.decoration_line != litehtml::text_decoration_line_none)
-     {
-         fm.draw_spaces = true;
-     }
-     else
-     {
-         fm.draw_spaces = false;
-     }
-     fm.sub_shift = descr.size / 5;
-     fm.super_shift = descr.size / 3;
-
-     return fm;
- }
-
  FontCachePair
-     FontCache::create(litehtml::font_description& descr, IDWriteFontCollection* sysColl)
+     FontCache::create(const FontKey& key, IDWriteFontCollection* sysColl)
  {
 
 
 
      /* ---------- 1. 候选列表（路径优先） ---------- */
-     std::wstring wfamily = a2w(descr.family);
-     std::vector<std::wstring_view> tryNames{ wfamily };
+     std::vector<std::wstring_view> tryNames{ key.family };
      if (g_book && g_cfg.enableEPUBFonts)
      {
-         FontKey exact{ wfamily, descr.weight, descr.style, 0 };
+         FontKey exact{ key.family, key.weight, key.italic, 0 };
          if (auto it = g_book->m_fontBin.find(exact) ; it != g_book->m_fontBin.end())
              tryNames.insert(tryNames.end(), it->second.begin(), it->second.end());
          else
          {
              for (const auto& kv : g_book->m_fontBin)
-                 if (kv.first.family == wfamily)
+                 if (kv.first.family == key.family)
                      tryNames.insert(tryNames.end(), kv.second.begin(), kv.second.end());
          }
 
      }
 
-
+     /* ---------- 2. 工具：一次性生成 metrics ---------- */
+     auto makeMetrics = [](IDWriteFont* font, float size) -> litehtml::font_metrics
+         {
+             DWRITE_FONT_METRICS m{};
+             font->GetMetrics(&m);
+             const float dip = size / static_cast<float>(m.designUnitsPerEm);
+             litehtml::font_metrics fm{};
+             fm.font_size = size ;
+             fm.ascent = m.ascent * dip;
+             fm.descent = m.descent * dip ;
+             fm.height = (m.ascent + m.descent + m.lineGap) * dip ;
+             fm.x_height = m.xHeight * dip ;
+           
+             fm.ch_width = fm.font_size * 3 / 5;
+             fm.sub_shift = size / 5;
+             fm.super_shift = size / 3;
+  
+             return fm;
+         };
 
      /* ---------- 3. 路径字体（私有集合） ---------- */
      if(g_cfg.enableEPUBFonts)
@@ -6061,9 +5999,9 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
 
              ComPtr<IDWriteFont> font;
              if (FAILED(family->GetFirstMatchingFont(
-                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
                  DWRITE_FONT_STRETCH_NORMAL,
-                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  &font))) continue;
 
              wchar_t familyName[LF_FACESIZE]{};
@@ -6085,12 +6023,12 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
              if (SUCCEEDED(m_dw->CreateTextFormat(
                  familyName[0] ? familyName : L"",
                  coll.Get(),
-                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  DWRITE_FONT_STRETCH_NORMAL,
-                 static_cast<float>(descr.size), L"en-us", &fmt)))
+                 static_cast<float>(key.size), L"en-us", &fmt)))
              {
-                 FontCachePair result{ fmt, make_metrics(font, descr) };
+                 FontCachePair result{ fmt, makeMetrics(font.Get(), static_cast<float>(key.size)) };
                  return result;
              }
          }
@@ -6112,20 +6050,20 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
 
              ComPtr<IDWriteFont> font;
              if (FAILED(family->GetFirstMatchingFont(
-                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
                  DWRITE_FONT_STRETCH_NORMAL,
-                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  &font))) continue;
 
              ComPtr<IDWriteTextFormat> fmt;
              if (SUCCEEDED(m_dw->CreateTextFormat(
                  std::wstring(name).c_str(), sysColl,
-                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
-                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  DWRITE_FONT_STRETCH_NORMAL,
-                 static_cast<float>(descr.size), L"en-us", &fmt)))
+                 static_cast<float>(key.size), L"en-us", &fmt)))
              {
-                 FontCachePair result{ fmt, make_metrics(font, descr) };
+                 FontCachePair result{ fmt, makeMetrics(font.Get(), static_cast<float>(key.size)) };
                  return result;
              }
          }
@@ -6578,8 +6516,7 @@ bool VirtualDoc::load_by_id(int spine_id, bool isPushBack)
 }
 ScrollPosition VirtualDoc::get_scroll_position()
 {
-    RECT rc;
-    GetClientRect(g_hView, &rc);
+
     ScrollPosition pos{};
     if (m_blocks.empty()) { return pos; }
   
@@ -6633,7 +6570,7 @@ void VirtualDoc::update_doc(int client_h)
     OutputDebugStringA("\n");
 
 
-    if (offsetY < 0)
+    if (offsetY < client_h)
     {
         insert_prev_chapter();
 
@@ -6667,38 +6604,7 @@ void VirtualDoc::update_doc(int client_h)
 
 }
 
-//
-//void VirtualDoc::draw(int x, int y, int w, int h, float offsetY)
-//{
-//    if (m_doc_cache.empty() || m_workerBusy) { return; }
-//    auto startY = offsetY;
-//    auto endY = offsetY + h;
-//    float height = 0.0f;
-//    float drawY = 0.0f;
-//    float drawH = h;
-//    g_canvas->BeginDraw();
-//    for (int i=0; i<m_doc_cache.size(); i++ )
-//    {
-//        startY -= m_doc_cache[i].height;
-//        endY -= m_doc_cache[i].height;
-//        if (startY > 0) { continue; }
-//        startY = startY +  m_doc_cache[i].height;
-//        
-//        drawH = std::min(m_doc_cache[i].height- startY, drawH);
-//        g_canvas->m_doc = m_doc_cache[i].doc;
-//        litehtml::position clip(x, drawY, w, drawH);
-//        g_canvas->m_doc->draw(g_canvas->getContext(),   // 强制转换
-//            x, -startY, &clip);
-//        //g_canvas->present(x, -startY, &clip);
-//
-//        if (endY < 0) { break; }
-//        drawY += drawH;
-//        drawH = h - drawY;
-//        startY = -drawY;
-//    }
-//    g_canvas->EndDraw();
-//
-//}
+
 float VirtualDoc::get_height()
 {
     float height = 0.0f;
@@ -6808,9 +6714,9 @@ void VirtualDoc::workerLoop()
         /* ---------- 4. render ---------- */
         if (m_cancelFlag.load(std::memory_order_acquire))
             continue;
-
+   
         m_doc = litehtml::document::createFromString(
-            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get());
+            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css, get_global_css());
         m_doc->render(g_cfg.document_width);
 
         /* ---------- 5. 计算高度 ---------- */
@@ -8260,6 +8166,7 @@ void SimpleContainer::on_lbutton_down(int x, int y)
     UpdateCache();
 }
 
+
 void SimpleContainer::on_mouse_move(int x, int y)
 {
     if (m_selecting)
@@ -8272,9 +8179,7 @@ void SimpleContainer::on_mouse_move(int x, int y)
         {
             if (m_selStart < 0) { m_selStart = result; }
             m_selEnd = result; 
-            UpdateCache();
             InvalidateRect(m_hwnd, nullptr, false);
-            UpdateWindow(m_hwnd);
         }
 
     }
@@ -8439,40 +8344,7 @@ static bool is_word_boundary(wchar_t ch)
     return iswspace(ch) || iswpunct(ch) || ch == L'\r' || ch == L'\n';
 }
 
-//void SimpleContainer::on_lbutton_dblclk(int x, int y)
-//{
-//    if (m_plainText.empty()) return;
-//
-//    // 1. 把鼠标坐标转成逻辑字符偏移（UTF-16 code unit）
-//    size_t clickPos = hit_test(x, y);
-//    if (clickPos == static_cast<size_t>(-1) ||
-//        clickPos >= m_plainText.size())
-//        return;
-//
-//    // 2. 用 ICU 的 BreakIterator 找“单词”边界
-//    UErrorCode err = U_ZERO_ERROR;
-//    icu::UnicodeString us(m_plainText.data(), m_plainText.size());
-//    UBreakIterator* bi = ubrk_open(UBRK_WORD, nullptr,
-//        us.getBuffer(), us.length(),
-//        &err);
-//    if (U_FAILURE(err)) return;
-//
-//    // 3. 把 clickPos 之前最近的单词起点
-//    int32_t start = ubrk_preceding(bi, static_cast<int32_t>(clickPos));
-//    if (start == UBRK_DONE) start = 0;
-//
-//    // 4. 把 clickPos 之后最近的单词终点
-//    int32_t end = ubrk_following(bi, static_cast<int32_t>(clickPos));
-//    if (end == UBRK_DONE) end = static_cast<int32_t>(m_plainText.size());
-//
-//    ubrk_close(bi);
-//
-//    // 5. 赋给选区
-//    m_selStart = static_cast<size_t>(start);
-//    m_selEnd = static_cast<size_t>(end);
-//
-//    UpdateCache();
-//}
+
 void SimpleContainer::clear_selection()
 {
     m_selStart = m_selEnd = -1;
