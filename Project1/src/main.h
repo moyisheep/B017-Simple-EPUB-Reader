@@ -25,7 +25,7 @@
 #include <algorithm>
 #include <miniz/miniz.h>
 #include <tinyxml2.h>
-#include <lunasvg/lunasvg.h>"    
+#include <lunasvg/lunasvg.h>
 using tinyxml2::XMLDocument;
 using tinyxml2::XMLElement;
 #include <litehtml.h>
@@ -292,16 +292,19 @@ public:
     ~FontCache() = default;
     // 主入口：根据 litehtml 描述 + 可选私有集合，返回 TextFormat
     FontCachePair
-        get(std::wstring& familyName, const litehtml::font_description& descr, IDWriteFontCollection* sysColl = nullptr);
+        get(litehtml::font_description& descr, IDWriteFontCollection* sysColl = nullptr);
     ComPtr<IDWriteFontCollection> CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* path);
+
+ 
 
     void clear();
 private:
+    litehtml::font_metrics make_metrics(ComPtr<IDWriteFont> font, litehtml::font_description& descr);
 
-
+ 
     // 内部：真正创建
     FontCachePair
-        create(const FontKey& key, IDWriteFontCollection* sysColl);
+        create(litehtml::font_description& descr, IDWriteFontCollection* sysColl);
 
     // 工具：在指定集合里找家族
     bool findFamily(IDWriteFontCollection* coll,
@@ -309,7 +312,7 @@ private:
         Microsoft::WRL::ComPtr<IDWriteFontFamily>& family,
         UINT32& index);
 
-    std::unordered_map<FontKey, FontCachePair> m_map;
+    std::unordered_map<std::string, FontCachePair> m_map;
     mutable std::shared_mutex              m_mtx;
     Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
     std::unordered_map<std::wstring_view, ComPtr<IDWriteFontCollection>> collCache;
@@ -346,54 +349,6 @@ struct OCFPackage {
 
 
 
-class ZipIndexW {
-public:
-    ZipIndexW() = default;
-    explicit ZipIndexW(mz_zip_archive& zip);
-
-    // 输入/输出均为 std::wstring
-    std::wstring find(std::wstring href) const;
-
-private:
-    /* ---------- 大小写不敏感哈希/比较 ---------- */
-    struct StringHashI {
-        size_t operator()(std::wstring s) const noexcept {
-            size_t h = 0;
-            for (wchar_t c : s)
-                h = h * 131 + towlower(static_cast<wint_t>(c));
-            return h;
-        }
-    };
-
-    struct StringEqualI {
-        bool operator()(std::wstring a, std::wstring b) const noexcept {
-            return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-                [](wchar_t c1, wchar_t c2) {
-                    return towlower(static_cast<wint_t>(c1)) ==
-                        towlower(static_cast<wint_t>(c2));
-                });
-        }
-    };
-
-
-    using Map = std::unordered_map<std::wstring, std::wstring,
-        StringHashI, StringEqualI>;
-
-    Map map_;
-
-
-
-    /* ---------- 正规化路径 ---------- */
-    static std::wstring url_decode(const std::wstring& in);
-
-    static std::wstring normalize_key(std::wstring href);
-
-    /* ---------- 建立索引 ---------- */
-    void build(mz_zip_archive& zip);
-
-
-
-};
 
 struct MemFile {
     std::vector<uint8_t> data;
@@ -404,10 +359,9 @@ struct MemFile {
 class EPUBBook {
 public:
     mz_zip_archive zip = {};
-    std::map<std::wstring, MemFile> cache;
+    std::map<std::wstring, MemFile> m_cache;
     OCFPackage ocf_pkg_;                     // 解析结果
-    ZipIndexW m_zipIndex;
-    std::wstring m_file_path = L"";
+
     // -------------- EPUBBook 内部新增成员 --------------
 
     void parse_ocf_(void);                       // 主解析入口
@@ -416,9 +370,10 @@ public:
 
     std::wstring get_chapter_name_by_id(int spine_id);
     //void OnTreeSelChanged(const wchar_t* href);
-    bool load(const wchar_t* epub_path);
-    MemFile read_zip(const wchar_t* file_name) const;
-    std::string load_html(const std::wstring& path) const;
+    bool load(const std::wstring& epub_path);
+    std::wstring get_current_dir();
+    MemFile read_zip(std::wstring file_name) ;
+    std::string load_html(const std::wstring& path) ;
 
     void load_all_fonts(void);
 
@@ -456,6 +411,8 @@ public:
 
     void delayed_show_tooltip(std::string txt, unsigned width=300, unsigned delayMs=300);
     void cancel_delayed_tooltip();
+    MemFile get_binary( std::wstring base_url, std::wstring url);
+    bool is_toc_item(int spine_id);
     void show_tooltip(const std::string html, int width);
     void hide_imageview();
     void hide_tooltip();
@@ -466,20 +423,29 @@ public:
 
     void build_epub_font_index();
     std::unordered_map<FontKey, std::vector<std::wstring>> m_fontBin;
-
+    std::wstring resolve_path(std::wstring base_url, std::wstring href);
+    std::wstring get_book_path();
     EPUBBook() noexcept {}
     ~EPUBBook();
 private:
     struct TooltipPayload {  std::string html; unsigned width;};
     MMRESULT m_tooltipTimer = 0;
+    static std::wstring url_decode(const std::wstring& in);
+
+
+    std::wstring m_current_book_path = L"";
+    std::wstring m_current_html_path = L"";
+    
 };
 
 
 struct AppSettings {
     bool enableCSS = true;   // 默认启用 css
     bool enableJS = false;   // 默认禁用 JS
-    bool enableGlobalCSS = false;
-    bool enablePreprocessHTML = true;
+    bool enableEPUBFonts = true;
+    bool enableGlobalCSS = true;
+
+
     bool enableHoverPreview = true;
     bool enableClickPreview = true;
 
@@ -502,10 +468,10 @@ struct AppSettings {
     int default_font_size = 16;
     float default_line_height = 1.5;
     int default_document_width = 800;
-
+    std::wstring font_name = L"Georgia";
     float zoom_factor = 1.0f;
     Renderer fontRenderer = Renderer::D2D;
-    std::string default_font_name = "Microsoft YaHei";
+    std::wstring default_font_name = L"Microsoft YaHei";
 
     std::wstring temp_dir = L"epub_book";
 
@@ -646,14 +612,15 @@ public:
     void	on_mouse_event(const litehtml::element::ptr& el, litehtml::mouse_event event) override;
 
     // litehtml 新增
-    void	split_text(const char* text, const std::function<void(const char*)>& on_word, const std::function<void(const char*)>& on_space) override;
-    litehtml::string resolve_color(const litehtml::string& /*color*/) const { return litehtml::string(); }
+    //void	split_text(const char* text, const std::function<void(const char*)>& on_word, const std::function<void(const char*)>& on_space) override;
+   // litehtml::string resolve_color(const litehtml::string& /*color*/) const { return litehtml::string(); }
 
     litehtml::pixel_t	pt_to_px(float pt) const override;
 
 
     // 渲染后端需要实现的
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color, const litehtml::position& pos) override;
+
     void draw_image(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const std::string& url, const std::string& base_url) override;
     void draw_solid_fill(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::web_color& color) override;
     void draw_linear_gradient(litehtml::uint_ptr hdc, const litehtml::background_layer& layer, const litehtml::background_layer::linear_gradient& gradient) override;
@@ -698,6 +665,8 @@ public:
     void on_mouse_move(int x, int y);
     void copy_to_clipboard();
     void present(float x, float y, litehtml::position* clip);
+
+    void clear_font_cache() { m_layoutCache.clear(); m_fontCache.clear();  }
 private:
 
     float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
@@ -747,13 +716,13 @@ private:
     ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
 
     ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
-
+    ComPtr<ID2D1Bitmap> getBitmap(litehtml::uint_ptr hdc, std::string url);
     void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
 
-    LayoutCache m_layoutCache;
+
     std::unordered_map<uint32_t, ComPtr<ID2D1SolidColorBrush>> m_brushPool;
     FontCache m_fontCache;
-
+    LayoutCache m_layoutCache;
 
     ComPtr<IDWriteFactory>    m_dwrite;
 
@@ -1016,10 +985,8 @@ public:
     ~ZipFileProvider();
     bool load(const std::wstring& file_path) override;
     MemFile get( std::wstring path)  override;
-    std::wstring find(const std::wstring& path) override;
 private:
     mz_zip_archive m_zip = {};
-    ZipIndexW m_zipIndex;
 };
 
 class LocalFileProvider : public IFileProvider
@@ -1028,23 +995,6 @@ public:
     bool load(const std::wstring& file_path) override { return true; };
     // 按路径返回原始二进制
     MemFile get(std::wstring path)  override;
-    std::wstring find(const std::wstring& path) override { return L""; }
-};
-
-class EPUBFileProvider : public IFileProvider
-{
-public:
-    EPUBFileProvider();
-    ~EPUBFileProvider();
-    bool load(const std::wstring& file_path) override;
-    // 按路径返回原始二进制
-    MemFile get(std::wstring path)  override;
-    std::wstring find(const std::wstring& path) override;
- 
-private:
-    std::unordered_map<std::wstring, MemFile> m_file_cache;
-    std::unique_ptr<ZipFileProvider> m_zfp;
-    std::unique_ptr<LocalFileProvider> m_lfp;
 };
 
 class EPUBParser

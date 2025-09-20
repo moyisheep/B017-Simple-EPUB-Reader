@@ -1,0 +1,29 @@
+
+a {
+    color: #3182ce;
+    text-decoration: none; 
+    transition: all 0.2s ease; 
+    cursor: pointer; 
+}
+
+a:hover 
+{
+    color: #63b3ed;
+    text-decoration: underline; 
+}
+
+   
+a:focus {
+    outline: 2px solid #63b3ed;
+    outline-offset: 2px;
+}
+
+
+a:visited {
+    color: #805ad5; 
+}
+
+
+a:active {
+    color: #e53e3e; 
+}

@@ -31,10 +31,13 @@
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="res\homepage.html" />
+    <CopyFileToFolders Include="res\homepage.html" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="res\app.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <CopyFileToFolders Include="res\global.css" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -160,6 +163,12 @@
       <AdditionalManifestFiles>
       </AdditionalManifestFiles>
     </Manifest>
+    <ResourceCompile>
+      <Culture>0x7804</Culture>
+    </ResourceCompile>
+    <CopyFileToFolders>
+      <DestinationFolders>$(OutDir)res</DestinationFolders>
+    </CopyFileToFolders>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
