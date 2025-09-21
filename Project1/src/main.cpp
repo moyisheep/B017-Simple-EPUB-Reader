@@ -51,8 +51,11 @@ constexpr UINT STATUSBAR_FONT_SIZE = 6;
 constexpr UINT STATUSBAR_LINE_HEIGHT = 7;
 constexpr UINT STATUSBAR_DOC_WIDTH = 8;
 constexpr UINT STATUSBAR_DOC_ZOOM = 9;
+constexpr UINT STATUSBAR_FRAME_RATE = 10;
 
 // 可随时改
+static UINT g_frame_count = 0;
+
 
 
 AppStates g_states;
@@ -73,6 +76,7 @@ static MMRESULT g_flushTimer = 0;
 static MMRESULT g_updateTimer = 0;
 
 static MMRESULT g_scrollTimer = 0;
+static MMRESULT g_framerateTimer = 0;
 std::atomic<float> g_velocity{ 0 };     // 像素/秒
 
 
@@ -1243,7 +1247,14 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 
 
 
+void CALLBACK OnFrameRateTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
+{
+    if (!g_cfg.displayFrameRate) { timeKillEvent(g_framerateTimer); g_framerateTimer = 0; }
+    std::wstring txt = L"帧率：" + std::to_wstring(g_frame_count);
+    SetStatus(STATUSBAR_FRAME_RATE, txt.c_str());
+    g_frame_count = 0;
 
+}
 
 void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
 {
@@ -1264,7 +1275,8 @@ void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
     GetClientRect(g_hView, &rc);
     float h = float(rc.bottom - rc.top);
     newY = std::clamp(newY, 0.0f, std::max(0.0f, g_vd->m_height - h));
-
+    //OutputDebugStringA(std::to_string(newY).c_str());
+    //OutputDebugStringA("\n");
     g_offsetY.store(newY, std::memory_order_relaxed);
     g_velocity.store(v, std::memory_order_relaxed);
 
@@ -1522,9 +1534,10 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_PAINT:
         PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
- 
+    
         if (g_cMain  && g_cMain->m_doc && !(g_offsetY.load(std::memory_order_relaxed) == 0 && g_vd->m_workerBusy.load(std::memory_order_relaxed)))
         {
+            g_frame_count += 1;
             OutputDebugStringA("[View] WM_PAINT\n");
             RECT rc;
             GetClientRect(g_hView, &rc);
@@ -2165,6 +2178,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!g_states.isLoaded) {
             g_states.isLoaded = true;
         }
+        if(!g_framerateTimer && g_cfg.displayFrameRate)
+        {
+            g_framerateTimer = timeSetEvent(1000, 0, OnFrameRateTimer, 0, TIME_PERIODIC);
+        }
         g_vd->clear();
         g_recorder->flush();
         g_recorder->openBook(w2a(g_book->get_book_path()));
@@ -2367,6 +2384,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY: {
+        timeKillEvent(g_framerateTimer);
+        timeKillEvent(g_scrollTimer);
         g_recorder->flush();
 
         PostQuitMessage(0);
@@ -2424,6 +2443,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_scrollTimer = 0;
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
                 MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
+            break;
+        case IDM_TOGGLE_FRAME_RATE:
+            g_cfg.displayFrameRate = !g_cfg.displayFrameRate;          // 切换状态
+            if (g_cfg.displayFrameRate)
+            {
+                timeKillEvent(g_framerateTimer);
+                g_framerateTimer = timeSetEvent(1000, 0, OnFrameRateTimer, 0, TIME_PERIODIC);
+            }
+            else
+            {
+                g_statusBuf.clear();
+                timeKillEvent(g_framerateTimer);
+                g_framerateTimer = 0;
+            }
+
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_FRAME_RATE,
+                MF_BYCOMMAND | (g_cfg.displayFrameRate ? MF_CHECKED : MF_UNCHECKED));
             break;
         case IDM_TOGGLE_TOC_WINDOW:
 
@@ -2751,17 +2787,26 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
         MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_JS,
-        MF_BYCOMMAND | (g_cfg.enableJS ? MF_CHECKED : MF_UNCHECKED));
+
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
         MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
-
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_EPUB_FONTS,
+        MF_BYCOMMAND | (g_cfg.enableEPUBFonts ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
         MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CLICK_PREVIEW,
+        MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
+        MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
 
- 
-    
-       
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_FRAME_RATE,
+        MF_BYCOMMAND | (g_cfg.displayFrameRate ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
+        MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
+        MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLLBAR_WINDOW,
+        MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
 
 
     EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
@@ -3755,8 +3800,13 @@ inline HtmlFeatureFlags detect_html_features(const std::string& html) noexcept
     }
     return f;
 }
+
+
+
+
 void PreprocessHTML(std::string& html)
 {
+
     auto flags = detect_html_features(html);
     if(flags.has_math) replace_math_with_svg(html); 
 
@@ -3781,9 +3831,24 @@ void PreprocessHTML(std::string& html)
 
 
 
-// ---------- 辅助：UTF-8 ↔ UTF-16 ----------
-
-
+ std::wstring SimpleContainer::normalize_quotes(const std::wstring& src)
+{
+    std::wstring out;
+    out.reserve(src.size());
+    for (wchar_t ch : src)
+    {
+        switch (ch)
+        {
+        case 0x2018: case 0x2019: case 0x201A: case 0x201B: case 0xFF07:
+            out.push_back(L'\''); break;
+        case 0x201C: case 0x201D: case 0x201E: case 0x201F: case 0xFF02:
+            out.push_back(L'\"'); break;
+        default:
+            out.push_back(ch);
+        }
+    }
+    return out;
+}
 
 // ---------- 实现 ----------
 ComPtr<ID2D1SolidColorBrush> SimpleContainer::getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c)
@@ -3804,12 +3869,14 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
     const FontPair* fp,
     float maxW)
 {
-    LayoutKey k{ txt, fp->descr.hash(), maxW };
+    // 1. 先替换花引号
+    std::wstring clean = normalize_quotes(txt);
+    LayoutKey k{ clean, fp->descr.hash(), maxW };
     auto layout = m_layoutCache.get(k);    // 原来是 m_layoutCache.find(k)->second
     if (layout) return layout;
 
 
-    m_dwrite->CreateTextLayout(txt.c_str(), (UINT32)txt.size(),
+    m_dwrite->CreateTextLayout(clean.c_str(), (UINT32)clean.size(),
         fp->format.Get(), maxW, 512.f, &layout);
     if (!layout) return nullptr;
 
@@ -3821,6 +3888,7 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
         DWRITE_TRIMMING trim{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
         layout->SetTrimming(&trim, nullptr);
     }
+
     m_layoutCache.set(k, layout);          // 原来是 m_layoutCache[k] = layout;
     return layout;
 }
@@ -4037,7 +4105,7 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     const std::string& base_url)
 {
     if (url.empty()) return;
-    auto* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
 
     auto bmp = getBitmap(hdc, url);
     if (!bmp) { return; }
@@ -4093,8 +4161,9 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     //OutputDebugStringA(draw_txt.c_str());
     //OutputDebugStringA("\n");
     /* ---------- 4. 绘制 ---------- */
+
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
         D2D1::RectF(0, 0, imgW, imgH));
 
 }
@@ -5343,7 +5412,9 @@ void SimpleContainer::resize(int w, int h)
     m_dc->SetTarget(m_targetBmp.Get());
 
     // 4) 更新 DPI（可选）
-    m_dc->SetDpi(96.0f, 96.0f);
+    float dpiX =96.0f, dpiY = 96.0f;
+    m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);
+    m_dc->SetDpi(dpiX, dpiY);
 }
 
 
@@ -5831,10 +5902,18 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     // 2) 创建 D3D11 设备（flag 选 D3D11_CREATE_DEVICE_BGRA_SUPPORT）
     Microsoft::WRL::ComPtr<ID3D11Device>        d3dDevice;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3dCtx;
-    D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
+    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT ,
         nullptr, 0, D3D11_SDK_VERSION,
         &d3dDevice, nullptr, &d3dCtx);
+    if (DXGI_ERROR_UNSUPPORTED == hr)
+    {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &d3dDevice, nullptr, &d3dCtx);
+    }
+
 
     // 3) 拿到 DXGI 设备
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
@@ -5852,8 +5931,8 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     scDesc.SampleDesc.Count = 1;
     scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scDesc.BufferCount = 2;
-    scDesc.Scaling = DXGI_SCALING_STRETCH;
-    scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    //scDesc.Scaling = DXGI_SCALING_STRETCH;
+    //scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
     Microsoft::WRL::ComPtr<IDXGIAdapter> dxgiAdapter;
     dxgiDevice->GetAdapter(&dxgiAdapter);
@@ -5872,6 +5951,7 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
 
     m_dc->CreateBitmapFromDxgiSurface(backBuffer.Get(), bmpProps, &m_targetBmp);
     m_dc->SetTarget(m_targetBmp.Get());
+    m_dc->SetDpi(dpiX, dpiY);
 
     /* 3) 创建 HwndRenderTarget（直接画到窗口） */
     //hr = m_d2dFactory->CreateHwndRenderTarget(

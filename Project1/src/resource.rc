@@ -49,12 +49,12 @@ BEGIN
     END
     POPUP "&设置"
     BEGIN
-        MENUITEM "加载 全局 CSS", IDM_TOGGLE_GLOBAL_CSS, CHECKED
         MENUITEM "加载 EPUB CSS",                  IDM_TOGGLE_CSS, CHECKED
         MENUITEM "加载 EPUB 自带字体",                  IDM_TOGGLE_EPUB_FONTS, CHECKED
         MENUITEM "启用 悬停预览",                   IDM_TOGGLE_HOVER_PREVIEW, CHECKED
         MENUITEM "启用 点击预览", IDM_TOGGLE_CLICK_PREVIEW, CHECKED
         MENUITEM "启用 滚动动画", IDM_TOGGLE_SCROLL_ANIMATION, CHECKED
+
         MENUITEM SEPARATOR     // ← 分隔符
         POPUP "字体大小"           // ← 二级菜单
         BEGIN
@@ -87,6 +87,7 @@ BEGIN
         MENUITEM "状态栏",                         IDM_TOGGLE_STATUS_WINDOW, CHECKED
         MENUITEM "滚动条",                         IDM_TOGGLE_SCROLLBAR_WINDOW, CHECKED
         MENUITEM "菜单栏",                         IDM_TOGGLE_MENUBAR_WINDOW, CHECKED
+        MENUITEM "显示 帧率", IDM_TOGGLE_FRAME_RATE, CHECKED
     END
 END
 

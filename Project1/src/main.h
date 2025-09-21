@@ -446,7 +446,7 @@ struct AppSettings {
     bool enableJS = false;   // 默认禁用 JS
     bool enableEPUBFonts = true;
     bool enableGlobalCSS = true;
-    bool enableScrollAnimation = true;
+    bool enableScrollAnimation = false;
 
     bool enableHoverPreview = true;
     bool enableClickPreview = true;
@@ -456,6 +456,7 @@ struct AppSettings {
     bool displayMenuBar = true;
     bool displayScrollBar = true;
     bool displayToolbar = true;
+    bool displayFrameRate = true;
 
     int record_update_interval_ms = 1000;
     int record_flush_interval_ms = 10 * 1000;
@@ -678,7 +679,6 @@ private:
 
     std::vector<RECT> get_selection_rows() const;
 
-    void render_to_offscreen(float x, float y, litehtml::position* clip);
 
 
     //ComPtr<ID2D1HwndRenderTarget> m_rt;
@@ -719,6 +719,7 @@ private:
     float m_baselineY = 0;
     std::vector<ComPtr<ID2D1Layer>>  m_clipStack;  // 新增
     ComPtr<IDWriteFontCollection> m_sysFontColl;
+    static std::wstring normalize_quotes(const std::wstring& src);
     ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
 
     ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
