@@ -72,7 +72,8 @@ static MMRESULT g_flushTimer = 0;
 
 static MMRESULT g_updateTimer = 0;
 
-
+static MMRESULT g_scrollTimer = 0;
+std::atomic<float> g_velocity{ 0 };     // 像素/秒
 
 
 int g_center_offset = 0;
@@ -1244,7 +1245,38 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
 
 
 
+void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
+{
 
+    float dt = 0.001f;
+
+
+    // 物理惯性：v = v * e^(-k*dt)
+    const float friction = 8.0f;   // 越大越快停
+    float v = g_velocity.load(std::memory_order_relaxed) * std::exp(-friction * dt);
+
+    // 位移
+    float cur = g_offsetY.load(std::memory_order_relaxed);
+    float newY = cur + v * dt;
+
+    // 边界
+    RECT rc;
+    GetClientRect(g_hView, &rc);
+    float h = float(rc.bottom - rc.top);
+    newY = std::clamp(newY, 0.0f, std::max(0.0f, g_vd->m_height - h));
+
+    g_offsetY.store(newY, std::memory_order_relaxed);
+    g_velocity.store(v, std::memory_order_relaxed);
+
+    InvalidateRect(g_hView, nullptr, FALSE);
+
+    // 速度接近 0 时停止定时器
+    if (std::fabs(v) < 0.1f) {
+        g_velocity.store(0.0f);
+        timeKillEvent(g_scrollTimer);
+        g_scrollTimer = 0;
+    }
+}
 
 
 
@@ -1455,10 +1487,23 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         float pxPerLine = g_cfg.font_size * g_cfg.line_height;
         float pxDelta = -zDelta / 120.0f * pxPerLine * 3.0f;   // 负号：上滚为负
 
+        if(g_cfg.enableScrollAnimation)
+        {
+            // 累加速度，而不是直接改目标
+            g_velocity.fetch_add(pxDelta * 12.0f, std::memory_order_relaxed);
 
-        float cur = g_offsetY.load(std::memory_order_relaxed);
-        cur = std::clamp(cur + pxDelta, 0.0f, std::max(g_vd->m_height - h/2.0f, 0.0f));
-        g_offsetY.store(cur, std::memory_order_relaxed);
+            // 启动 1 kHz 高精度定时器
+            if (g_scrollTimer == 0) {
+                g_scrollTimer = timeSetEvent(1, 0, OnScrollTimer, 0, TIME_PERIODIC);
+            }
+        }
+        else
+        {
+            float cur = g_offsetY.load(std::memory_order_relaxed);
+            cur = std::clamp(cur + pxDelta, 0.0f, std::max(g_vd->m_height - h / 2.0f, 0.0f));
+            g_offsetY.store(cur, std::memory_order_relaxed);
+        }
+
         // 更新阅读记录
         if (!g_tickTimer)
         {
@@ -2373,7 +2418,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
             break;
 
-
+        case IDM_TOGGLE_SCROLL_ANIMATION:
+            g_cfg.enableScrollAnimation = !g_cfg.enableScrollAnimation;          // 切换状态
+            timeKillEvent(g_scrollTimer);
+            g_scrollTimer = 0;
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
+                MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
+            break;
         case IDM_TOGGLE_TOC_WINDOW:
 
             g_cfg.displayTOC = !g_cfg.displayTOC;          // 切换状态
@@ -3729,30 +3780,6 @@ void PreprocessHTML(std::string& html)
 
 
 
-void SimpleContainer::BeginDraw()
-{
-
-    m_rt->BeginDraw();
-    m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
-
-    // 1. 保存原始矩阵
-    m_rt->GetTransform(&m_oldMatrix);
-
-    // 3. 以鼠标位置为中心整体缩放
-    m_rt->SetTransform(
-        D2D1::Matrix3x2F::Scale(
-            m_zoom_factor,
-            m_zoom_factor,
-            D2D1::Point2F(static_cast<float>(0),
-                static_cast<float>(0))));
-}
-void SimpleContainer::EndDraw()
-{
-    // 恢复原始矩阵
-    m_rt->SetTransform(m_oldMatrix);
-
-    m_rt->EndDraw();
-}
 
 // ---------- 辅助：UTF-8 ↔ UTF-16 ----------
 
@@ -3764,7 +3791,7 @@ ComPtr<ID2D1SolidColorBrush> SimpleContainer::getBrush(litehtml::uint_ptr hdc, c
     uint32_t key = (c.alpha << 24) | (c.red << 16) | (c.green << 8) | c.blue;
     auto it = m_brushPool.find(key);
     if (it != m_brushPool.end()) return it->second;
-    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     ComPtr<ID2D1SolidColorBrush> brush;
     rt->CreateSolidColorBrush(
         D2D1::ColorF(c.red / 255.f, c.green / 255.f, c.blue / 255.f, c.alpha / 255.f),
@@ -3798,11 +3825,12 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
     return layout;
 }
 
-void SimpleContainer::record_char_boxes(ID2D1RenderTarget* rt,
+void SimpleContainer::record_char_boxes(ID2D1DeviceContext* rt,
     IDWriteTextLayout* layout,
     const std::wstring& wtxt,
     const litehtml::position& pos)
 {
+
     LineBoxes line;
     float originX = static_cast<float>(pos.x);
     float originY = static_cast<float>(pos.y);
@@ -3837,7 +3865,7 @@ void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     const litehtml::position& pos)
 {
     if (!text || !*text || !hFont) return;
-    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    auto* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     FontPair* fp = reinterpret_cast<FontPair*>(hFont);
     if (!fp) return;
 
@@ -3848,7 +3876,7 @@ void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     // 2. 文本
     std::wstring wtxt = a2w(text);
     if (wtxt.empty()) return;
-
+    
     float maxW = 8192.0f;
     auto layout = getLayout(wtxt, fp, maxW);
     if (!layout) return;
@@ -3868,7 +3896,7 @@ void SimpleContainer::draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp
 {
     if (fp->descr.decoration_line == litehtml::text_decoration_line_none)
         return;
-    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    auto* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     /* 1. 文本整体尺寸 */
     DWRITE_TEXT_METRICS tm{};
     layout->GetMetrics(&tm);
@@ -3983,7 +4011,7 @@ ComPtr<ID2D1Bitmap> SimpleContainer::getBitmap(litehtml::uint_ptr hdc, std::stri
     /* ---------- 2. 取/建 D2D 位图 ---------- */
     ComPtr<ID2D1Bitmap> bmp = m_d2dBmpCache[url];   // 引用现有或新建
     if (!bmp) {
-        auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+        auto* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
         D2D1_BITMAP_PROPERTIES bp =
             D2D1::BitmapProperties(
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -4009,7 +4037,7 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     const std::string& base_url)
 {
     if (url.empty()) return;
-    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    auto* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
 
     auto bmp = getBitmap(hdc, url);
     if (!bmp) { return; }
@@ -4083,7 +4111,7 @@ void SimpleContainer::draw_solid_fill(litehtml::uint_ptr hdc,
     const litehtml::web_color& color)
 {
     // 1. 取出 D2D 渲染目标
-    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     if (!rt) return;
 
     // 2. 创建/复用纯色画刷
@@ -4120,7 +4148,7 @@ void SimpleContainer::draw_linear_gradient(
     const litehtml::background_layer& layer,
     const litehtml::background_layer::linear_gradient& g)
 {
-    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     if (!rt) return;
 
     // 1. 把 color_points 转成 D2D 色标
@@ -4191,7 +4219,7 @@ void SimpleContainer::draw_radial_gradient(
     const litehtml::background_layer& layer,
     const litehtml::background_layer::radial_gradient& g)
 {
-    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     if (!rt) return;
 
     // 1. 构造 D2D 色标
@@ -4309,7 +4337,7 @@ void SimpleContainer::draw_conic_gradient(
     const litehtml::background_layer& layer,
     const litehtml::background_layer::conic_gradient& g)
 {
-    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     if (!rt) return;
 
     // 1. 计算填充矩形
@@ -4403,7 +4431,7 @@ void SimpleContainer::draw_list_marker(
     litehtml::uint_ptr hdc,
     const litehtml::list_marker& marker)
 {
-    ID2D1RenderTarget* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    ID2D1DeviceContext* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     if (!rt) return;
 
     // 1. 基础信息
@@ -4481,7 +4509,7 @@ void SimpleContainer::draw_borders(litehtml::uint_ptr hdc,
     bool root)
 {
     if (!hdc) return;
-    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(hdc);
+    auto* rt = reinterpret_cast<ID2D1DeviceContext*>(hdc);
     // 1. 收集四边
     std::array<SideInfo, 4> sides = {
         SideInfo{ (float)borders.top.width,    borders.top.color,    borders.top.style },
@@ -4797,12 +4825,12 @@ void SimpleContainer::build_rounded_rect_path(
 void SimpleContainer::set_clip(const litehtml::position& pos,
     const litehtml::border_radiuses& bdr)
 {
-    if (!m_rt) return;
+    if (!m_dc) return;
 
     // 无圆角 → 矩形裁剪
     if (is_all_zero(bdr))
     {
-        m_rt->PushAxisAlignedClip(
+        m_dc->PushAxisAlignedClip(
             D2D1::RectF(float(pos.left()), float(pos.top()),
                 float(pos.right()), float(pos.bottom())),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -4812,7 +4840,7 @@ void SimpleContainer::set_clip(const litehtml::position& pos,
 
     // 有圆角 → 用 PathGeometry + Layer
     ComPtr<ID2D1Factory> factory;
-    m_rt->GetFactory(&factory);
+    m_dc->GetFactory(&factory);
 
     ComPtr<ID2D1PathGeometry> path;
     factory->CreatePathGeometry(&path);
@@ -4822,9 +4850,9 @@ void SimpleContainer::set_clip(const litehtml::position& pos,
     sink->Close();
 
     ComPtr<ID2D1Layer> layer;
-    if (SUCCEEDED(m_rt->CreateLayer(nullptr, &layer)))
+    if (SUCCEEDED(m_dc->CreateLayer(nullptr, &layer)))
     {
-        m_rt->PushLayer(
+        m_dc->PushLayer(
             D2D1::LayerParameters(D2D1::InfiniteRect(), path.Get()),
             layer.Get());
         m_clipStack.emplace_back(std::move(layer));
@@ -4835,9 +4863,9 @@ void SimpleContainer::del_clip()
 {
     if (m_clipStack.empty()) return;
     if (m_clipStack.back())
-        m_rt->PopLayer();           // 圆角
+        m_dc->PopLayer();           // 圆角
     else
-        m_rt->PopAxisAlignedClip(); // 矩形
+        m_dc->PopAxisAlignedClip(); // 矩形
     m_clipStack.pop_back();
 }
 
@@ -5259,8 +5287,23 @@ AppBootstrap::~AppBootstrap() {
 
 
 
-litehtml::uint_ptr SimpleContainer::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_rt.Get()); }
+litehtml::uint_ptr SimpleContainer::getContext() { return reinterpret_cast<litehtml::uint_ptr>(m_dc.Get()); }
 
+
+
+//void SimpleContainer::resize(int w, int h)
+//{
+//    if (w <= 0 || h <= 0) return;
+//
+//    m_w = w;
+//    m_h = h;
+//    m_d2dBmpCache.clear();   // 释放所有旧位图
+//    if (!m_rt) { return; }
+//
+//        D2D1_SIZE_U size{ static_cast<UINT32>(w), static_cast<UINT32>(h) };
+//        if (SUCCEEDED(m_rt->Resize(size))) return;   // DPI 不变时直接 Resize
+//
+//}
 
 
 void SimpleContainer::resize(int w, int h)
@@ -5269,16 +5312,39 @@ void SimpleContainer::resize(int w, int h)
 
     m_w = w;
     m_h = h;
-    m_d2dBmpCache.clear();   // 释放所有旧位图
-    if (!m_rt) { return; }
 
-        D2D1_SIZE_U size{ static_cast<UINT32>(w), static_cast<UINT32>(h) };
-        if (SUCCEEDED(m_rt->Resize(size))) return;   // DPI 不变时直接 Resize
+    // 1) 释放所有依赖后台缓冲的 D2D 资源
+    m_dc->SetTarget(nullptr);          // 解绑
+    m_targetBmp.Reset();               // 你之前叫 targetBmp，这里起名叫 m_targetBmp
+    m_d2dBmpCache.clear();             // 你自己的缓存
 
+    // 2) 调整交换链缓冲大小
+    HRESULT hr = m_swapChain->ResizeBuffers(
+        0,                             // 保持 BufferCount
+        static_cast<UINT>(w),
+        static_cast<UINT>(h),
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+    {
+        // 设备丢失，需要重新创建设备链（略）
+        return;
+    }
+
+    // 3) 重新绑定新的后台缓冲
+    Microsoft::WRL::ComPtr<IDXGISurface> backBuffer;
+    m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+
+    D2D1_BITMAP_PROPERTIES1 bmpProps = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+
+    m_dc->CreateBitmapFromDxgiSurface(backBuffer.Get(), bmpProps, &m_targetBmp);
+    m_dc->SetTarget(m_targetBmp.Get());
+
+    // 4) 更新 DPI（可选）
+    m_dc->SetDpi(96.0f, 96.0f);
 }
-
-
-
 
 
 
@@ -5745,10 +5811,10 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     m_w(w), m_h(h), m_hwnd(hwnd)
 {
 
-    /* 1) D2D 工厂（1.0 足够） */
+    /* 1) D2D 工厂（1.1 ） */
     HRESULT hr = D2D1CreateFactory(
         D2D1_FACTORY_TYPE_SINGLE_THREADED,
-        __uuidof(ID2D1Factory),
+        __uuidof(ID2D1Factory1),
         nullptr,
         reinterpret_cast<void**>(m_d2dFactory.GetAddressOf()));
     if (FAILED(hr)) {
@@ -5761,41 +5827,87 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);
     const float scale = dpiX / 96.0f;
 
-    /* 3) 创建 HwndRenderTarget（直接画到窗口） */
-    hr = m_d2dFactory->CreateHwndRenderTarget(
-        D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_HARDWARE,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX, dpiY),
-        D2D1::HwndRenderTargetProperties(
-            m_hwnd,
-            D2D1::SizeU(
-                static_cast<UINT>(m_w * scale),
-                static_cast<UINT>(m_h * scale))),
-        &m_rt);
-    if (FAILED(hr)) {
-        OutputDebugStringA("CreateHwndRenderTarget hardware failed\n");
 
-        // 回退到默认
-        hr = m_d2dFactory->CreateHwndRenderTarget(
-            D2D1::RenderTargetProperties(
-                D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                    D2D1_ALPHA_MODE_PREMULTIPLIED),
-                dpiX, dpiY),
-            D2D1::HwndRenderTargetProperties(
-                m_hwnd,
-                D2D1::SizeU(
-                    static_cast<UINT>(m_w * scale),
-                    static_cast<UINT>(m_h * scale))),
-            &m_rt);
-        if (FAILED(hr)) 
-        {
-            OutputDebugStringA("CreateHwndRenderTarget failed\n");
-            return;
-        }
-    }
+    // 2) 创建 D3D11 设备（flag 选 D3D11_CREATE_DEVICE_BGRA_SUPPORT）
+    Microsoft::WRL::ComPtr<ID3D11Device>        d3dDevice;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3dCtx;
+    D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
+        nullptr, 0, D3D11_SDK_VERSION,
+        &d3dDevice, nullptr, &d3dCtx);
+
+    // 3) 拿到 DXGI 设备
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    d3dDevice.As(&dxgiDevice);
+
+    // 4) 用 DXGI 设备创建 D2D 设备
+    m_d2dFactory->CreateDevice(dxgiDevice.Get(), &m_d2dDevice);
+
+    // 5) 创建 D2D 设备上下文
+    m_d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &m_dc);
+
+    // 6) 创建交换链
+    DXGI_SWAP_CHAIN_DESC1 scDesc{};
+    scDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    scDesc.SampleDesc.Count = 1;
+    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scDesc.BufferCount = 2;
+    scDesc.Scaling = DXGI_SCALING_STRETCH;
+    scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+
+    Microsoft::WRL::ComPtr<IDXGIAdapter> dxgiAdapter;
+    dxgiDevice->GetAdapter(&dxgiAdapter);
+    Microsoft::WRL::ComPtr<IDXGIFactory2> dxgiFactory;
+    dxgiAdapter->GetParent(IID_PPV_ARGS(&dxgiFactory));
+    dxgiFactory->CreateSwapChainForHwnd(
+        d3dDevice.Get(), m_hwnd, &scDesc, nullptr, nullptr, &m_swapChain);
+
+    // 7) 把交换链的后台缓冲绑定到 D2D 目标位图
+    Microsoft::WRL::ComPtr<IDXGISurface> backBuffer;
+    m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+
+    D2D1_BITMAP_PROPERTIES1 bmpProps = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+
+    m_dc->CreateBitmapFromDxgiSurface(backBuffer.Get(), bmpProps, &m_targetBmp);
+    m_dc->SetTarget(m_targetBmp.Get());
+
+    /* 3) 创建 HwndRenderTarget（直接画到窗口） */
+    //hr = m_d2dFactory->CreateHwndRenderTarget(
+    //    D2D1::RenderTargetProperties(
+    //        D2D1_RENDER_TARGET_TYPE_HARDWARE,
+    //        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+    //            D2D1_ALPHA_MODE_PREMULTIPLIED),
+    //        dpiX, dpiY),
+    //    D2D1::HwndRenderTargetProperties(
+    //        m_hwnd,
+    //        D2D1::SizeU(
+    //            static_cast<UINT>(m_w * scale),
+    //            static_cast<UINT>(m_h * scale))),
+    //    &m_rt);
+    //if (FAILED(hr)) {
+    //    OutputDebugStringA("CreateHwndRenderTarget hardware failed\n");
+
+    //    // 回退到默认
+    //    hr = m_d2dFactory->CreateHwndRenderTarget(
+    //        D2D1::RenderTargetProperties(
+    //            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    //            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+    //                D2D1_ALPHA_MODE_PREMULTIPLIED),
+    //            dpiX, dpiY),
+    //        D2D1::HwndRenderTargetProperties(
+    //            m_hwnd,
+    //            D2D1::SizeU(
+    //                static_cast<UINT>(m_w * scale),
+    //                static_cast<UINT>(m_h * scale))),
+    //        &m_rt);
+    //    if (FAILED(hr)) 
+    //    {
+    //        OutputDebugStringA("CreateHwndRenderTarget failed\n");
+    //        return;
+    //    }
+    //}
     /* 4) DirectWrite 工厂 */
     IDWriteFactory* pRaw = nullptr;
     hr = DWriteCreateFactory(
@@ -5826,6 +5938,7 @@ SimpleContainer::~SimpleContainer()
 void SimpleContainer::clear()
 {
     std::lock_guard<std::mutex> lock(m_imgCacheMutex);
+    clear_selection();
     m_img_cache.clear();
     m_d2dBmpCache.clear();
     m_anchor_map.clear();
@@ -8292,52 +8405,105 @@ std::vector<RECT> SimpleContainer::get_selection_rows() const
 
 void SimpleContainer::present(float x, float y, litehtml::position* clip)
 {
-
     m_lines.clear();
     m_plainText.clear();
 
-    m_rt->BeginDraw();
-    m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
+    m_dc->BeginDraw();
+    m_dc->Clear(D2D1::ColorF(D2D1::ColorF::White));
 
-    // 1. 保存原始矩阵
-    m_rt->GetTransform(&m_oldMatrix);
+    // 保存原始矩阵
+    m_dc->GetTransform(&m_oldMatrix);
 
-    // 3. 以鼠标位置为中心整体缩放
-    m_rt->SetTransform(
+    // 缩放
+    m_dc->SetTransform(
         D2D1::Matrix3x2F::Scale(
             m_zoom_factor,
             m_zoom_factor,
-            D2D1::Point2F(static_cast<float>(0),
-                static_cast<float>(0))));
-    m_doc->draw(getContext(),   // 强制转换
-        x, y, clip);
+            D2D1::Point2F(0.0f, 0.0f)));
 
+    // 绘制 html
+    m_doc->draw(getContext(), x, y, clip);
 
     // 高亮选中行
     if (!m_selBrush)
     {
-        m_rt->CreateSolidColorBrush(
-            g_cfg.highlight_color_d2d,   // 半透明蓝
+        m_dc->CreateSolidColorBrush(
+            g_cfg.highlight_color_d2d,
             &m_selBrush);
     }
     if (m_selStart != m_selEnd && m_selBrush && m_selStart >= 0 && m_selEnd >= 0)
     {
-        m_rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        m_dc->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         for (const auto& row : get_selection_rows())
         {
             D2D1_RECT_F r = D2D1::RectF(
-                row.left ,
-                row.top ,
-                row.right ,
-                row.bottom );
-            m_rt->FillRectangle(r, m_selBrush.Get());
+                row.left, row.top, row.right, row.bottom);
+            m_dc->FillRectangle(r, m_selBrush.Get());
         }
     }
-    // 恢复原始矩阵
-    m_rt->SetTransform(m_oldMatrix);
-    m_rt->EndDraw();
 
+    // 恢复矩阵
+    m_dc->SetTransform(m_oldMatrix);
+
+    HRESULT hr = m_dc->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET)
+    {
+        // 设备丢失，重建
+        return;
+    }
+
+    // 呈现
+    m_swapChain->Present(1, 0);
 }
+
+//void SimpleContainer::present(float x, float y, litehtml::position* clip)
+//{
+//
+//    m_lines.clear();
+//    m_plainText.clear();
+//
+//    m_rt->BeginDraw();
+//    m_rt->Clear(D2D1::ColorF(D2D1::ColorF::White));
+//
+//    // 1. 保存原始矩阵
+//    m_rt->GetTransform(&m_oldMatrix);
+//
+//    // 3. 以鼠标位置为中心整体缩放
+//    m_rt->SetTransform(
+//        D2D1::Matrix3x2F::Scale(
+//            m_zoom_factor,
+//            m_zoom_factor,
+//            D2D1::Point2F(static_cast<float>(0),
+//                static_cast<float>(0))));
+//    m_doc->draw(getContext(),   // 强制转换
+//        x, y, clip);
+//
+//
+//    // 高亮选中行
+//    if (!m_selBrush)
+//    {
+//        m_rt->CreateSolidColorBrush(
+//            g_cfg.highlight_color_d2d,   // 半透明蓝
+//            &m_selBrush);
+//    }
+//    if (m_selStart != m_selEnd && m_selBrush && m_selStart >= 0 && m_selEnd >= 0)
+//    {
+//        m_rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+//        for (const auto& row : get_selection_rows())
+//        {
+//            D2D1_RECT_F r = D2D1::RectF(
+//                row.left ,
+//                row.top ,
+//                row.right ,
+//                row.bottom );
+//            m_rt->FillRectangle(r, m_selBrush.Get());
+//        }
+//    }
+//    // 恢复原始矩阵
+//    m_rt->SetTransform(m_oldMatrix);
+//    m_rt->EndDraw();
+//
+//}
 // 判断是否为单词边界（空格、标点、换行）
 static bool is_word_boundary(wchar_t ch)
 {

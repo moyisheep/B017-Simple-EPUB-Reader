@@ -43,6 +43,7 @@
 #define ID_ZOOM_RESET          40026
 #define IDM_TOGGLE_CLICK_PREVIEW        40027
 #define	IDM_TOGGLE_EPUB_FONTS 40028
+#define IDM_TOGGLE_SCROLL_ANIMATION 40029
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED

@@ -446,7 +446,7 @@ struct AppSettings {
     bool enableJS = false;   // 默认禁用 JS
     bool enableEPUBFonts = true;
     bool enableGlobalCSS = true;
-
+    bool enableScrollAnimation = true;
 
     bool enableHoverPreview = true;
     bool enableClickPreview = true;
@@ -670,15 +670,18 @@ public:
     void present(float x, float y, litehtml::position* clip);
 
     void clear_font_cache() { m_layoutCache.clear(); m_fontCache.clear();  }
+    ComPtr<ID2D1Bitmap1> m_offscreenBmp;   // 离屏位图
+    bool                 m_offscreenDirty = true; // 是否需要重绘
 private:
 
     float m_px_per_pt{ 96.0f / 72.0f };   // 默认 96 DPI
 
     std::vector<RECT> get_selection_rows() const;
-    void BeginDraw() ;
-    void EndDraw() ;
 
-    ComPtr<ID2D1HwndRenderTarget> m_rt;
+    void render_to_offscreen(float x, float y, litehtml::position* clip);
+
+
+    //ComPtr<ID2D1HwndRenderTarget> m_rt;
 
 
     int  m_w, m_h;
@@ -698,7 +701,7 @@ private:
     std::wstring           m_plainText;       // 整篇纯文本
 
     ComPtr<ID2D1SolidColorBrush> m_selBrush;
-    void record_char_boxes(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, const std::wstring& wtxt, const litehtml::position& pos);
+    void record_char_boxes(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, const std::wstring& wtxt, const litehtml::position& pos);
 
     std::vector<std::wstring> split_font_list(const std::string& src);
 
@@ -733,6 +736,11 @@ private:
 
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap>> m_d2dBmpCache;
     std::mutex m_imgCacheMutex;
+    Microsoft::WRL::ComPtr<ID2D1Device>      m_d2dDevice;
+    Microsoft::WRL::ComPtr<ID2D1DeviceContext> m_dc;   // 取代原来的 m_rt
+    Microsoft::WRL::ComPtr<IDXGISwapChain1>   m_swapChain;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_targetBmp;
+    Microsoft::WRL::ComPtr<IDXGISurface> m_backBuffer;
 };
 
 
