@@ -97,7 +97,7 @@ using namespace Gdiplus;
 #include <cstring>
 #include <stack>
 #include <blake3.h>
-
+#include <boost/algorithm/string.hpp>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -311,7 +311,7 @@ private:
     std::unordered_map<FontKey, FontCachePair> m_map;
     mutable std::shared_mutex              m_mtx;
     Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
-    std::unordered_map<std::wstring_view, ComPtr<IDWriteFontCollection>> collCache;
+    std::unordered_map<std::wstring, ComPtr<IDWriteFontCollection>> collCache;
     FileCollectionLoader* m_loader;
 
 };

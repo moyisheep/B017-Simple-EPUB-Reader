@@ -2288,6 +2288,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_cfg.font_size = record.fontSize > 0 ? record.fontSize:g_cfg.default_font_size;
         g_cfg.line_height = record.lineHeightMul > 0 ? record.lineHeightMul : g_cfg.default_line_height;
         g_cfg.document_width = record.docWidth > 0 ? record.docWidth : g_cfg.default_document_width;
+        g_cfg.enableCSS = record.enableCSS;
         int spine_size = g_book->ocf_pkg_.spine.size();
         SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, spine_size, 0);
 
@@ -3795,16 +3796,10 @@ void replace_svg_with_img(std::string& html,
 //
 
 
-
-
-// --------------------------------------------------
-// 通用 HTML 预处理
-// --------------------------------------------------
-void replace_math_with_svg(std::string& html)
-{
+void replace_math_with_svg(std::string& html) {
     GumboOutput* output = gumbo_parse(html.c_str());
 
-    /* 收集所有 <math> 节点 */
+    /* 收集所有 <math> 或 <m:math> 节点 */
     struct MathNode {
         GumboElement* el;
         size_t start;
@@ -3814,22 +3809,65 @@ void replace_math_with_svg(std::string& html)
     std::function<void(GumboNode*)> walk = [&](GumboNode* node) {
         if (node->type == GUMBO_NODE_ELEMENT) {
             GumboElement& el = node->v.element;
-            if (el.tag == GUMBO_TAG_MATH) {
-                mathNodes.push_back({ &el,
-                                      el.start_pos.offset,
-                                      el.end_pos.offset + el.original_end_tag.length});
+
+            // 新的检测逻辑
+            bool isMathElement = false;
+
+            // 方法1：检查原始标签名
+            if (el.original_tag.data) {
+                // 获取完整的原始标签名（如"math"或"m:math"）
+                std::string originalTag(el.original_tag.data, el.original_tag.length);
+
+                // 转换为小写统一比较
+                std::transform(originalTag.begin(), originalTag.end(), originalTag.begin(),
+                    [](unsigned char c) { return std::tolower(c); });
+
+                // 检查是否是math标签（支持带命名空间）
+                size_t mathPos = originalTag.find("math");
+                if (mathPos != std::string::npos) {
+                    // 确保"math"是标签名的最后部分
+                    if (mathPos + 4 == originalTag.length()) {
+                        isMathElement = true;
+                    }
+                    // 或者前面是命名空间分隔符
+                    else if (mathPos > 0 && originalTag[mathPos - 1] == ':') {
+                        isMathElement = true;
+                    }
+                }
             }
-            for (unsigned i = 0; i < el.children.length; ++i)
+
+            // 方法2：补充检查标准math标签
+            if (!isMathElement && el.tag == GUMBO_TAG_MATH) {
+                isMathElement = true;
+            }
+
+            if (isMathElement) {
+                mathNodes.push_back({
+                    &el,
+                    el.start_pos.offset,
+                    el.end_pos.offset + el.original_end_tag.length
+                    });
+            }
+
+            // 递归处理子节点
+            for (unsigned i = 0; i < el.children.length; ++i) {
                 walk(static_cast<GumboNode*>(el.children.data[i]));
+            }
         }
         };
     walk(output->root);
 
     /* 从后往前替换，避免字节偏移失效 */
-    //std::string patched = html;
     for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
         /* 1. 取 MathML 原文 */
         std::string mathml = html.substr(it->start, it->end - it->start);
+
+        // 处理带命名空间的标签（如 <m:math> → <math>）
+        if (mathml.find("m:math") != std::string::npos) {
+            boost::replace_all(mathml, "m:math", "math");
+            boost::replace_all(mathml, "m:", ""); // 移除其他命名空间前缀（如 m:mrow）
+        }
+
         size_t altimgPos = mathml.find("altimg=\"");
         if (altimgPos != std::string::npos) {
             // 提取 altimg 属性值
@@ -3839,35 +3877,107 @@ void replace_math_with_svg(std::string& html)
                 std::string altimgSrc = mathml.substr(valueStart, valueEnd - valueStart);
 
                 // 直接构建 img 标签
-                std::string imgTag = R"(<img class="math-png" src=")" + altimgSrc + R"(" alt="math"></img>)";
+                std::string imgTag = R"(<img class="math-png" src=")" + altimgSrc + R"(" alt="math" />)";
                 html.replace(it->start, it->end - it->start, imgTag);
                 continue; // 跳过后续转换流程
             }
         }
+
         std::string hash = blade16(mathml);
-        if (!g_cMain)continue;
-        if(!g_cMain->isImageCached(hash))
-        {
+        if (!g_cMain) continue;
+
+        if (!g_cMain->isImageCached(hash)) {
             /* 2. LaTeX → KaTeX → SVG（你原来的逻辑） */
             MathML2SVG& m2s = MathML2SVG::instance();
             std::string svg = m2s.convert(mathml);
             if (svg.empty()) continue;
+
             g_cMain->addImageCache(hash, svg);
             g_cImage->m_img_cache[hash] = g_cMain->m_img_cache[hash];
             g_cTooltip->m_img_cache[hash] = g_cMain->m_img_cache[hash];
         }
-        std::string imgTag;
-        imgTag =  R"(<img class="math-png" src=")" + hash
-            + R"(" alt="math" />)";
+
+        std::string imgTag = R"(<img class="math-png" src=")" + hash + R"(" alt="math" />)";
 
         /* 7. 替换原 <math> 标签 */
         html.replace(it->start, it->end - it->start, imgTag);
     }
 
     gumbo_destroy_output(&kGumboDefaultOptions, output);
-
 }
 //
+//// --------------------------------------------------
+//// 通用 HTML 预处理
+//// --------------------------------------------------
+//void replace_math_with_svg(std::string& html)
+//{
+//    GumboOutput* output = gumbo_parse(html.c_str());
+//
+//    /* 收集所有 <math> 节点 */
+//    struct MathNode {
+//        GumboElement* el;
+//        size_t start;
+//        size_t end;
+//    };
+//    std::vector<MathNode> mathNodes;
+//    std::function<void(GumboNode*)> walk = [&](GumboNode* node) {
+//        if (node->type == GUMBO_NODE_ELEMENT) {
+//            GumboElement& el = node->v.element;
+//            if (el.tag == GUMBO_TAG_MATH) {
+//                mathNodes.push_back({ &el,
+//                                      el.start_pos.offset,
+//                                      el.end_pos.offset + el.original_end_tag.length});
+//            }
+//            for (unsigned i = 0; i < el.children.length; ++i)
+//                walk(static_cast<GumboNode*>(el.children.data[i]));
+//        }
+//        };
+//    walk(output->root);
+//
+//    /* 从后往前替换，避免字节偏移失效 */
+//    //std::string patched = html;
+//    for (auto it = mathNodes.rbegin(); it != mathNodes.rend(); ++it) {
+//        /* 1. 取 MathML 原文 */
+//        std::string mathml = html.substr(it->start, it->end - it->start);
+//        size_t altimgPos = mathml.find("altimg=\"");
+//        if (altimgPos != std::string::npos) {
+//            // 提取 altimg 属性值
+//            size_t valueStart = altimgPos + 8; // 跳过 "altimg=\""
+//            size_t valueEnd = mathml.find('"', valueStart);
+//            if (valueEnd != std::string::npos) {
+//                std::string altimgSrc = mathml.substr(valueStart, valueEnd - valueStart);
+//
+//                // 直接构建 img 标签
+//                std::string imgTag = R"(<img class="math-png" src=")" + altimgSrc + R"(" alt="math"></img>)";
+//                html.replace(it->start, it->end - it->start, imgTag);
+//                continue; // 跳过后续转换流程
+//            }
+//        }
+//        std::string hash = blade16(mathml);
+//        if (!g_cMain)continue;
+//        if(!g_cMain->isImageCached(hash))
+//        {
+//            /* 2. LaTeX → KaTeX → SVG（你原来的逻辑） */
+//            MathML2SVG& m2s = MathML2SVG::instance();
+//            std::string svg = m2s.convert(mathml);
+//            if (svg.empty()) continue;
+//            g_cMain->addImageCache(hash, svg);
+//            g_cImage->m_img_cache[hash] = g_cMain->m_img_cache[hash];
+//            g_cTooltip->m_img_cache[hash] = g_cMain->m_img_cache[hash];
+//        }
+//        std::string imgTag;
+//        imgTag =  R"(<img class="math-png" src=")" + hash
+//            + R"(" alt="math" />)";
+//
+//        /* 7. 替换原 <math> 标签 */
+//        html.replace(it->start, it->end - it->start, imgTag);
+//    }
+//
+//    gumbo_destroy_output(&kGumboDefaultOptions, output);
+
+//}
+//
+
 
 struct HtmlFeatureFlags {
     bool has_svg = false;
@@ -3876,38 +3986,64 @@ struct HtmlFeatureFlags {
     bool all() const { return has_svg && has_math && has_script; }
 };
 
-inline HtmlFeatureFlags detect_html_features(const std::string& html) noexcept
-{
+inline HtmlFeatureFlags detect_html_features(const std::string& html) noexcept {
     HtmlFeatureFlags f;
-    const char* s = html.data();
-    const char* end = s + html.size();
+    if (html.empty()) return f;
 
-    while (s < end - 6)   // 最短 "<svg" 4 字节，留余量
-    {
-        if (*s == '<')
-        {
-            ++s;
-            // 跳过空白： <  svg  或 <  script
-            while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
-                ++s;
-
-            if (s + 3 <= end) {
-                char c0 = static_cast<char>(std::tolower(*s));
-                char c1 = static_cast<char>(std::tolower(*(s + 1)));
-                char c2 = static_cast<char>(std::tolower(*(s + 2)));
-
-                if (c0 == 's' && c1 == 'v' && c2 == 'g') { f.has_svg = true; }
-                else if (c0 == 'm' && c1 == 'a' && c2 == 't') { f.has_math = true; }
-                else if (c0 == 's' && c1 == 'c' && c2 == 'r') { f.has_script = true; }
-
-                if (f.all()) break;   // 提前终止
-            }
-        }
-        ++s;
+    // 统一转换为小写（仅需一次）
+    std::string lower_html;
+    lower_html.reserve(html.size());
+    for (char c : html) {
+        lower_html.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
+
+    // 直接搜索子字符串（不关心标签完整性）
+    f.has_svg = (lower_html.find("<svg") != std::string::npos);
+    f.has_math = (lower_html.find("<math") != std::string::npos) ||
+        (lower_html.find("<m:math") != std::string::npos);
+    f.has_script = (lower_html.find("<script") != std::string::npos);
+
     return f;
 }
-
+//struct HtmlFeatureFlags {
+//    bool has_svg = false;
+//    bool has_math = false;
+//    bool has_script = false;
+//    bool all() const { return has_svg && has_math && has_script; }
+//};
+//
+//inline HtmlFeatureFlags detect_html_features(const std::string& html) noexcept
+//{
+//    HtmlFeatureFlags f;
+//    const char* s = html.data();
+//    const char* end = s + html.size();
+//
+//    while (s < end - 6)   // 最短 "<svg" 4 字节，留余量
+//    {
+//        if (*s == '<')
+//        {
+//            ++s;
+//            // 跳过空白： <  svg  或 <  script
+//            while (s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+//                ++s;
+//
+//            if (s + 3 <= end) {
+//                char c0 = static_cast<char>(std::tolower(*s));
+//                char c1 = static_cast<char>(std::tolower(*(s + 1)));
+//                char c2 = static_cast<char>(std::tolower(*(s + 2)));
+//
+//                if (c0 == 's' && c1 == 'v' && c2 == 'g') { f.has_svg = true; }
+//                else if (c0 == 'm' && c1 == 'a' && c2 == 't') { f.has_math = true; }
+//                else if (c0 == 's' && c1 == 'c' && c2 == 'r') { f.has_script = true; }
+//
+//                if (f.all()) break;   // 提前终止
+//            }
+//        }
+//        ++s;
+//    }
+//    return f;
+//}
+//
 
 
 
@@ -4059,7 +4195,7 @@ void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     // 3. 绘制文本
     rt->DrawTextLayout(D2D1::Point2F(static_cast<float>(pos.x),
         static_cast<float>(pos.y)),
-        layout.Get(), brush.Get());
+        layout.Get(), brush.Get(), D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
 
     // 4. 绘制装饰线（下划线 / 删除线 / 上划线）
     draw_decoration(hdc, fp, color, pos, layout.Get());
@@ -4270,7 +4406,7 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     /* ---------- 4. 绘制 ---------- */
 
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        D2D1_INTERPOLATION_MODE_LINEAR,
         D2D1::RectF(0, 0, imgW, imgH));
 
 }
@@ -4620,10 +4756,9 @@ void SimpleContainer::draw_list_marker(
         marker.color.blue / 255.0f,
         marker.color.alpha / 255.0f);
 
-    ComPtr<ID2D1SolidColorBrush> brush;
-    if (FAILED(rt->CreateSolidColorBrush(color, &brush)))
-        return;
-
+    ComPtr<ID2D1SolidColorBrush> brush = getBrush(hdc, marker.color);
+    if (!brush) { return; }
+    
     rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
     switch (marker.marker_type)
@@ -6065,42 +6200,8 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     m_dc->CreateBitmapFromDxgiSurface(backBuffer.Get(), bmpProps, &m_targetBmp);
     m_dc->SetTarget(m_targetBmp.Get());
     m_dc->SetDpi(dpiX, dpiY);
+    
 
-    /* 3) 创建 HwndRenderTarget（直接画到窗口） */
-    //hr = m_d2dFactory->CreateHwndRenderTarget(
-    //    D2D1::RenderTargetProperties(
-    //        D2D1_RENDER_TARGET_TYPE_HARDWARE,
-    //        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-    //            D2D1_ALPHA_MODE_PREMULTIPLIED),
-    //        dpiX, dpiY),
-    //    D2D1::HwndRenderTargetProperties(
-    //        m_hwnd,
-    //        D2D1::SizeU(
-    //            static_cast<UINT>(m_w * scale),
-    //            static_cast<UINT>(m_h * scale))),
-    //    &m_rt);
-    //if (FAILED(hr)) {
-    //    OutputDebugStringA("CreateHwndRenderTarget hardware failed\n");
-
-    //    // 回退到默认
-    //    hr = m_d2dFactory->CreateHwndRenderTarget(
-    //        D2D1::RenderTargetProperties(
-    //            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    //            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-    //                D2D1_ALPHA_MODE_PREMULTIPLIED),
-    //            dpiX, dpiY),
-    //        D2D1::HwndRenderTargetProperties(
-    //            m_hwnd,
-    //            D2D1::SizeU(
-    //                static_cast<UINT>(m_w * scale),
-    //                static_cast<UINT>(m_h * scale))),
-    //        &m_rt);
-    //    if (FAILED(hr)) 
-    //    {
-    //        OutputDebugStringA("CreateHwndRenderTarget failed\n");
-    //        return;
-    //    }
-    //}
     /* 4) DirectWrite 工厂 */
     IDWriteFactory* pRaw = nullptr;
     hr = DWriteCreateFactory(
@@ -6249,7 +6350,7 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
 
 
      /* ---------- 1. 候选列表（路径优先） ---------- */
-     std::vector<std::wstring_view> tryNames{ key.family };
+     std::vector<std::wstring> tryNames{ key.family };
      if (g_book && g_cfg.enableEPUBFonts)
      {
          FontKey exact{ key.family, key.weight, key.italic, 0 };
@@ -6287,7 +6388,7 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
      /* ---------- 3. 路径字体（私有集合） ---------- */
      if(g_cfg.enableEPUBFonts)
      {
-         for (std::wstring_view name : tryNames)
+         for (std::wstring& name : tryNames)
          {
              if (name.find(L':') == std::wstring_view::npos) continue;
              auto& coll = collCache[name];
@@ -6345,7 +6446,7 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
      /* ---------- 4. 系统字体 ---------- */
      if (sysColl)
      {
-         for (std::wstring_view name : tryNames)
+         for (std::wstring& name : tryNames)
          {
              UINT32 index = 0;
              BOOL exists = FALSE;

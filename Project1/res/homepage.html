@@ -83,22 +83,22 @@
             margin-bottom: 18px;
             line-height: 1.7;
         }
-        
-        .instructions-list li:before {
-            content: "";
-            position: absolute;
-            left: 0;
-            top: 6px;
-            width: 22px;
-            height: 22px;
-            background: #f8e6d9;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #e57112;
-            font-weight: bold;
-        }
+
+            .instructions-list li:before {
+                content: "";
+                position: absolute;
+                left: 0;
+                top: 6px;
+                width: 22px;
+                height: 22px;
+                background: #E9E9E9;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: #7C7C7C;
+                font-weight: bold;
+            }
         
         .instructions-list li:first-child:before { content: "1"; }
         .instructions-list li:nth-child(2):before { content: "2"; }
@@ -125,13 +125,25 @@
             padding: 12px 15px;
             border-bottom: 1px solid #eee;
         }
-        
+      
         .shortcut-key {
             font-weight: 600;
             width: 180px;
-            color: #e57112;
+            color: #7C7C7C;
         }
-        
+
+            .shortcut-key_item {
+                background-color: #555;
+                border-radius: 8px;
+                padding-right: 8px;
+                padding-left: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                color: white;
+                width:80px;
+                font-weight: 600;
+                text-align: center;
+            }
         /* 页脚 */
         .footer {
             text-align: center;
@@ -154,7 +166,7 @@
             }
             
             .shortcut-key {
-                width: 140px;
+                width: 270px;
             }
         }
     </style>
@@ -183,65 +195,79 @@
                 <h2 class="section-title">快捷键指南</h2>
                 <div class="shortcuts-grid">
                     <div class="shortcut-row">
-                        <div class="shortcut-key">Tab</div>
+                        <div class="shortcut-key"><span class="shortcut-key_item">TAB</span></div>
                         <div class="shortcut-desc">显示/隐藏目录窗口</div>
                     </div>
                     <div class="shortcut-row">
-                        <div class="shortcut-key">F5</div>
+                        <div class="shortcut-key"><span class="shortcut-key_item">F5</span></div>
                         <div class="shortcut-desc">刷新当前文档</div>
                     </div>
                     <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + +</div>
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">CTRL</span> <span class="shortcut-key_item">+</span>
+                        </div>
                         <div class="shortcut-desc">增大字体</div>
                     </div>
                     <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + -</div>
-                        <div class="shortcut-desc">减小字体</div>
-                    </div>
-                    <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + Backspace</div>
-                        <div class="shortcut-desc">重置字体大小</div>
-                    </div>
-                    <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + Shift + +</div>
-                        <div class="shortcut-desc">增加行高</div>
-                    </div>
-                    <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + Shift + -</div>
-                        <div class="shortcut-desc">减小行高</div>
-                    </div>
-                    <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + Shift + Backspace</div>
-                        <div class="shortcut-desc">重置行高</div>
-                    </div>
-                    <div class="shortcut-row">
-                        <div class="shortcut-key">Alt + +</div>
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">ALT</span>  <span class="shortcut-key_item">+</span>
+                        </div>
                         <div class="shortcut-desc">增加文档宽度</div>
                     </div>
                     <div class="shortcut-row">
-                        <div class="shortcut-key">Alt + -</div>
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">CTRL</span>
+                            <span class="shortcut-key_item">SHIFT</span>  <span class="shortcut-key_item">+</span>
+                        </div>
+                        <div class="shortcut-desc">增加行高</div>
+                    </div>
+
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">CTRL</span> <span class="shortcut-key_item">-</span>
+                        </div>
+                        <div class="shortcut-desc">减小字体</div>
+                    </div>
+
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">ALT</span>  <span class="shortcut-key_item">-</span>
+                        </div>
                         <div class="shortcut-desc">减小文档宽度</div>
                     </div>
                     <div class="shortcut-row">
-                        <div class="shortcut-key">Alt + Backspace</div>
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">CTRL</span>
+                            <span class="shortcut-key_item">SHIFT</span>  <span class="shortcut-key_item">-</span>
+                        </div>
+                        <div class="shortcut-desc">减小行高</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key"><span class="shortcut-key_item">CTRL</span> <span class="shortcut-key_item">BACKSPACE</span></div>
+                        <div class="shortcut-desc">重置字体大小</div>
+                    </div>
+                    <div class="shortcut-row">
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">ALT</span> <span class="shortcut-key_item">BACKSPACE</span>
+                        </div>
                         <div class="shortcut-desc">重置文档宽度</div>
                     </div>
+
                     <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + C</div>
-                        <div class="shortcut-desc">复制选中文本</div>
+                        <div class="shortcut-key">
+                            <span class="shortcut-key_item">CTRL</span>
+                            <span class="shortcut-key_item">SHIFT</span>  <span class="shortcut-key_item">BACKSPACE</span>
+                        </div>
+                        <div class="shortcut-desc">重置行高</div>
                     </div>
-                    <div class="shortcut-row">
-                        <div class="shortcut-key">Ctrl + O</div>
-                        <div class="shortcut-desc">打开 EPUB 文件</div>
-                    </div>
+
+
+
                 </div>
             </div>
         </div>
         
-        <!-- 页脚 -->
-        <div class="footer">
-            <p>Simple EPUB Reader | 轻量、快速、易用的 EPUB 阅读解决方案</p>
-        </div>
+
     </div>
 </body>
 </html>
