@@ -23,7 +23,7 @@ std::future<void> g_parse_task;
 std::unique_ptr<VirtualDoc> g_vd;
 //static float g_scrollY = 0.0f;   // 当前像素偏移
 static std::atomic<float> g_offsetY{ 0.0f };
-
+std::vector<FontItem> g_fontList;
 
 
 constexpr UINT WM_EPUB_PARSED = WM_APP + 1;
@@ -969,6 +969,57 @@ inline void SetStatus(int pane, const wchar_t* msg)
     }
     // 3. 一次性写到状态栏第 0 栏
     SendMessageW(g_hStatus, SB_SETTEXT, 0, reinterpret_cast<LPARAM>(text.c_str()));
+}
+
+
+INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        HWND hList = GetDlgItem(hDlg, IDC_LIST_FONT);
+        for (size_t i = 0; i < g_fontList.size(); ++i)
+        {
+            const FontItem& fi = g_fontList[i];
+            int pos = (int)SendMessage(hList, LB_ADDSTRING, 0,
+                (LPARAM)fi.displayName.c_str());
+            // 把索引 i 存进去
+            SendMessage(hList, LB_SETITEMDATA, pos, (LPARAM)i);
+        }
+        SendMessage(hList, LB_SETCURSEL, 0, 0);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case IDOK:
+        {
+            HWND hList = GetDlgItem(hDlg, IDC_LIST_FONT);
+            int pos = (int)SendMessage(hList, LB_GETCURSEL, 0, 0);
+            if (pos != LB_ERR)
+            {
+                size_t idx = (size_t)SendMessage(hList, LB_GETITEMDATA, pos, 0);
+
+         
+                    EndDialog(hDlg, static_cast<INT_PTR>(idx + 1)); // 任意非 0
+
+
+            }
+            else
+            {
+                EndDialog(hDlg, 0);
+            }
+    
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(hDlg, 0);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
 }
 
 MemFile EPUBBook::read_zip(std::wstring file_name)  {
@@ -2594,11 +2645,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_vd && g_states.isLoaded) { g_vd->reload(); }
             break;
         case ID_CHOOSE_FONT:
-            ShowSimpleFontDialog(hwnd);
-            //ChooseFontWithDialog(hwnd);
+        {
+            //ShowSimpleFontDialog(hwnd);
+            int idx = (int)DialogBoxParam(g_hInst,
+                MAKEINTRESOURCE(IDD_FONTDLG),
+                hwnd,
+                FontDlgProc,
+                0);
+            OutputDebugStringA(std::to_string(idx).c_str());
+            OutputDebugStringA("\n");
+            if (idx > 0)
+            {
+                g_cfg.font_name = g_fontList[idx - 1].familyName;
+
+            }
             if (g_vd && g_states.isLoaded) { g_vd->reload(); }
             break;
-        
+        }
         case ID_FONT_BIGGER:        // Ctrl + '+'
             g_cfg.font_size = std::min(g_cfg.font_size + 1.0f, 72.0f);   // 上限 72
             if (g_cMain) { g_cMain->clear_font_cache(); }
@@ -4109,15 +4172,18 @@ ComPtr<ID2D1SolidColorBrush> SimpleContainer::getBrush(litehtml::uint_ptr hdc, c
 }
 
 ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
-    const FontPair* fp,
+    litehtml::uint_ptr hFont,
     float maxW)
 {
     // 1. 先替换花引号
+    auto* fp = reinterpret_cast<FontPair*>(hFont);
+    if (!fp->format) { return nullptr; }
     std::wstring clean = normalize_quotes(txt);
-    LayoutKey k{ clean, a2w(fp->descr.hash()) + fp->family, maxW };
+    LayoutKey k{ clean, a2w(fp->descr.hash()) + fp->familyName, maxW };
     auto layout = m_layoutCache.get(k);    // 原来是 m_layoutCache.find(k)->second
     if (layout) return layout;
 
+ 
 
     m_dwrite->CreateTextLayout(clean.c_str(), (UINT32)clean.size(),
         fp->format.Get(), maxW, 512.f, &layout);
@@ -4189,7 +4255,7 @@ void SimpleContainer::draw_text(litehtml::uint_ptr hdc,
     if (wtxt.empty()) return;
     
     float maxW = 8192.0f;
-    auto layout = getLayout(wtxt, fp, maxW);
+    auto layout = getLayout(wtxt,  hFont, maxW);
     if (!layout) return;
     record_char_boxes(rt, layout.Get(), wtxt, pos);
     // 3. 绘制文本
@@ -5034,31 +5100,36 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
     
     faces.push_back(g_cfg.default_font_name);
     std::wstring family_name = L"";
-    FontCachePair fcp;
+    FontCachePair* fcp;
     for (auto f : faces)
     {
         family_name = f;
         fcp = m_fontCache.get(f, descr, m_sysFontColl.Get());
-        fcp.fmt;
-        if (fcp.fmt) break;
-        else
-        {
-            std::wstring txt = L"[DWrite] 加载字体失败： " + f + L"\n";
-            OutputDebugStringW(txt.c_str());
-        }
+        if (fcp->fmt)break;
     }
-
-
-    if (!fcp.fmt) {
+    if (!fcp->fmt) {
         OutputDebugStringW(L"[DWrite] 加载默认字体失败\n");
         return 0;
     }
 
-    *fm = fcp.fm;
-    m_line_height = fm->height;
-    FontPair* fp = new FontPair{ fcp.fmt, descr , family_name};
+    DWRITE_FONT_METRICS m{};
+    fcp->font->GetMetrics(&m);
+    const float dip = descr.size / static_cast<float>(m.designUnitsPerEm);
 
-    return reinterpret_cast<litehtml::uint_ptr>(fp);
+    fm->font_size = descr.size;
+    fm->ascent = m.ascent * dip;
+    fm->descent = m.descent * dip;
+    fm->height = (m.ascent + m.descent + m.lineGap) * dip;
+    fm->x_height = m.xHeight * dip;
+    fm->draw_spaces = descr.style == litehtml::font_style_italic || descr.decoration_line != litehtml::text_decoration_line_none;
+    fm->ch_width = fm->font_size * 3 / 5;
+    fm->sub_shift = descr.size / 5;
+    fm->super_shift = descr.size / 3;
+
+
+
+
+    return reinterpret_cast<litehtml::uint_ptr>(new FontPair(fcp->fmt,descr, fcp->familyName));
 }
 
 void SimpleContainer::delete_font(litehtml::uint_ptr h)
@@ -5073,16 +5144,13 @@ litehtml::pixel_t SimpleContainer::text_width(const char* text,
 {
     if (!text || !*text || !hFont) return 0;
 
-    FontPair* fp = reinterpret_cast<FontPair*>(hFont);
-    if (!fp || !fp->format) return 0;
-
     std::wstring wtxt = a2w(text);
     if (wtxt.empty()) return 0;
 
     // 1. 创建 TextLayout
  
     float maxW = 8192.0f;
-    auto layout = getLayout(wtxt, fp, maxW);
+    auto layout = getLayout(wtxt, hFont, maxW);
     if (!layout) { return 0; }
     // 3. 取逻辑宽度（已含空白、连字、kerning）
     DWRITE_TEXT_METRICS tm{};
@@ -5090,8 +5158,9 @@ litehtml::pixel_t SimpleContainer::text_width(const char* text,
     if (FAILED(hr)) { return 0; }
 
     // 4. DPI → 物理像素（Win7 也支持）
-    float dpi = 96.0f;               // 若你有当前 DPI，替换之
-    float physical = tm.widthIncludingTrailingWhitespace * dpi / 96.0f;
+    float dpiX, dpiY;dpiX=dpiY = 96.0f;
+    m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);             
+    float physical = tm.widthIncludingTrailingWhitespace * dpiX / 96.0f;
 
     return physical;
 }
@@ -6219,11 +6288,58 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     if (FAILED(hr)) {
         OutputDebugStringA("GetSystemFontCollection failed\n");
     }
-  
+    BuildFontList();
     init_dpi();
 }
 
+void SimpleContainer::BuildFontList()
+{
+    g_fontList.clear();
 
+    auto sysColl = m_sysFontColl;
+    if (!sysColl)
+        return;
+
+    UINT32 count = sysColl->GetFontFamilyCount();
+    for (UINT32 i = 0; i < count; ++i)
+    {
+        ComPtr<IDWriteFontFamily> family;
+        if (FAILED(sysColl->GetFontFamily(i, &family)))
+            continue;
+
+        ComPtr<IDWriteLocalizedStrings> names;
+        if (FAILED(family->GetFamilyNames(&names)))
+            continue;
+
+        // 1. 取英文字体原名
+        UINT32 idx = 0;
+        BOOL exists = FALSE;
+        names->FindLocaleName(L"en-us", &idx, &exists);
+        if (!exists) idx = 0; // fallback
+
+        UINT32 len = 0;
+        names->GetStringLength(idx, &len);
+        std::wstring familyName(len + 1, 0);
+        names->GetString(idx, familyName.data(), len + 1);
+
+        // 2. 尝试取中文名
+        std::wstring displayName = familyName; // 默认
+        names->FindLocaleName(L"zh-cn", &idx, &exists);
+        if (exists)
+        {
+            names->GetStringLength(idx, &len);
+            displayName.resize(len);
+            names->GetString(idx, displayName.data(), len + 1);
+        }
+
+        g_fontList.push_back({ familyName, displayName });
+    }
+
+    // 可选：按 displayName 排序
+    std::sort(g_fontList.begin(), g_fontList.end(),
+        [](const FontItem& a, const FontItem& b)
+        { return _wcsicmp(a.displayName.c_str(), b.displayName.c_str()) < 0; });
+}
 SimpleContainer::~SimpleContainer()
 {
     clear();
@@ -6283,31 +6399,24 @@ FontCache::FontCache() {
 }
 
 /* ---------------------------------------------------------- */
-FontCachePair
+FontCachePair*
 FontCache::get(std::wstring& familyName, const litehtml::font_description& descr,
      IDWriteFontCollection* sysColl) {
     // 1. 构造键
-    FontKey key{
-        
-        std::wstring(familyName.begin(), familyName.end()),
-        descr.weight,
-        descr.style == litehtml::font_style_italic,
-        descr.size, 
-        
-    };
-   
+
+    std::wstring search_key = std::wstring(familyName) + a2w(descr.hash());
     // 2. 读缓存
     {
         std::shared_lock sl(m_mtx);
-        if (auto it = m_map.find(key); it != m_map.end())
+        if (auto it = m_map.find(search_key); it != m_map.end() && it->second->font && it->second->fmt)
             return it->second;
     }
 
     // 3. 未命中，创建并写入
-    auto fcp = create(key, sysColl);
+    auto fcp = create(familyName, descr, sysColl);
     {
         std::unique_lock ul(m_mtx);
-        m_map[key] = fcp;          // 若并发重复，后写覆盖，无妨
+        m_map[search_key] = fcp;          // 若并发重复，后写覆盖，无妨
     }
     return fcp;
 }
@@ -6343,47 +6452,30 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
      return collection;
 }
 
- FontCachePair
-     FontCache::create(const FontKey& key, IDWriteFontCollection* sysColl)
+ FontCachePair*
+     FontCache::create(std::wstring& familyName, const litehtml::font_description& descr, IDWriteFontCollection* sysColl)
  {
 
 
 
      /* ---------- 1. 候选列表（路径优先） ---------- */
-     std::vector<std::wstring> tryNames{ key.family };
+     std::vector<std::wstring> tryNames{ familyName };
      if (g_book && g_cfg.enableEPUBFonts)
      {
-         FontKey exact{ key.family, key.weight, key.italic, 0 };
+         FontKey exact{ familyName, descr.weight, descr.style, 0 };
          if (auto it = g_book->m_fontBin.find(exact) ; it != g_book->m_fontBin.end())
              tryNames.insert(tryNames.end(), it->second.begin(), it->second.end());
          else
          {
              for (const auto& kv : g_book->m_fontBin)
-                 if (kv.first.family == key.family)
+                 if (kv.first.family == familyName)
                      tryNames.insert(tryNames.end(), kv.second.begin(), kv.second.end());
          }
 
      }
 
      /* ---------- 2. 工具：一次性生成 metrics ---------- */
-     auto makeMetrics = [](IDWriteFont* font, float size) -> litehtml::font_metrics
-         {
-             DWRITE_FONT_METRICS m{};
-             font->GetMetrics(&m);
-             const float dip = size / static_cast<float>(m.designUnitsPerEm);
-             litehtml::font_metrics fm{};
-             fm.font_size = size ;
-             fm.ascent = m.ascent * dip;
-             fm.descent = m.descent * dip ;
-             fm.height = (m.ascent + m.descent + m.lineGap) * dip ;
-             fm.x_height = m.xHeight * dip ;
-           
-             fm.ch_width = fm.font_size * 3 / 5;
-             fm.sub_shift = size / 5;
-             fm.super_shift = size / 3;
-  
-             return fm;
-         };
+
 
      /* ---------- 3. 路径字体（私有集合） ---------- */
      if(g_cfg.enableEPUBFonts)
@@ -6407,9 +6499,9 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
 
              ComPtr<IDWriteFont> font;
              if (FAILED(family->GetFirstMatchingFont(
-                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
                  DWRITE_FONT_STRETCH_NORMAL,
-                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  &font))) continue;
 
              wchar_t familyName[LF_FACESIZE]{};
@@ -6426,19 +6518,17 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
                          names->GetString(idx, familyName, len + 1);
                  }
              }
+            if (!familyName[0]) { continue; }
+            ComPtr<IDWriteTextFormat> fmt;
+            if (SUCCEEDED(m_dw->CreateTextFormat(
+                familyName,
+                coll.Get(),
+                static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                static_cast<float>(descr.size), L"en-us", &fmt)))
+            return new FontCachePair{ familyName,  fmt, font };
 
-             ComPtr<IDWriteTextFormat> fmt;
-             if (SUCCEEDED(m_dw->CreateTextFormat(
-                 familyName[0] ? familyName : L"",
-                 coll.Get(),
-                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
-                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-                 DWRITE_FONT_STRETCH_NORMAL,
-                 static_cast<float>(key.size), L"en-us", &fmt)))
-             {
-                 FontCachePair result{ fmt, makeMetrics(font.Get(), static_cast<float>(key.size)) };
-                 return result;
-             }
          }
      }
 
@@ -6458,27 +6548,27 @@ FontCache::CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* pa
 
              ComPtr<IDWriteFont> font;
              if (FAILED(family->GetFirstMatchingFont(
-                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
+                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
                  DWRITE_FONT_STRETCH_NORMAL,
-                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  &font))) continue;
-
              ComPtr<IDWriteTextFormat> fmt;
-             if (SUCCEEDED(m_dw->CreateTextFormat(
+             if (FAILED(m_dw->CreateTextFormat(
                  std::wstring(name).c_str(), sysColl,
-                 static_cast<DWRITE_FONT_WEIGHT>(key.weight),
-                 key.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+                 static_cast<DWRITE_FONT_WEIGHT>(descr.weight),
+                 descr.style ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                  DWRITE_FONT_STRETCH_NORMAL,
-                 static_cast<float>(key.size), L"en-us", &fmt)))
-             {
-                 FontCachePair result{ fmt, makeMetrics(font.Get(), static_cast<float>(key.size)) };
-                 return result;
+                 static_cast<float>(descr.size), L"en-us", &fmt))) {
+                 continue;
              }
+ 
+            return new FontCachePair{ std::wstring(name), fmt , font};
+
          }
      }
 
      /* ---------- 5. 失败 ---------- */
-     return { nullptr, {} };
+     return new FontCachePair{ familyName, nullptr, nullptr};
  }
 /* ---------------------------------------------------------- */
 //FontCachePair

@@ -172,7 +172,7 @@ using LineBoxes = std::vector<CharBox>;
 struct FontPair {
     ComPtr<IDWriteTextFormat> format;
     litehtml::font_description descr;
-    std::wstring family;
+    std::wstring familyName;
 };
 
 // -------------- 运行时策略 -----------------
@@ -282,15 +282,16 @@ private:
 
 struct FontCachePair 
 {
+    std::wstring familyName;
     ComPtr<IDWriteTextFormat> fmt;
-    litehtml::font_metrics fm ;
+    ComPtr<IDWriteFont> font;
 };
 class FontCache {
 public:
     FontCache();
     ~FontCache() = default;
     // 主入口：根据 litehtml 描述 + 可选私有集合，返回 TextFormat
-    FontCachePair
+    FontCachePair*
         get(std::wstring& familyName, const litehtml::font_description& descr, IDWriteFontCollection* sysColl = nullptr);
     ComPtr<IDWriteFontCollection> CreatePrivateCollectionFromFile(IDWriteFactory* dw, const wchar_t* path);
 
@@ -299,8 +300,8 @@ private:
 
 
     // 内部：真正创建
-    FontCachePair
-        create(const FontKey& key, IDWriteFontCollection* sysColl);
+    FontCachePair*
+        create(std::wstring& familyName, const litehtml::font_description& descr, IDWriteFontCollection* sysColl);
 
     // 工具：在指定集合里找家族
     bool findFamily(IDWriteFontCollection* coll,
@@ -308,7 +309,7 @@ private:
         Microsoft::WRL::ComPtr<IDWriteFontFamily>& family,
         UINT32& index);
 
-    std::unordered_map<FontKey, FontCachePair> m_map;
+    std::unordered_map<std::wstring, FontCachePair*> m_map;
     mutable std::shared_mutex              m_mtx;
     Microsoft::WRL::ComPtr<IDWriteFactory>   m_dw;
     std::unordered_map<std::wstring, ComPtr<IDWriteFontCollection>> collCache;
@@ -577,6 +578,8 @@ class SimpleContainer : public litehtml::document_container {
 public:
     SimpleContainer(int w, int h, HWND hwnd);
 
+    void BuildFontList();
+
     ~SimpleContainer();
 
 
@@ -713,7 +716,7 @@ private:
     static std::wstring normalize_quotes(const std::wstring& src);
     ComPtr<ID2D1SolidColorBrush> getBrush(litehtml::uint_ptr hdc, const litehtml::web_color& c);
 
-    ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt, const FontPair* fp, float maxW);
+    ComPtr<IDWriteTextLayout> getLayout(const std::wstring& txt,  litehtml::uint_ptr hFont, float maxW);
     ComPtr<ID2D1Bitmap> getBitmap(litehtml::uint_ptr hdc, std::string url);
     void draw_decoration(litehtml::uint_ptr hdc, const FontPair* fp, litehtml::web_color color, const litehtml::position& pos, IDWriteTextLayout* layout);
 
@@ -1316,4 +1319,10 @@ public:
     BusyGuard& operator=(const BusyGuard&) = delete;
 private:
     std::atomic<bool>& m_flag;
+};
+
+struct FontItem
+{
+    std::wstring familyName;   // 字体原名（en-us）
+    std::wstring displayName;  // 中文名（zh-cn），没有就用 familyName
 };

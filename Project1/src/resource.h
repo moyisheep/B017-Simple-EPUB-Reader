@@ -11,7 +11,8 @@
 #define IDC_DOC_WIDTH                   106
 #define IDC_LINE_SPACE                  107
 #define IDR_POPUP						108
-
+#define IDD_FONTDLG						109
+#define IDC_LIST_FONT					110
 #define IDB_ICON                        4000
 
 #define IDM_TOGGLE_CSS                  40001
