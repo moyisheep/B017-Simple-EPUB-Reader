@@ -95,6 +95,8 @@ static int g_imageviewRenderW = 0;
 // 全局
 std::unique_ptr<TocPanel> g_toc;
 std::unique_ptr<ScrollBarEx> g_scrollbar;
+
+//std::vector<std::wstring> g_fontNames;       // 保存字体名
 // 1. 在全局或合适位置声明
     // 整篇文档的所有行
 
@@ -1535,7 +1537,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PAINT:
         PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
     
-        if (g_cMain  && g_cMain->m_doc && !(g_offsetY.load(std::memory_order_relaxed) == 0 && g_vd->m_workerBusy.load(std::memory_order_relaxed)))
+        if (g_cMain  && g_cMain->m_doc )
         {
             g_frame_count += 1;
             OutputDebugStringA("[View] WM_PAINT\n");
@@ -1587,7 +1589,7 @@ void UpdateCache()
     g_vd->update_doc(h);
  
 
-    g_center_offset = std::max((w - g_cfg.document_width) * 0.5f, 0.0f);;
+    g_center_offset = (w - g_cfg.document_width) * 0.5f;
 }
 
 inline void DumpBookRecord()
@@ -1833,7 +1835,7 @@ LRESULT CALLBACK HomepageProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_LBUTTONDBLCLK:
     {
-        OpenEpubWithDialog(hwnd);
+        //OpenEpubWithDialog(hwnd);
         return 0;
     }
     case WM_PAINT:
@@ -1949,7 +1951,97 @@ void register_homepage_class()
     RegisterClassExW(&wc);
 }
 
+#include <Windows.h>
+#include <vector>
+#include <string>
 
+std::vector<std::wstring> GetSystemFonts() {
+    std::vector<std::wstring> fonts;
+    HDC hdc = GetDC(NULL);
+    LOGFONT lf = { 0 };
+    lf.lfCharSet = DEFAULT_CHARSET;
+
+    EnumFontFamiliesExW(
+        hdc, &lf,
+        [](const LOGFONT* lpelfe, const TEXTMETRIC*, DWORD, LPARAM lParam) {
+            auto& fonts = *reinterpret_cast<std::vector<std::wstring>*>(lParam);
+            fonts.push_back(lpelfe->lfFaceName);
+            return 1;
+        },
+        reinterpret_cast<LPARAM>(&fonts), 0
+    );
+
+    ReleaseDC(NULL, hdc);
+    return fonts;
+}
+
+// 显示自定义字体选择对话框
+std::wstring ShowSimpleFontDialog(HWND hParent) {
+    std::vector<std::wstring> fonts = GetSystemFonts();
+
+    // 创建 ComboBox 窗口
+    HWND hCombo = CreateWindowW(
+        L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        10, 10, 300, 200, hParent, NULL, NULL, NULL
+    );
+
+    // 填充字体列表
+    for (const auto& font : fonts) {
+        SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(font.c_str()));
+    }
+
+    // 显示模态对话框
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    // 获取用户选择的字体
+    WCHAR selectedFont[LF_FACESIZE] = { 0 };
+    SendMessageW(hCombo, CB_GETLBTEXT, SendMessageW(hCombo, CB_GETCURSEL, 0, 0), reinterpret_cast<LPARAM>(selectedFont));
+
+    DestroyWindow(hCombo);
+    return selectedFont;
+}
+void ChooseFontWithDialog(HWND hwnd)
+{
+    // 1. 准备一个 LOGFONTW 结构体
+    LOGFONTW lf = { 0 };
+    wcscpy_s(lf.lfFaceName, g_cfg.font_name.c_str());   // 默认字体
+    lf.lfHeight = -g_cfg.font_size;                      // 16 像素高
+
+    // 2. 填充 CHOOSEFONT
+    CHOOSEFONTW cf = { 0 };
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner = hwnd;               // 没有父窗口
+    cf.lpLogFont = &lf;                   // 输入/输出字体
+    cf.Flags = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS | CF_EFFECTS;
+    // 3. 弹出对话框
+    if (ChooseFontW(&cf))
+    {
+
+        HFONT hFont = CreateFontIndirectW(&lf);
+        HDC hdc = GetDC(NULL);
+        HFONT oldFont = (HFONT)SelectObject(hdc, hFont);  // 选入设备上下文
+        TCHAR fontName[LF_FACESIZE];
+        GetTextFace(hdc, LF_FACESIZE, fontName);
+        SelectObject(hdc, oldFont);  // 恢复旧字体
+        ReleaseDC(NULL, hdc);
+        g_cfg.font_name = fontName;
+
+    }
+    else
+    {
+        DWORD err = CommDlgExtendedError();
+        if (err)
+            std::wcout << L"ChooseFont 失败，错误码: " << err << L"\n";
+        else
+            std::wcout << L"用户取消\n";
+    }
+    return;
+}
 // ---------- 窗口 ----------
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -2020,7 +2112,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DragAcceptFiles(hwnd, TRUE);
 
         SendMessage(g_hWnd, WM_SIZE, 0, 0);
-
+     
+        SetForegroundWindow(hwnd);          // 关键：把输入焦点抢过来
         return 0;
     }
     case WM_DROPFILES:
@@ -2412,6 +2505,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case IDM_TOGGLE_GLOBAL_CSS:
             g_cfg.enableGlobalCSS = !g_cfg.enableGlobalCSS;          // 切换状态
+
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
                 MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
             if (g_vd) { g_vd->reload(); }
@@ -2443,6 +2537,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_scrollTimer = 0;
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
                 MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
+            break;
+        case IDM_TOGGLE_CUSTOM_FONT:
+            g_cfg.enableCustomFont = !g_cfg.enableCustomFont;          // 切换状态
+ 
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
+                MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
             break;
         case IDM_TOGGLE_FRAME_RATE:
             g_cfg.displayFrameRate = !g_cfg.displayFrameRate;          // 切换状态
@@ -2492,7 +2592,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             if (g_vd && g_states.isLoaded) { g_vd->reload(); }
             break;
-
+        case ID_CHOOSE_FONT:
+            ShowSimpleFontDialog(hwnd);
+            //ChooseFontWithDialog(hwnd);
+            if (g_vd && g_states.isLoaded) { g_vd->reload(); }
+            break;
+        
         case ID_FONT_BIGGER:        // Ctrl + '+'
             g_cfg.font_size = std::min(g_cfg.font_size + 1.0f, 72.0f);   // 上限 72
             if (g_cMain) { g_cMain->clear_font_cache(); }
@@ -2798,6 +2903,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
         MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
         MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
+        MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
 
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_FRAME_RATE,
         MF_BYCOMMAND | (g_cfg.displayFrameRate ? MF_CHECKED : MF_UNCHECKED));
@@ -3112,36 +3219,36 @@ void SimpleContainer::on_mouse_event(const litehtml::element::ptr& el,
 
 
 
-// 内部工具：UTF-8 → UTF-16
-static std::vector<UChar> utf8_to_utf16(const char* src)
-{
-    std::vector<UChar> buf;
-    if (!src || !*src) return buf;
-    int32_t len8 = static_cast<int32_t>(std::strlen(src));
-    UErrorCode status = U_ZERO_ERROR;
-    int32_t len16 = 0;
-    u_strFromUTF8(nullptr, 0, &len16, src, len8, &status);
-    buf.resize(len16 + 1);
-    status = U_ZERO_ERROR;
-    u_strFromUTF8(buf.data(), len16 + 1, nullptr, src, len8, &status);
-    if (U_FAILURE(status)) buf.clear();
-    else buf.resize(len16);
-    return buf;
-}
-
-// 内部工具：UTF-16 → 堆上 UTF-8（以 '\0' 结尾，可直接传给 on_word/on_space）
-static char* utf16_to_heap_utf8(const UChar* src, int32_t len)
-{
-    if (!src || len <= 0) return nullptr;
-    UErrorCode status = U_ZERO_ERROR;
-    int32_t len8 = 0;
-    u_strToUTF8(nullptr, 0, &len8, src, len, &status);
-    char* out = new char[len8 + 1];
-    status = U_ZERO_ERROR;
-    u_strToUTF8(out, len8 + 1, nullptr, src, len, &status);
-    if (U_FAILURE(status)) { delete[] out; return nullptr; }
-    return out;
-}
+//// 内部工具：UTF-8 → UTF-16
+//static std::vector<UChar> utf8_to_utf16(const char* src)
+//{
+//    std::vector<UChar> buf;
+//    if (!src || !*src) return buf;
+//    int32_t len8 = static_cast<int32_t>(std::strlen(src));
+//    UErrorCode status = U_ZERO_ERROR;
+//    int32_t len16 = 0;
+//    u_strFromUTF8(nullptr, 0, &len16, src, len8, &status);
+//    buf.resize(len16 + 1);
+//    status = U_ZERO_ERROR;
+//    u_strFromUTF8(buf.data(), len16 + 1, nullptr, src, len8, &status);
+//    if (U_FAILURE(status)) buf.clear();
+//    else buf.resize(len16);
+//    return buf;
+//}
+//
+//// 内部工具：UTF-16 → 堆上 UTF-8（以 '\0' 结尾，可直接传给 on_word/on_space）
+//static char* utf16_to_heap_utf8(const UChar* src, int32_t len)
+//{
+//    if (!src || len <= 0) return nullptr;
+//    UErrorCode status = U_ZERO_ERROR;
+//    int32_t len8 = 0;
+//    u_strToUTF8(nullptr, 0, &len8, src, len, &status);
+//    char* out = new char[len8 + 1];
+//    status = U_ZERO_ERROR;
+//    u_strToUTF8(out, len8 + 1, nullptr, src, len, &status);
+//    if (U_FAILURE(status)) { delete[] out; return nullptr; }
+//    return out;
+//}
 
 
 //void SimpleContainer::split_text(
@@ -3871,7 +3978,7 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
 {
     // 1. 先替换花引号
     std::wstring clean = normalize_quotes(txt);
-    LayoutKey k{ clean, fp->descr.hash(), maxW };
+    LayoutKey k{ clean, a2w(fp->descr.hash()) + fp->family, maxW };
     auto layout = m_layoutCache.get(k);    // 原来是 m_layoutCache.find(k)->second
     if (layout) return layout;
 
@@ -4163,7 +4270,7 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     /* ---------- 4. 绘制 ---------- */
 
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
         D2D1::RectF(0, 0, imgW, imgH));
 
 }
@@ -4779,17 +4886,23 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
       1. 把 font-family 字符串拆成单个字体名
     ----------------------------------------------------------*/
     std::vector<std::wstring> faces;
-    if (!descr.family.empty())
+    if (!descr.family.empty() && !g_cfg.enableCustomFont)
     {
         faces = split_font_list(descr.family);
     }
+    else
+    {
+        faces.push_back(g_cfg.font_name);
+    }
 
     // 默认字体兜底
+    
     faces.push_back(g_cfg.default_font_name);
-
+    std::wstring family_name = L"";
     FontCachePair fcp;
     for (auto f : faces)
     {
+        family_name = f;
         fcp = m_fontCache.get(f, descr, m_sysFontColl.Get());
         fcp.fmt;
         if (fcp.fmt) break;
@@ -4808,7 +4921,7 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
 
     *fm = fcp.fm;
     m_line_height = fm->height;
-    FontPair* fp = new FontPair{ fcp.fmt, descr };
+    FontPair* fp = new FontPair{ fcp.fmt, descr , family_name};
 
     return reinterpret_cast<litehtml::uint_ptr>(fp);
 }
@@ -6005,9 +6118,10 @@ SimpleContainer::SimpleContainer(int w, int h, HWND hwnd):
     if (FAILED(hr)) {
         OutputDebugStringA("GetSystemFontCollection failed\n");
     }
-
+  
     init_dpi();
 }
+
 
 SimpleContainer::~SimpleContainer()
 {
@@ -6038,7 +6152,7 @@ litehtml::pixel_t SimpleContainer::get_default_font_size() const
 }
 const char* SimpleContainer::get_default_font_name() const
 {
-    return g_cfg.font_name.empty()? w2a(g_cfg.default_font_name).c_str() : w2a(g_cfg.font_name).c_str();
+    return "Microsoft YaHei";
 }
 
 void EPUBBook::clear()
@@ -6719,7 +6833,7 @@ ScrollPosition VirtualDoc::get_scroll_position()
         pos.spine_id = hb.spine_id;
         pos.height = hb.height;
   
-        if ((pos.offset - hb.height) <= 0) {break; }
+        if ((pos.offset - hb.height) < 0.0f) {break; }
         pos.offset -= hb.height;
     }
 
@@ -6787,7 +6901,7 @@ void VirtualDoc::update_doc(int client_h)
  
     auto time_string = seconds2string(g_recorder->getBookTotalTime());
     SetStatus(STATUSBAR_TOTAL_TIME, (L"阅读时长：" + time_string).c_str());
-    SetStatus(STATUSBAR_FONT_NAME, (L"默认字体：" + g_cfg.font_name).c_str());
+    SetStatus(STATUSBAR_FONT_NAME, (L"自定义字体：" + g_cfg.font_name).c_str());
     SetStatus(STATUSBAR_FONT_SIZE, (L"字体大小：" + std::to_wstring(g_cfg.font_size)).c_str());
     SetStatus(STATUSBAR_LINE_HEIGHT, (L"行间距：" + std::to_wstring(g_cfg.line_height)).c_str());
     SetStatus(STATUSBAR_DOC_WIDTH, (L"文档宽度：" + std::to_wstring(g_cfg.document_width)).c_str());
@@ -6907,9 +7021,9 @@ void VirtualDoc::workerLoop()
         /* ---------- 4. render ---------- */
         if (m_cancelFlag.load(std::memory_order_acquire))
             continue;
-   
+        std::string global_css = g_cfg.enableGlobalCSS ? get_global_css() : "";
         m_doc = litehtml::document::createFromString(
-            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css, get_global_css());
+            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css, global_css);
         m_doc->render(g_cfg.document_width);
 
         /* ---------- 5. 计算高度 ---------- */
@@ -8596,9 +8710,12 @@ void SimpleContainer::clear_selection()
     m_selStart = m_selEnd = -1;
     m_selecting = false;
 }
+
+
 void SimpleContainer::on_lbutton_dblclk(int x, int y)
 {
     if (m_plainText.empty() || m_lines.empty()) return;
+
     /* 1. 字符偏移 */
     size_t clickPos = hit_test(x, y);
     if (clickPos == size_t(-1) || clickPos >= m_plainText.size())
@@ -8616,56 +8733,107 @@ void SimpleContainer::on_lbutton_dblclk(int x, int y)
     }
     if (lineEnd <= lineStart) return;   // 没找到行
 
-    /* 3. 在这一行里用 ICU 选词 */
-    icu::UnicodeString us(m_plainText.data(), m_plainText.size());
-    const UChar* buf = us.getBuffer();
-
-    UErrorCode err = U_ZERO_ERROR;
-    UBreakIterator* wordBI = ubrk_open(
-        UBRK_WORD, nullptr,
-        buf + lineStart,
-        static_cast<int32_t>(lineEnd - lineStart),
-        &err);
-    if (U_FAILURE(err)) return;
-
-    int32_t relPos = static_cast<int32_t>(clickPos - lineStart);
-
-    int32_t wordStartRel = ubrk_preceding(wordBI, relPos);
-    if (wordStartRel == UBRK_DONE) wordStartRel = 0;
-
-    int32_t wordEndRel = ubrk_following(wordBI, relPos);
-    if (wordEndRel == UBRK_DONE) wordEndRel = lineEnd - lineStart;
-
-    ubrk_close(wordBI);
-
-    int32_t wordStart = lineStart + wordStartRel;
-    int32_t wordEnd = lineStart + wordEndRel;
-
-    /* 4. 裁剪首尾空格/标点 */
-    auto isVisible = [](UChar32 c) {
-        return !u_isspace(c) && (u_isalnum(c) || c == 0x2019);
+    /* 3. 自定义“选词”：空格/制表/换行 + ASCII 标点视为分隔符 */
+    auto isDelimiter = [](unsigned char c) -> bool
+        {
+            return std::isspace(c) || std::ispunct(c);
         };
 
-    while (wordStart < wordEnd) {
-        UChar32 c; int32_t idx = wordStart;
-        U16_NEXT(buf, idx, wordEnd, c);
-        if (isVisible(c)) break;
-        wordStart = idx;
-    }
-    while (wordEnd > wordStart) {
-        UChar32 c; int32_t idx = wordEnd;
-        U16_PREV(buf, wordStart, idx, c);
-        if (isVisible(c)) { wordEnd = idx + U16_LENGTH(c); break; }
-        wordEnd = idx;
-    }
+    /* 3.1 找词起始 */
+    size_t wordStart = clickPos;
+    while (wordStart > lineStart && !isDelimiter(m_plainText[wordStart - 1]))
+        --wordStart;
+
+    /* 3.2 找词结束 */
+    size_t wordEnd = clickPos;
+    while (wordEnd < lineEnd && !isDelimiter(m_plainText[wordEnd]))
+        ++wordEnd;
+
+    if (wordStart >= wordEnd) return;
+
+    /* 4. 裁剪首尾空格/标点（可选，与 ICU 版本保持一致） */
+    while (wordStart < wordEnd && isDelimiter(m_plainText[wordStart]))
+        ++wordStart;
+    while (wordEnd > wordStart && isDelimiter(m_plainText[wordEnd - 1]))
+        --wordEnd;
 
     if (wordStart >= wordEnd) return;
 
     /* 5. 更新选区 */
-    m_selStart = static_cast<size_t>(wordStart);
-    m_selEnd = static_cast<size_t>(wordEnd);
-    UpdateCache();
+    m_selStart = wordStart;
+    m_selEnd = wordEnd;
+    //UpdateCache();
 }
+//void SimpleContainer::on_lbutton_dblclk(int x, int y)
+//{
+//    if (m_plainText.empty() || m_lines.empty()) return;
+//    /* 1. 字符偏移 */
+//    size_t clickPos = hit_test(x, y);
+//    if (clickPos == size_t(-1) || clickPos >= m_plainText.size())
+//        return;
+//
+//    /* 2. 在 m_lines 里找到当前行 */
+//    size_t lineStart = 0, lineEnd = 0;
+//    for (const auto& line : m_lines)
+//    {
+//        if (line.empty()) continue;
+//        lineStart = line.front().offset;
+//        lineEnd = line.back().offset + 1;   // [start , end)
+//        if (clickPos >= lineStart && clickPos < lineEnd)
+//            break;
+//    }
+//    if (lineEnd <= lineStart) return;   // 没找到行
+//
+//    /* 3. 在这一行里用 ICU 选词 */
+//    icu::UnicodeString us(m_plainText.data(), m_plainText.size());
+//    const UChar* buf = us.getBuffer();
+//
+//    UErrorCode err = U_ZERO_ERROR;
+//    UBreakIterator* wordBI = ubrk_open(
+//        UBRK_WORD, nullptr,
+//        buf + lineStart,
+//        static_cast<int32_t>(lineEnd - lineStart),
+//        &err);
+//    if (U_FAILURE(err)) return;
+//
+//    int32_t relPos = static_cast<int32_t>(clickPos - lineStart);
+//
+//    int32_t wordStartRel = ubrk_preceding(wordBI, relPos);
+//    if (wordStartRel == UBRK_DONE) wordStartRel = 0;
+//
+//    int32_t wordEndRel = ubrk_following(wordBI, relPos);
+//    if (wordEndRel == UBRK_DONE) wordEndRel = lineEnd - lineStart;
+//
+//    ubrk_close(wordBI);
+//
+//    int32_t wordStart = lineStart + wordStartRel;
+//    int32_t wordEnd = lineStart + wordEndRel;
+//
+//    /* 4. 裁剪首尾空格/标点 */
+//    auto isVisible = [](UChar32 c) {
+//        return !u_isspace(c) && (u_isalnum(c) || c == 0x2019);
+//        };
+//
+//    while (wordStart < wordEnd) {
+//        UChar32 c; int32_t idx = wordStart;
+//        U16_NEXT(buf, idx, wordEnd, c);
+//        if (isVisible(c)) break;
+//        wordStart = idx;
+//    }
+//    while (wordEnd > wordStart) {
+//        UChar32 c; int32_t idx = wordEnd;
+//        U16_PREV(buf, wordStart, idx, c);
+//        if (isVisible(c)) { wordEnd = idx + U16_LENGTH(c); break; }
+//        wordEnd = idx;
+//    }
+//
+//    if (wordStart >= wordEnd) return;
+//
+//    /* 5. 更新选区 */
+//    m_selStart = static_cast<size_t>(wordStart);
+//    m_selEnd = static_cast<size_t>(wordEnd);
+//    UpdateCache();
+//}
 
 
 //namespace mathml2tex {

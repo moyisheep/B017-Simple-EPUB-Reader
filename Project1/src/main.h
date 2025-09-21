@@ -91,14 +91,7 @@ using namespace Gdiplus;
 #include <shared_mutex>
 #include <cstdint>
 #include <cwctype>
-#include <unicode/unistr.h>
-#include <unicode/brkiter.h>
-#include <unicode/utypes.h>
-#include <unicode/uchar.h>
-#include <unicode/utf8.h>
-#include <unicode/rbbi.h>
-#include <unicode/ubrk.h>
-#include <unicode/ustring.h>
+
 #include <functional>
 
 #include <cstring>
@@ -154,10 +147,12 @@ namespace std {
     template<>
     struct hash<FontKey> {
         size_t operator()(const FontKey& k) const noexcept {
-            size_t h = std::hash<std::wstring>()(k.family);
-            h ^= (k.weight << 1) | (k.italic ? 1 : 0);
-            h ^= k.size;
-            return h;
+            std::wstring txt;
+            txt += k.family;
+            txt += std::to_wstring(k.weight);
+            txt += std::to_wstring(k.italic);
+            txt += std::to_wstring(k.size);
+            return std::hash<std::wstring>{}(txt);
         }
     };
 }
@@ -177,6 +172,7 @@ using LineBoxes = std::vector<CharBox>;
 struct FontPair {
     ComPtr<IDWriteTextFormat> format;
     litehtml::font_description descr;
+    std::wstring family;
 };
 
 // -------------- 运行时策略 -----------------
@@ -450,6 +446,7 @@ struct AppSettings {
 
     bool enableHoverPreview = true;
     bool enableClickPreview = true;
+    bool enableCustomFont = false;
 
     bool displayTOC = true;
     bool displayStatusBar = true;
@@ -519,7 +516,7 @@ struct AppStates {
 // ------------------------------------------------------------------
 struct LayoutKey {
     std::wstring txt;
-    std::string  fontKey;
+    std::wstring  fontKey;
     float        maxW;
 
     bool operator==(const LayoutKey& o) const noexcept {
@@ -532,16 +529,9 @@ namespace std {
     template<>
     struct hash<LayoutKey> {
         size_t operator()(const LayoutKey& k) const noexcept {
-            size_t h1 = std::hash<std::wstring>{}(k.txt);
-            size_t h2 = std::hash<std::string>{}(k.fontKey);
+            std::wstring txt = k.txt + k.fontKey + std::to_wstring(k.maxW);
 
-            // C++17 兼容：把 float 按位拷到 uint32_t
-            uint32_t u;
-            static_assert(sizeof(float) == sizeof(uint32_t));
-            std::memcpy(&u, &k.maxW, sizeof(float));
-            size_t h3 = std::hash<uint32_t>{}(u);
-
-            return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2)) ^ (h3 + 0x9e3779b9);
+            return std::hash<std::wstring>{}(txt);
         }
     };
 }
@@ -586,6 +576,7 @@ private:
 class SimpleContainer : public litehtml::document_container {
 public:
     SimpleContainer(int w, int h, HWND hwnd);
+
     ~SimpleContainer();
 
 
@@ -742,6 +733,7 @@ private:
     Microsoft::WRL::ComPtr<IDXGISwapChain1>   m_swapChain;
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_targetBmp;
     Microsoft::WRL::ComPtr<IDXGISurface> m_backBuffer;
+
 };
 
 
@@ -1161,44 +1153,44 @@ struct BmpInfo {
 //
 //} // namespace mathml2tex
 
-enum PuncClass {
-    PC_NORMAL,   // 普通字符
-    PC_LEFT,   // 左引号、左括号、书名号前半
-    PC_RIGHT,  // 右引号、右括号、句末标点
-    PC_MIDDLE, // 破折号、省略号（不可拆）
-};
-
-static PuncClass classify(UChar32 cp) {
-    switch (cp) {
-        /* ---------- 左半部分 ---------- */
-    case 0x3008: case 0x300A: case 0x300C: case 0x300E: // 〈 《 「 『
-    case 0xFF08:                                        // （
-    case 0x3010: case 0x3014: case 0x3016: case 0x3018: // 【 〔 〖 〘
-    case 0xFF3B: case 0xFF5B: case 0xFF5F:              // ［ ｛ ｟
-    case 0x2018: case 0x201C:                           // ‘ “
-        return PC_LEFT;
-
-        /* ---------- 右半部分 ---------- */
-    case 0x3001: case 0x3002:                           // 、 。
-    case 0xFF01: case 0xFF1F:                           // ！ ？
-    case 0xFF0C: case 0xFF1B: case 0xFF1A:              // ， ； ：
-    case 0x3009: case 0x300B: case 0x300D: case 0x300F: // 〉 》 」 』
-    case 0xFF09:                                        // ）
-    case 0x3011: case 0x3015: case 0x3017: case 0x3019: // 】 〕 〗 〙
-    case 0xFF3D: case 0xFF5D: case 0xFF60:              // ］ ｝ ｠
-    case 0x2019: case 0x201D:                           // ’ ”
-        return PC_RIGHT;
-
-        /* ---------- 中间整体 ---------- */
-    case 0x2014:                                        // —  破折号
-    case 0x2026:                                        // …  省略号
-    case 0x2025:                                        // ‥  二点省略
-        return PC_MIDDLE;
-
-    default:
-        return PC_NORMAL;
-    }
-}
+//enum PuncClass {
+//    PC_NORMAL,   // 普通字符
+//    PC_LEFT,   // 左引号、左括号、书名号前半
+//    PC_RIGHT,  // 右引号、右括号、句末标点
+//    PC_MIDDLE, // 破折号、省略号（不可拆）
+//};
+//
+//static PuncClass classify(UChar32 cp) {
+//    switch (cp) {
+//        /* ---------- 左半部分 ---------- */
+//    case 0x3008: case 0x300A: case 0x300C: case 0x300E: // 〈 《 「 『
+//    case 0xFF08:                                        // （
+//    case 0x3010: case 0x3014: case 0x3016: case 0x3018: // 【 〔 〖 〘
+//    case 0xFF3B: case 0xFF5B: case 0xFF5F:              // ［ ｛ ｟
+//    case 0x2018: case 0x201C:                           // ‘ “
+//        return PC_LEFT;
+//
+//        /* ---------- 右半部分 ---------- */
+//    case 0x3001: case 0x3002:                           // 、 。
+//    case 0xFF01: case 0xFF1F:                           // ！ ？
+//    case 0xFF0C: case 0xFF1B: case 0xFF1A:              // ， ； ：
+//    case 0x3009: case 0x300B: case 0x300D: case 0x300F: // 〉 》 」 』
+//    case 0xFF09:                                        // ）
+//    case 0x3011: case 0x3015: case 0x3017: case 0x3019: // 】 〕 〗 〙
+//    case 0xFF3D: case 0xFF5D: case 0xFF60:              // ］ ｝ ｠
+//    case 0x2019: case 0x201D:                           // ’ ”
+//        return PC_RIGHT;
+//
+//        /* ---------- 中间整体 ---------- */
+//    case 0x2014:                                        // —  破折号
+//    case 0x2026:                                        // …  省略号
+//    case 0x2025:                                        // ‥  二点省略
+//        return PC_MIDDLE;
+//
+//    default:
+//        return PC_NORMAL;
+//    }
+//}
 
 
 class MathML2SVG {

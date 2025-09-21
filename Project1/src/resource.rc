@@ -49,13 +49,17 @@ BEGIN
     END
     POPUP "&设置"
     BEGIN
+
         MENUITEM "加载 EPUB CSS",                  IDM_TOGGLE_CSS, CHECKED
         MENUITEM "加载 EPUB 自带字体",                  IDM_TOGGLE_EPUB_FONTS, CHECKED
+        MENUITEM "加载 全局 CSS", IDM_TOGGLE_GLOBAL_CSS, CHECKED
+        MENUITEM SEPARATOR     // ← 分隔符
         MENUITEM "启用 悬停预览",                   IDM_TOGGLE_HOVER_PREVIEW, CHECKED
         MENUITEM "启用 点击预览", IDM_TOGGLE_CLICK_PREVIEW, CHECKED
         MENUITEM "启用 滚动动画", IDM_TOGGLE_SCROLL_ANIMATION, CHECKED
-
+        MENUITEM "启用 自定义字体", IDM_TOGGLE_CUSTOM_FONT, CHECKED
         MENUITEM SEPARATOR     // ← 分隔符
+        MENUITEM "选择字体", ID_CHOOSE_FONT
         POPUP "字体大小"           // ← 二级菜单
         BEGIN
             MENUITEM "+ 增大", ID_FONT_BIGGER
