@@ -82,7 +82,7 @@ std::atomic<float> g_velocity{ 0 };     // 像素/秒
 
 int g_center_offset = 0;
 
-
+std::string g_globalCSS = "";
 
 static int   g_splitX = 200;       // 当前 TOC 宽度（初始值）
 static bool  g_dragging = false;     // 是否正在拖动
@@ -935,7 +935,6 @@ static std::string get_global_css()
     fs::path file = exe_dir() / "res" / "global.css";
     if (!fs::exists(file)) { return ""; }
     std::string css = read_file(file);
-    css += ":root,body,p,li,div,h1,h2,h3,h4,h5,h6,span, ul{line-height:" + std::to_string(g_cfg.line_height) + ";}\n";
     return css;
 
 }
@@ -2673,7 +2672,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case IDM_TOGGLE_GLOBAL_CSS:
             g_cfg.enableGlobalCSS = !g_cfg.enableGlobalCSS;          // 切换状态
-
+            g_cfg.enableGlobalCSS ? g_globalCSS = get_global_css() : g_globalCSS = "";
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
                 MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
             if (g_vd) { g_vd->reload(); }
@@ -3227,7 +3226,7 @@ void SimpleContainer::get_viewport(litehtml::position& client) const
 
     // 4. 逻辑像素
     int width = static_cast<int>(g_cfg.document_width * m_zoom_factor);
-    int height = static_cast<int>((rc.bottom) / m_zoom_factor);
+    int height = static_cast<int>((rc.bottom- rc.top) / m_zoom_factor);
 
     client = litehtml::position(0, 0, width, height);
 }
@@ -3589,8 +3588,13 @@ void SimpleContainer::get_media_features(litehtml::media_features& mf) const
     // 1. 窗口客户区（物理像素）
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    mf.width = MulDiv(rc.right - rc.left, GetDpiForWindow(m_hwnd), 96);
-    mf.height = MulDiv(rc.bottom - rc.top, GetDpiForWindow(m_hwnd), 96);
+
+
+    // 4. 逻辑像素
+    int width = static_cast<int>(g_cfg.document_width * m_zoom_factor);
+    int height = static_cast<int>((rc.bottom - rc.top) / m_zoom_factor);
+    mf.width = MulDiv(width, GetDpiForWindow(m_hwnd), 96);
+    mf.height = MulDiv(height, GetDpiForWindow(m_hwnd), 96);
 
     // 2. 屏幕物理分辨率
     const UINT dpiX = GetDpiForWindow(m_hwnd);   // 也可用 GetDpiForSystem
@@ -4295,8 +4299,11 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
     auto layout = m_layoutCache.get(k);    // 原来是 m_layoutCache.find(k)->second
     if (layout) return layout;
 
-    // exists == TRUE 表示字体支持该字符
-
+   //for(auto& name: fp->descr.family)
+   //{
+   //    std::wstring wname = a2w(name);
+   //    auto* fcp = m_fontCache.get(wname, fp->descr, m_sysFontColl.Get());
+   //}
    m_dwrite->CreateTextLayout(clean.c_str(), (UINT32)clean.size(),
         fp->format.Get(), maxW, 512.f, &layout);
  
@@ -5242,7 +5249,7 @@ litehtml::uint_ptr SimpleContainer::create_font(const litehtml::font_description
 
 
 
-    return reinterpret_cast<litehtml::uint_ptr>(new FontPair(fcp->fmt,descr, fcp->familyName));
+    return reinterpret_cast<litehtml::uint_ptr>(new FontPair(fcp->fmt, descr, fcp->familyName));
 }
 
 void SimpleContainer::delete_font(litehtml::uint_ptr h)
@@ -5266,6 +5273,7 @@ litehtml::pixel_t SimpleContainer::text_width(const char* text,
     auto layout = getLayout(wtxt, hFont, maxW);
     if (!layout) { return 0; }
 
+    
     // 3. 取逻辑宽度（已含空白、连字、kerning）
     DWRITE_TEXT_METRICS tm{};
     HRESULT hr = layout->GetMetrics(&tm);
@@ -5761,6 +5769,7 @@ AppBootstrap::AppBootstrap() {
             g_cfg.displayStatusBar = settings.displayStatusBar;
             g_cfg.displayTOC = settings.displayTOC;
             CheckAllMenuItem();
+            g_globalCSS = g_cfg.enableGlobalCSS ? get_global_css() : "";
         }
     }
 
@@ -7098,19 +7107,28 @@ float VirtualDoc::get_height_by_id(int spine_id)
 }
 void VirtualDoc::reload()
 {
-    if (m_blocks.empty() || m_workerBusy) return;
+    if ( m_workerBusy) return;
     if (g_cMain) { g_cMain->clear_selection(); }
-    // 1. 记录当前滚动百分比
-    ScrollPosition old = get_scroll_position();
-    double percent = 0.0;
-    if ( old.height > 0.0f)          // 旧文档高度
-        m_percent = double(old.offset) / old.height;
+    if(m_blocks.empty())
+    {
+        insert_chapter(0);
+    }
+    else
+    {
+        // 1. 记录当前滚动百分比
+        ScrollPosition old = get_scroll_position();
+        double percent = 0.0;
+        if (old.height > 0.0f)          // 旧文档高度
+            m_percent = double(old.offset) / old.height;
 
 
-    clear();
-    insert_chapter(old.spine_id);
+        clear();
+        insert_chapter(old.spine_id);
 
-    m_isReloading.store(true);
+        m_isReloading.store(true);
+    }
+    
+
     // 3. 把百分比换算成新的像素值
 
 }
@@ -7334,14 +7352,14 @@ void VirtualDoc::workerLoop()
             html += "</body></html>";
         }
      
-  
-        LogToFile(html);
         /* ---------- 4. render ---------- */
         if (m_cancelFlag.load(std::memory_order_acquire))
             continue;
-        std::string global_css = g_cfg.enableGlobalCSS ? get_global_css() : "";
+        std::string css =  g_globalCSS;
+        css += ":root,body,p,li,div,h1,h2,h3,h4,h5,h6,span, ul{line-height:" + std::to_string(g_cfg.line_height) + ";}\n";
+
         m_doc = litehtml::document::createFromString(
-            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css, global_css);
+            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css + css);
         m_doc->render(g_cfg.document_width);
 
         /* ---------- 5. 计算高度 ---------- */

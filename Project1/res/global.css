@@ -28,3 +28,9 @@ a:active {
     color: #e53e3e; 
 }
 
+
+img {
+    max-width: 100%;
+    box-sizing: border-box;
+    height: auto;
+}
