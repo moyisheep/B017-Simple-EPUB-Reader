@@ -448,7 +448,7 @@ struct AppSettings {
     bool enableHoverPreview = true;
     bool enableClickPreview = true;
     bool enableCustomFont = false;
-
+    bool enableFontRealtimePreview = true;
     bool displayTOC = true;
     bool displayStatusBar = true;
     bool displayMenuBar = true;

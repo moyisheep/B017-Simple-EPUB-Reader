@@ -988,11 +988,73 @@ INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             SendMessage(hList, LB_SETITEMDATA, pos, (LPARAM)i);
         }
         SendMessage(hList, LB_SETCURSEL, 0, 0);
+
+        // 设置"启用实时预览"复选框的初始状态
+        HWND hRealtimePreviewCheck = GetDlgItem(hDlg, IDM_TOGGLE_FONT_REALTIME_PREVIEW);
+        SendMessage(hRealtimePreviewCheck, BM_SETCHECK,
+            g_cfg.enableFontRealtimePreview ? BST_CHECKED : BST_UNCHECKED, 0);
         return TRUE;
     }
+    case WM_ERASEBKGND:
+    {
+        HDC hdc = (HDC)wp;
+        RECT rc;
+        GetClientRect(hDlg, &rc);
+
+        // 用白色填充整个客户区
+        HBRUSH hBrush = CreateSolidBrush(RGB(255, 255, 255));
+        FillRect(hdc, &rc, hBrush);
+        DeleteObject(hBrush);
+
+        return TRUE; // 表示我们已经处理了背景擦除
+    }
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdcStatic = (HDC)wp;
+        HWND hwndStatic = (HWND)lp;
+        UINT ctrlId = GetDlgCtrlID(hwndStatic);
+
+        // 处理复选框背景
+        if (ctrlId == IDM_TOGGLE_CUSTOM_FONT ||
+            ctrlId == IDM_TOGGLE_FONT_REALTIME_PREVIEW)
+        {
+            SetBkMode(hdcStatic, TRANSPARENT);
+            SetTextColor(hdcStatic, RGB(0, 0, 0)); // 黑色文本
+
+            // 使用淡蓝色背景 (RGB: 240, 248, 255 - AliceBlue)
+            HBRUSH hBrush = CreateSolidBrush(RGB(255, 255, 255));
+            return (INT_PTR)hBrush; // 注意: Windows会自动删除这个画刷
+        }
+        return FALSE;
+    }
+
+
     case WM_COMMAND:
         switch (LOWORD(wp))
         {
+        case IDC_LIST_FONT:   // 来自列表框的消息
+            switch (HIWORD(wp))
+            {
+            case LBN_SELCHANGE:   // 单击改变选择
+            case LBN_DBLCLK:      // 双击
+            {
+                if (!g_cfg.enableFontRealtimePreview) { break; }
+                HWND hList = (HWND)lp;
+                int pos = (int)SendMessage(hList, LB_GETCURSEL, 0, 0);
+                if (pos != LB_ERR)
+                {
+                    size_t idx = (size_t)SendMessage(hList, LB_GETITEMDATA, pos, 0);
+                    g_cfg.font_name = g_fontList[idx].familyName;   // 立即保存
+                    if (g_vd) { g_vd->reload(); }
+                }
+                return TRUE;
+            }
+            }
+            break;
+
+        case IDM_TOGGLE_FONT_REALTIME_PREVIEW:
+            g_cfg.enableFontRealtimePreview = !g_cfg.enableFontRealtimePreview;          // 切换状态
+            break;
         case IDOK:
         {
             HWND hList = GetDlgItem(hDlg, IDC_LIST_FONT);
@@ -1001,15 +1063,19 @@ INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             {
                 size_t idx = (size_t)SendMessage(hList, LB_GETITEMDATA, pos, 0);
 
-         
+                if (idx < g_fontList.size())
+                {
+                    g_cfg.font_name = g_fontList[idx].familyName;   // 立即保存
+                    if (g_vd) { g_vd->reload(); }
                     EndDialog(hDlg, static_cast<INT_PTR>(idx + 1)); // 任意非 0
+                    return TRUE;
+                }
 
 
             }
-            else
-            {
-                EndDialog(hDlg, 0);
-            }
+
+            EndDialog(hDlg, 0);
+
     
             return TRUE;
         }
@@ -1327,7 +1393,7 @@ void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
     RECT rc;
     GetClientRect(g_hView, &rc);
     float h = float(rc.bottom - rc.top);
-    newY = std::clamp(newY, 0.0f, std::max(0.0f, g_vd->m_height - h));
+    newY = std::clamp(newY, -1.0f, std::max(0.0f, g_vd->m_height - h));
     //OutputDebugStringA(std::to_string(newY).c_str());
     //OutputDebugStringA("\n");
     g_offsetY.store(newY, std::memory_order_relaxed);
@@ -1565,7 +1631,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else
         {
             float cur = g_offsetY.load(std::memory_order_relaxed);
-            cur = std::clamp(cur + pxDelta, 0.0f, std::max(g_vd->m_height - h / 2.0f, 0.0f));
+            cur = std::clamp(cur + pxDelta, -1.0f, std::max(g_vd->m_height - h / 2.0f, 0.0f));
             g_offsetY.store(cur, std::memory_order_relaxed);
         }
 
@@ -2207,8 +2273,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         float desired;
         do {
             desired = std::clamp(old + delta,
-                0.0f,
-                g_vd->m_height - page);
+                -1.0f,
+                std::max(0.0f, g_vd->m_height - page));
         } while (!g_offsetY.compare_exchange_weak(old, desired,
             std::memory_order_relaxed,
             std::memory_order_relaxed));
@@ -2582,7 +2648,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CLICK_PREVIEW,
                 MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
             break;
-
+        case IDM_TOGGLE_CUSTOM_FONT:
+            g_cfg.enableCustomFont = !g_cfg.enableCustomFont;          // 切换状态
+            EnableMenuItem(GetMenu(g_hWnd), ID_CHOOSE_FONT, g_cfg.enableCustomFont?MF_ENABLED:MF_DISABLED);
+            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
+                MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
+            if (g_vd) { g_vd->reload(); }
+            break;
         case IDM_TOGGLE_SCROLL_ANIMATION:
             g_cfg.enableScrollAnimation = !g_cfg.enableScrollAnimation;          // 切换状态
             timeKillEvent(g_scrollTimer);
@@ -2590,12 +2662,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
                 MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
             break;
-        case IDM_TOGGLE_CUSTOM_FONT:
-            g_cfg.enableCustomFont = !g_cfg.enableCustomFont;          // 切换状态
- 
-            CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
-                MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
-            break;
+
         case IDM_TOGGLE_FRAME_RATE:
             g_cfg.displayFrameRate = !g_cfg.displayFrameRate;          // 切换状态
             if (g_cfg.displayFrameRate)
@@ -2646,20 +2713,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_CHOOSE_FONT:
         {
-            //ShowSimpleFontDialog(hwnd);
+            auto original = g_cfg.font_name;
             int idx = (int)DialogBoxParam(g_hInst,
                 MAKEINTRESOURCE(IDD_FONTDLG),
                 hwnd,
                 FontDlgProc,
                 0);
-            OutputDebugStringA(std::to_string(idx).c_str());
-            OutputDebugStringA("\n");
-            if (idx > 0)
-            {
-                g_cfg.font_name = g_fontList[idx - 1].familyName;
 
+            if (idx <= 0)
+            {
+                g_cfg.font_name = original;
+                if (g_vd) { g_vd->reload(); }
             }
-            if (g_vd && g_states.isLoaded) { g_vd->reload(); }
+        
             break;
         }
         case ID_FONT_BIGGER:        // Ctrl + '+'
@@ -2979,7 +3045,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLLBAR_WINDOW,
         MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
 
-
+    EnableMenuItem(GetMenu(g_hWnd), ID_CHOOSE_FONT, g_cfg.enableCustomFont ? MF_ENABLED : MF_DISABLED);
     EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
 
     EnableClearType();
@@ -6369,7 +6435,7 @@ litehtml::pixel_t SimpleContainer::get_default_font_size() const
 }
 const char* SimpleContainer::get_default_font_name() const
 {
-    return "Microsoft YaHei";
+    return w2a(g_cfg.default_font_name).c_str();
 }
 
 void EPUBBook::clear()
@@ -7068,7 +7134,7 @@ void VirtualDoc::update_doc(int client_h)
     OutputDebugStringA("\n");
 
 
-    if (offsetY < client_h)
+    if (offsetY < 0)
     {
         insert_prev_chapter();
 
@@ -7746,31 +7812,34 @@ void TocPanel::Load(const OCFPackage& pkg)
 }
 
 /* ---------- 内部实现 ---------- */
-LRESULT CALLBACK TocPanel::WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
+LRESULT CALLBACK TocPanel::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
 
-    TocPanel* self = (TocPanel*)GetWindowLongPtr(h, GWLP_USERDATA);
-    return self ? self->HandleMsg(m, w, l) : DefWindowProc(h, m, w, l);
+    TocPanel* self = (TocPanel*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    return self ? self->HandleMsg(msg, wp, lp) : DefWindowProc(hwnd, msg, wp, lp);
 }
 
-LRESULT TocPanel::HandleMsg(UINT m, WPARAM w, LPARAM l)
+LRESULT TocPanel::HandleMsg(UINT msg, WPARAM wp, LPARAM lp)
 {
-    switch (m)
+    switch (msg)
     {
 
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: { PAINTSTRUCT ps; OnPaint(BeginPaint(m_hwnd, &ps)); EndPaint(m_hwnd, &ps); } return 0;
-    case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
-    case WM_MOUSEMOVE: OnMouseMove(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
-    case WM_MOUSELEAVE: OnMouseLeave(GET_X_LPARAM(l), GET_Y_LPARAM(l)); return 0;
-    case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(w)); return 0;
-    case WM_VSCROLL:     OnVScroll(LOWORD(w), HIWORD(w)); return 0;
+    case WM_LBUTTONDOWN: OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_MOUSEMOVE: OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_MOUSELEAVE: OnMouseLeave(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_MOUSEWHEEL:  OnMouseWheel(GET_WHEEL_DELTA_WPARAM(wp)); return 0;
+    case WM_VSCROLL:     OnVScroll(LOWORD(wp), HIWORD(wp)); return 0;
     case WM_KEYDOWN:
-        if (w == VK_UP && m_selLine > 0) { m_selLine--; EnsureVisible(m_selLine); InvalidateRect(m_hwnd, nullptr, FALSE); }
-        if (w == VK_DOWN && m_selLine + 1 < (int)m_visible.size()) { m_selLine++; EnsureVisible(m_selLine); InvalidateRect(m_hwnd, nullptr, FALSE); }
+        if (wp == VK_UP && m_selLine > 0) { m_selLine--; EnsureVisible(m_selLine); InvalidateRect(m_hwnd, nullptr, FALSE); }
+        if (wp == VK_DOWN && m_selLine + 1 < (int)m_visible.size()) { m_selLine++; EnsureVisible(m_selLine); InvalidateRect(m_hwnd, nullptr, FALSE); }
         return 0;
+
     }
-    return DefWindowProc(m_hwnd, m, w, l);
+
+
+    return DefWindowProc(m_hwnd, msg, wp, lp);
 }
 
 void TocPanel::OnMouseMove(int x, int y)
@@ -7831,10 +7900,10 @@ void TocPanel::OnMouseMove(int x, int y)
         int y = (m_marginTop + line * m_lineH - m_scrollY) + rc.top;
 
         SetWindowText(m_hTip, wtxt.c_str());
-        SetWindowFont(m_hTip, m_hFont, TRUE);
 
-        SetWindowLong(m_hTip, GWL_STYLE,
-            GetWindowLong(m_hTip, GWL_STYLE) | WS_BORDER);
+        
+        //SetWindowLong(m_hTip, GWL_STYLE,
+        //    GetWindowLong(m_hTip, GWL_STYLE) | WS_BORDER);
       
         ShowWindow(m_hTip, SW_SHOWNOACTIVATE);
         MoveWindow(m_hTip, x, y, fullW, m_lineH, true);
@@ -7864,7 +7933,7 @@ TocPanel::TocPanel()
         CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY,
         DEFAULT_PITCH | FF_SWISS,
-        L"Microsoft YaHei");   // 字体名
+        g_cfg.default_font_name.c_str());   // 字体名
 
     // 1. 在 WM_CREATE / 初始化时创建一次
   
@@ -7873,9 +7942,11 @@ TocPanel::TocPanel()
     m_hTip = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST ,
         L"STATIC", L"",
-        WS_POPUP | SS_LEFT | SS_NOPREFIX,
+        WS_POPUP | SS_LEFT | SS_NOPREFIX|WS_BORDER,
         0, 0, 0, 0,
         m_hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
+    SetWindowFont(m_hTip, m_hFont, TRUE);
+    SetClassLongPtr(m_hTip, GCLP_HBRBACKGROUND, (LONG_PTR)m_hoverBrush);
     ShowWindow(m_hTip, SW_HIDE);
 
 }

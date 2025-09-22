@@ -48,6 +48,7 @@
 #define IDM_TOGGLE_FRAME_RATE 40030
 #define IDM_TOGGLE_CUSTOM_FONT 40031
 #define ID_CHOOSE_FONT 40032
+#define IDM_TOGGLE_FONT_REALTIME_PREVIEW 40033
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
