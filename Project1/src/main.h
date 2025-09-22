@@ -859,15 +859,24 @@ struct BookRecord {
     int         totalTime = 0;        // 累计阅读秒数
     int64_t     lastOpenTimestamp = 0;        // 微秒
     bool        enableCSS = true;
-    bool        enableJS = false;
-    bool        enableGlobalCSS = false;
-    bool        enablePreHTML = true;
-    bool        displayTOC = true;
-    bool        displayStatus = true;
-    bool        displayMenu = true;
-    bool        displayScroll = true;
-};
+    bool        enableGlobalCSS = true;
+    bool        enableCustomFont = false;
+    std::string   fontName = "Verdana";
+    float zoomFactor;
 
+};
+struct SettingRecord
+{
+    bool enableLoadEPUBFonts = true;
+    bool enableScrollAnimation = false;
+    bool enableHoverPreview = true;
+    bool enableClickPreview = true;
+    bool enableFontRealtimePreview = true;
+    bool displayTOC = true;
+    bool displayStatusBar = true;
+    bool displayScrollBar = true;
+    bool displayFrameRate = true;
+};
 struct timeFragment
 {
     std::string path;
@@ -884,7 +893,9 @@ public:
     ~ReadingRecorder();
 
     void openBook(const std::string absolutePath); // 返回记录（读或建）
-    void flush();            // 一次性写回
+    void flush();
+    void flushSettingRecord();
+    // 一次性写回
     void flushBookRecord();
     void flushTimeRecord();
     void updateRecord();
@@ -892,13 +903,17 @@ public:
     int64_t getBookTotalTime() const;
 
     BookRecord m_book_record;
+    SettingRecord m_setting_record;
 private:
     void initDB();
+
+    bool loadSettings();
 
 
 
     sqlite3* m_dbBook = nullptr;
     sqlite3* m_dbTime = nullptr;
+    sqlite3* m_dbSetting = nullptr;
 
     std::vector<timeFragment> m_time_frag;
 

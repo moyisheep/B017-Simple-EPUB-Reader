@@ -49,6 +49,8 @@
 #define IDM_TOGGLE_CUSTOM_FONT 40031
 #define ID_CHOOSE_FONT 40032
 #define IDM_TOGGLE_FONT_REALTIME_PREVIEW 40033
+
+#define ID_RESET_ALL 40034
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED

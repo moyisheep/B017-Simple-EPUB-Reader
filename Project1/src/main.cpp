@@ -100,7 +100,50 @@ std::unique_ptr<ScrollBarEx> g_scrollbar;
 // 1. 在全局或合适位置声明
     // 整篇文档的所有行
 
+void CheckAllMenuItem()
+{
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
+        MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
 
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
+        MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_EPUB_FONTS,
+        MF_BYCOMMAND | (g_cfg.enableEPUBFonts ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
+        MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CLICK_PREVIEW,
+        MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
+        MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
+        MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
+
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_FRAME_RATE,
+        MF_BYCOMMAND | (g_cfg.displayFrameRate ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
+        MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
+        MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLLBAR_WINDOW,
+        MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
+
+    EnableMenuItem(GetMenu(g_hWnd), ID_CHOOSE_FONT, g_cfg.enableCustomFont ? MF_ENABLED : MF_DISABLED);
+}
+
+std::wstring seconds2string(int64_t sec)
+{
+    int64_t days = sec / 86400;
+    int64_t hours = (sec % 86400) / 3600;
+    int64_t minutes = (sec % 3600) / 60;
+    int64_t seconds = sec % 60;
+
+    std::wstring timeStr;
+    if (days)    timeStr += std::to_wstring(days) + L"天 ";
+    if (hours || days)   timeStr += std::to_wstring(hours) + L"时";
+    if (minutes || hours || days) timeStr += std::to_wstring(minutes) + L"分";
+    timeStr += std::to_wstring(seconds) + L"秒";
+    return timeStr;
+}
 
 // 工具：把路径拷到堆，返回指针
 inline wchar_t* DupPath(const wchar_t* src)
@@ -1730,13 +1773,9 @@ inline void DumpBookRecord()
     oss << L"totalTime          = " << r.totalTime << L" (s)\n";
     oss << L"lastOpenTimestamp  = " << r.lastOpenTimestamp << L" (us)\n";
     oss << L"enableCSS          = " << r.enableCSS << L'\n';
-    oss << L"enableJS           = " << r.enableJS << L'\n';
     oss << L"enableGlobalCSS    = " << r.enableGlobalCSS << L'\n';
-    oss << L"enablePreHTML      = " << r.enablePreHTML << L'\n';
-    oss << L"displayTOC         = " << r.displayTOC << L'\n';
-    oss << L"displayStatus      = " << r.displayStatus << L'\n';
-    oss << L"displayMenu        = " << r.displayMenu << L'\n';
-    oss << L"displayScroll      = " << r.displayScroll << L'\n';
+    oss << L"enableCustomFont      = " << r.enableCustomFont << L'\n';
+    oss << L"customFontName        = " << a2w(r.fontName) << L'\n';
     oss << L"============================\n";
 
     OutputDebugStringW(oss.str().c_str());   // ← 宽字符版本
@@ -2308,6 +2347,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HMENU hSub = GetSubMenu(hPopup, 0);
             CheckMenuItem(hSub, IDM_TOGGLE_TOC_WINDOW,
                 g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED);
+            EnableMenuItem(hSub, ID_CHOOSE_FONT, g_cfg.enableCustomFont?MF_ENABLED:MF_DISABLED);
 
             TrackPopupMenuEx(
                 hSub,
@@ -2405,13 +2445,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_cfg.font_size = record.fontSize > 0 ? record.fontSize:g_cfg.default_font_size;
         g_cfg.line_height = record.lineHeightMul > 0 ? record.lineHeightMul : g_cfg.default_line_height;
         g_cfg.document_width = record.docWidth > 0 ? record.docWidth : g_cfg.default_document_width;
-        g_cfg.enableCSS = record.enableCSS;
+    
         int spine_size = g_book->ocf_pkg_.spine.size();
         SendMessage(g_hViewScroll, SBM_SETSPINECOUNT, spine_size, 0);
 
-   
- 
+        g_cfg.enableCSS = record.enableCSS;
+        CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
+            MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
+        
+        g_cfg.enableGlobalCSS = record.enableGlobalCSS;
+        CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
+            MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
 
+        g_cfg.enableCustomFont = record.enableCustomFont;
+        CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
+            MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
+
+        g_cfg.font_name = a2w(record.fontName);
         g_vd->load_book();
         g_vd->load_html(g_book->ocf_pkg_.spine[spine_id].href);
 
@@ -2690,9 +2740,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case IDM_TOGGLE_SCROLLBAR_WINDOW:
         {
-            g_cfg.displayStatusBar = !g_cfg.displayStatusBar;          // 切换状态
+            g_cfg.displayScrollBar = !g_cfg.displayScrollBar;          // 切换状态
             CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLLBAR_WINDOW,
-                MF_BYCOMMAND | (g_cfg.displayStatusBar ? MF_CHECKED : MF_UNCHECKED));
+                MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
 
             PostMessage(g_hWnd, WM_SIZE, 0, 0);
             break;
@@ -2800,6 +2850,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_cMain->m_zoom_factor = 1.0f;
             if (g_vd) { g_vd->reload(); }
             break;
+        case ID_RESET_ALL:
+            g_cMain->m_zoom_factor = 1.0f;
+            g_cfg.font_name = g_cfg.default_font_name;
+            g_cfg.font_size = g_cfg.default_font_size;
+            g_cfg.document_width = g_cfg.default_document_width;
+            g_cfg.line_height = g_cfg.default_line_height;
+            g_cfg.displayFrameRate = true;
+            g_cfg.displayScrollBar = true;
+            g_cfg.displayStatusBar = true;
+            g_cfg.displayTOC = true;
+            g_cfg.enableClickPreview = true;
+            g_cfg.enableCSS = true;
+            g_cfg.enableCustomFont = false;
+            g_cfg.enableEPUBFonts = true;
+            g_cfg.enableFontRealtimePreview = true;
+            g_cfg.enableGlobalCSS = true;
+            g_cfg.enableHoverPreview = true;
+            g_cfg.enableScrollAnimation = false;
+            CheckAllMenuItem();
+            PostMessage(g_hWnd, WM_SIZE, 0, 0);
+            if (g_vd) { g_vd->reload(); }
+            break;
         }
     }
     }
@@ -2897,7 +2969,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     // ---------- 1. 解析命令行 ----------
     int argc = 0;
     std::wstring cmd = GetCommandLineW();
-    LogToFile(w2a(L"[cmdline] " + cmd + L"\n"));
+    //LogToFile(w2a(L"[cmdline] " + cmd + L"\n"));
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
    
     //调试
@@ -2905,7 +2977,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
     txt += L"[argv]\n";
     for (int i = 0; i < argc; i++) { txt = txt  + argv[i] + L"\n"; }
     txt += L"\n";
-    LogToFile(w2a(txt));
+    //LogToFile(w2a(txt));
 
     wchar_t* firstFile = nullptr;
     if (argc > 1)
@@ -3019,33 +3091,8 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, LPWSTR, int n)
 
     SetMenu(g_hWnd, hMenu);            // ← 放在 CreateWindow 之后
 
+    CheckAllMenuItem();
 
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CSS,
-        MF_BYCOMMAND | (g_cfg.enableCSS ? MF_CHECKED : MF_UNCHECKED));
-
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_GLOBAL_CSS,
-        MF_BYCOMMAND | (g_cfg.enableGlobalCSS ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_EPUB_FONTS,
-        MF_BYCOMMAND | (g_cfg.enableEPUBFonts ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_HOVER_PREVIEW,
-        MF_BYCOMMAND | (g_cfg.enableHoverPreview ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CLICK_PREVIEW,
-        MF_BYCOMMAND | (g_cfg.enableClickPreview ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLL_ANIMATION,
-        MF_BYCOMMAND | (g_cfg.enableScrollAnimation ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_CUSTOM_FONT,
-        MF_BYCOMMAND | (g_cfg.enableCustomFont ? MF_CHECKED : MF_UNCHECKED));
-
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_FRAME_RATE,
-        MF_BYCOMMAND | (g_cfg.displayFrameRate ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_STATUS_WINDOW,
-        MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_TOC_WINDOW,
-        MF_BYCOMMAND | (g_cfg.displayTOC ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(GetMenu(g_hWnd), IDM_TOGGLE_SCROLLBAR_WINDOW,
-        MF_BYCOMMAND | (g_cfg.displayScrollBar ? MF_CHECKED : MF_UNCHECKED));
-
-    EnableMenuItem(GetMenu(g_hWnd), ID_CHOOSE_FONT, g_cfg.enableCustomFont ? MF_ENABLED : MF_DISABLED);
     EnableMenuItem(hMenu, IDM_TOGGLE_MENUBAR_WINDOW, MF_BYCOMMAND | MF_GRAYED);
 
     EnableClearType();
@@ -3571,16 +3618,15 @@ void SimpleContainer::get_language(litehtml::string& language,
 
 
 void SimpleContainer::init_dpi() {
-    if (HDC hdc = GetDC(nullptr)) {
-        int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-        m_px_per_pt = static_cast<float>(dpi) / 72.0f;
-        ReleaseDC(nullptr, hdc);
-    }
+    float dpiX, dpiY;
+    m_d2dFactory->GetDesktopDpi(&dpiX, &dpiY);  // 使用D2D的DPI
+    m_px_per_pt = dpiY / 72.0f;  // 使用Y轴DPI（通常与LOGPIXELSY一致）
 }
+
+// 保持 pt_to_px 不变
 litehtml::pixel_t SimpleContainer::pt_to_px(float pt) const {
     // 乘法 + 位移，比 MulDiv 更快
-    return static_cast<litehtml::pixel_t>(
-        pt * m_px_per_pt + 0.5f);
+    return pt * m_px_per_pt;
 }
 
 
@@ -4249,10 +4295,11 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
     auto layout = m_layoutCache.get(k);    // 原来是 m_layoutCache.find(k)->second
     if (layout) return layout;
 
- 
+    // exists == TRUE 表示字体支持该字符
 
-    m_dwrite->CreateTextLayout(clean.c_str(), (UINT32)clean.size(),
+   m_dwrite->CreateTextLayout(clean.c_str(), (UINT32)clean.size(),
         fp->format.Get(), maxW, 512.f, &layout);
+ 
     if (!layout) return nullptr;
 
     // 换行/截断
@@ -5218,6 +5265,7 @@ litehtml::pixel_t SimpleContainer::text_width(const char* text,
     float maxW = 8192.0f;
     auto layout = getLayout(wtxt, hFont, maxW);
     if (!layout) { return 0; }
+
     // 3. 取逻辑宽度（已含空白、连字、kerning）
     DWRITE_TEXT_METRICS tm{};
     HRESULT hr = layout->GetMetrics(&tm);
@@ -5697,7 +5745,24 @@ AppBootstrap::AppBootstrap() {
 
     if (!g_vd){g_vd = std::make_unique<VirtualDoc>();}
 
-    if(!g_recorder){ g_recorder = std::make_unique<ReadingRecorder>(); }
+    if(!g_recorder)
+    { 
+        g_recorder = std::make_unique<ReadingRecorder>(); 
+        if(g_recorder)
+        {
+            auto& settings = g_recorder->m_setting_record;
+            g_cfg.enableClickPreview = settings.enableClickPreview;
+            g_cfg.enableEPUBFonts = settings.enableLoadEPUBFonts;
+            g_cfg.enableFontRealtimePreview = settings.enableFontRealtimePreview;
+            g_cfg.enableHoverPreview = settings.enableHoverPreview;
+            g_cfg.enableScrollAnimation = settings.enableScrollAnimation;
+            g_cfg.displayFrameRate = settings.displayFrameRate;
+            g_cfg.displayScrollBar = settings.displayScrollBar;
+            g_cfg.displayStatusBar = settings.displayStatusBar;
+            g_cfg.displayTOC = settings.displayTOC;
+            CheckAllMenuItem();
+        }
+    }
 
     if (!g_toc) 
     { 
@@ -5726,6 +5791,13 @@ AppBootstrap::AppBootstrap() {
         fs::path html_path = exe_dir() / "res" / "homepage.html";
         auto html = read_file(html_path);
         if (html.empty()) { OutputDebugStringA("[AppBootstrap] html is null!"); return; }
+        std::string time_txt = "";
+        if(g_recorder)
+        {
+            int64_t seconds = g_recorder->getTotalTime();
+            time_txt =   w2a(seconds2string(seconds));
+        }
+        boost::algorithm::replace_first(html, "[ID_READING_TIME]", time_txt);
         g_cHome->m_doc = litehtml::document::createFromString({ html.c_str(), litehtml::encoding::utf_8 }, g_cHome.get());
         if (!g_cHome->m_doc) { OutputDebugStringA("[AppBootstrap] g_cHome->m_doc is null!"); return; }
     }
@@ -7109,20 +7181,7 @@ void VirtualDoc::set_scroll_position( ScrollPosition sp)
     g_offsetY.store(offset, std::memory_order_relaxed);
 }
 
-std::wstring seconds2string(int64_t sec)
-{
-    int64_t days = sec / 86400;
-    int64_t hours = (sec % 86400) / 3600;
-    int64_t minutes = (sec % 3600) / 60;
-    int64_t seconds = sec % 60;
 
-    std::wstring timeStr;
-    if (days)    timeStr += std::to_wstring(days) + L"天 ";
-    if (hours || days)   timeStr += std::to_wstring(hours) + L"时";
-    if (minutes || hours || days) timeStr += std::to_wstring(minutes) + L"分";
-    timeStr += std::to_wstring(seconds) + L"秒";
-    return timeStr;
-}
 void VirtualDoc::update_doc(int client_h)
 {
     if (!m_book || !m_container ) { return ; }
@@ -7267,14 +7326,16 @@ void VirtualDoc::workerLoop()
         HtmlBlock& target = task.insertAtFront ? m_blocks.front() : m_blocks.back();
    
 
-        std::string html = "<html>" + target.head + "<body>";
+        std::string html = "";
         for (auto&hb : m_blocks)
         {
+            html += "<html>" + hb.head + "<body>";
             for (auto& b : hb.body_blocks) html += b.html;
+            html += "</body></html>";
         }
      
-        html += "</body></html>";
-
+  
+        LogToFile(html);
         /* ---------- 4. render ---------- */
         if (m_cancelFlag.load(std::memory_order_acquire))
             continue;
@@ -7350,14 +7411,17 @@ static int64_t nowUs() {
 /* ---------- 构造/析构 ---------- */
 ReadingRecorder::ReadingRecorder() 
 { 
-    initDB(); 
     m_book_record = {};
     m_time_frag = {};
+    m_setting_record = {};
+    initDB(); 
+
 }
 ReadingRecorder::~ReadingRecorder() 
 { 
     if (m_dbBook) sqlite3_close(m_dbBook); 
     if (m_dbTime) sqlite3_close(m_dbTime);
+    if (m_dbSetting) sqlite3_close(m_dbSetting);
 }
 
 /* ---------- 初始化数据库 ---------- */
@@ -7367,10 +7431,11 @@ void ReadingRecorder::initDB() {
     fs::create_directories(db_path);
     fs::path db_book_path = db_path / "Books.db";
     fs::path db_time_path = db_path / "Time.db";
+    fs::path db_setting_path = db_path / "Settings.db";
 
     /* ---------- Books.db ---------- */
     if (sqlite3_open(db_book_path.generic_string().c_str(), &m_dbBook) != SQLITE_OK)
-        throw std::runtime_error("sqlite open failed");
+        OutputDebugStringA("Books.db sqlite open failed\n");
 
     sqlite3_exec(m_dbBook, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     const char* sql = R"(
@@ -7389,21 +7454,17 @@ void ReadingRecorder::initDB() {
             total_time_s     INTEGER DEFAULT 0,
             first_open_us    INTEGER DEFAULT 0,
             last_open_us     INTEGER DEFAULT 0,
-            enableCSS        INTEGER DEFAULT 1,
-            enableJS         INTEGER DEFAULT 0,
-            enableGlobalCSS  INTEGER DEFAULT 0,
-            enablePreHTML    INTEGER DEFAULT 1,
-            displayTOC       INTEGER DEFAULT 1,
-            displayStatus    INTEGER DEFAULT 1,
-            displayMenu      INTEGER DEFAULT 1,
-            displayScroll    INTEGER DEFAULT 1
+            enable_epub_css        INTEGER DEFAULT 1,
+            enable_global_css      INTEGER DEFAULT 0,
+            enable_custom_font     INTEGER DEFAULT 0,
+            custom_font_name       TEXT
         );
     )";
     sqlite3_exec(m_dbBook, sql, nullptr, nullptr, nullptr);
 
     /* ---------- Time.db ---------- */
     if (sqlite3_open(db_time_path.generic_string().c_str(), &m_dbTime) != SQLITE_OK)
-        throw std::runtime_error("sqlite open Time.db failed");
+        OutputDebugStringA("Time.db sqlite open failed\n");
     sqlite3_exec(m_dbTime, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
     const char* sqlTime = R"(
@@ -7420,8 +7481,63 @@ void ReadingRecorder::initDB() {
         );
     )";
     sqlite3_exec(m_dbTime, sqlTime, nullptr, nullptr, nullptr);
+
+    /* ---------- Settingss.db ---------- */
+    if (sqlite3_open(db_setting_path.generic_string().c_str(), &m_dbSetting) != SQLITE_OK)
+        OutputDebugStringA("Settings.db sqlite open failed\n");
+
+    sqlite3_exec(m_dbSetting, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    const char* sqlSetting = R"(
+        CREATE TABLE IF NOT EXISTS settings(
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            enable_load_epub_fonts        INTEGER DEFAULT 1,
+            enable_scroll_animation       INTEGER DEFAULT 0,
+            enable_hover_preview          INTEGER DEFAULT 1,
+            enable_click_preview          INTEGER DEFAULT 1,
+            enable_font_realtime_preview INTEGER DEFAULT 1,
+            diaplay_toc                  INTEGER DEFAULT 1,
+            display_status_bar          INTEGER DEFAULT 1,
+            display_scroll_bar            INTEGER DEFAULT 1,
+            display_frame_rate            INTEGER DEFAULT 1
+        );
+    )";
+    sqlite3_exec(m_dbSetting, sqlSetting, nullptr, nullptr, nullptr);
+    loadSettings();
 }
 
+bool ReadingRecorder::loadSettings() {
+    if (!m_dbSetting) {
+        OutputDebugStringA("Settings database not initialized\n");
+        return false;
+    }
+
+    const char* sql = "SELECT * FROM settings LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(m_dbSetting, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        OutputDebugStringA("Failed to prepare SQL statement for settings\n");
+        return false;
+    }
+
+    // Initialize with default values in case the query returns no rows
+    m_setting_record = SettingRecord();
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // Column indices (adjust if your table structure changes)
+        m_setting_record.enableLoadEPUBFonts = sqlite3_column_int(stmt, 1) != 0;
+        m_setting_record.enableScrollAnimation = sqlite3_column_int(stmt, 2) != 0;
+        m_setting_record.enableHoverPreview = sqlite3_column_int(stmt, 3) != 0;
+        m_setting_record.enableClickPreview = sqlite3_column_int(stmt, 4) != 0;
+        m_setting_record.enableFontRealtimePreview = sqlite3_column_int(stmt, 5) != 0;
+        m_setting_record.displayTOC = sqlite3_column_int(stmt, 6) != 0;
+        m_setting_record.displayStatusBar = sqlite3_column_int(stmt, 7) != 0;
+        m_setting_record.displayScrollBar = sqlite3_column_int(stmt, 8) != 0;
+        m_setting_record.displayFrameRate = sqlite3_column_int(stmt, 9) != 0;
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
 /* ---------- 打开书 ---------- */
 void ReadingRecorder::openBook(const std::string absolutePath) {
     m_book_record = {};
@@ -7453,13 +7569,9 @@ void ReadingRecorder::openBook(const std::string absolutePath) {
         rec.totalTime = sqlite3_column_int(stmt, 11);
         rec.lastOpenTimestamp = sqlite3_column_int64(stmt, 13);
         rec.enableCSS = sqlite3_column_int(stmt, 14);
-        rec.enableJS = sqlite3_column_int(stmt, 15);
-        rec.enableGlobalCSS = sqlite3_column_int(stmt, 16);
-        rec.enablePreHTML = sqlite3_column_int(stmt, 17);
-        rec.displayTOC = sqlite3_column_int(stmt, 18);
-        rec.displayStatus = sqlite3_column_int(stmt, 19);
-        rec.displayMenu = sqlite3_column_int(stmt, 20);
-        rec.displayScroll = sqlite3_column_int(stmt, 21);
+        rec.enableGlobalCSS = sqlite3_column_int(stmt, 15);
+        rec.enableCustomFont = sqlite3_column_int(stmt, 16);
+        rec.fontName = colText(stmt, 17);
     }
     else {
         // 新书：用当前 g_book 状态插入
@@ -7504,19 +7616,7 @@ int64_t ReadingRecorder::getTotalTime()
 }
 int64_t ReadingRecorder::getBookTotalTime() const
 {
-    //const char* sql =
-    //    "SELECT COALESCE(SUM(duration),0) FROM reading_time WHERE path = ?;";
-    //sqlite3_stmt* stmt = nullptr;
-    //int64_t totalUs = 0;
 
-    //if (sqlite3_prepare_v2(m_dbTime, sql, -1, &stmt, nullptr) == SQLITE_OK)
-    //{
-    //    sqlite3_bind_text(stmt, 1, m_book_record.path.c_str(), -1, SQLITE_STATIC);
-    //    if (sqlite3_step(stmt) == SQLITE_ROW)
-    //        totalUs = sqlite3_column_int64(stmt, 0);
-    //}
-    //sqlite3_finalize(stmt);
-    //return totalUs / 1'000'000;   // 返回秒
     return m_book_record.totalTime;
 }
 /* ---------- 写入 ---------- */
@@ -7525,8 +7625,84 @@ void ReadingRecorder::flush() {
 
     flushBookRecord();
     flushTimeRecord();
+    flushSettingRecord();
 }
 
+void ReadingRecorder::flushSettingRecord() {
+    if (!m_dbSetting) {
+        OutputDebugStringA("Settings database not initialized\n");
+        return;
+    }
+
+    // First, check if there's any existing record
+    const char* checkSql = "SELECT COUNT(*) FROM settings;";
+    sqlite3_stmt* checkStmt = nullptr;
+    int count = 0;
+
+    if (sqlite3_prepare_v2(m_dbSetting, checkSql, -1, &checkStmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(checkStmt) == SQLITE_ROW) {
+            count = sqlite3_column_int(checkStmt, 0);
+        }
+        sqlite3_finalize(checkStmt);
+    }
+
+    // Prepare the appropriate SQL statement (INSERT or UPDATE)
+    const char* sql;
+    if (count == 0) {
+        sql = R"(
+            INSERT INTO settings (
+                enable_load_epub_fonts,
+                enable_scroll_animation,
+                enable_hover_preview,
+                enable_click_preview,
+                enable_font_realtime_preview,
+                diaplay_toc,
+                display_status_bar,
+                display_scroll_bar,
+                display_frame_rate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        )";
+    }
+    else {
+        sql = R"(
+            UPDATE settings SET
+                enable_load_epub_fonts = ?,
+                enable_scroll_animation = ?,
+                enable_hover_preview = ?,
+                enable_click_preview = ?,
+                enable_font_realtime_preview = ?,
+                diaplay_toc = ?,
+                display_status_bar = ?,
+                display_scroll_bar = ?,
+                display_frame_rate = ?
+            WHERE id = 1;
+        )";
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_dbSetting, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        OutputDebugStringA("Failed to prepare SQL statement for settings update\n");
+        return;
+    }
+
+    // Bind parameters
+    sqlite3_bind_int(stmt, 1, m_setting_record.enableLoadEPUBFonts ? 1 : 0);
+    sqlite3_bind_int(stmt, 2, m_setting_record.enableScrollAnimation ? 1 : 0);
+    sqlite3_bind_int(stmt, 3, m_setting_record.enableHoverPreview ? 1 : 0);
+    sqlite3_bind_int(stmt, 4, m_setting_record.enableClickPreview ? 1 : 0);
+    sqlite3_bind_int(stmt, 5, m_setting_record.enableFontRealtimePreview ? 1 : 0);
+    sqlite3_bind_int(stmt, 6, m_setting_record.displayTOC ? 1 : 0);
+    sqlite3_bind_int(stmt, 7, m_setting_record.displayStatusBar ? 1 : 0);
+    sqlite3_bind_int(stmt, 8, m_setting_record.displayScrollBar ? 1 : 0);
+    sqlite3_bind_int(stmt, 9, m_setting_record.displayFrameRate ? 1 : 0);
+
+    // Execute the statement
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        OutputDebugStringA("Failed to execute settings update\n");
+    }
+
+    sqlite3_finalize(stmt);
+}
 void ReadingRecorder::flushBookRecord()
 {
     auto& rec = m_book_record;
@@ -7541,14 +7717,10 @@ void ReadingRecorder::flushBookRecord()
             line_height_mul = ?,
             doc_width       = ?, 
             total_time_s    = ?,
-            enableCSS       = ?,
-            enableJS        = ?,
-            enableGlobalCSS = ?,
-            enablePreHTML   = ?,
-            displayTOC      = ?,
-            displayStatus   = ?,
-            displayMenu     = ?,
-            displayScroll   = ?
+            enable_epub_css       = ?,
+            enable_global_css      = ?,
+            enable_custom_font   = ?,
+            custom_font_name      = ?
         WHERE id = ?;
     )";
     sqlite3_stmt* stmt;
@@ -7564,14 +7736,10 @@ void ReadingRecorder::flushBookRecord()
     sqlite3_bind_double(stmt, 8, rec.docWidth);
     sqlite3_bind_int(stmt, 9, rec.totalTime);
     sqlite3_bind_int(stmt, 10, rec.enableCSS);
-    sqlite3_bind_int(stmt, 11, rec.enableJS);
-    sqlite3_bind_int(stmt, 12, rec.enableGlobalCSS);
-    sqlite3_bind_int(stmt, 13, rec.enablePreHTML);
-    sqlite3_bind_int(stmt, 14, rec.displayTOC);
-    sqlite3_bind_int(stmt, 15, rec.displayStatus);
-    sqlite3_bind_int(stmt, 16, rec.displayMenu);
-    sqlite3_bind_int(stmt, 17, rec.displayScroll);
-    sqlite3_bind_int64(stmt, 18, rec.id);
+    sqlite3_bind_int(stmt, 11, rec.enableGlobalCSS);
+    sqlite3_bind_int(stmt, 12, rec.enableCustomFont);
+    sqlite3_bind_text(stmt, 13, rec.fontName.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 14, rec.id);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }
@@ -7703,14 +7871,11 @@ void ReadingRecorder::updateRecord()
  
     if (g_book)
     {
-        m_book_record.displayMenu = g_cfg.displayMenuBar;
-        m_book_record.displayScroll = g_cfg.displayScrollBar;
-        m_book_record.displayStatus = g_cfg.displayStatusBar;
-        m_book_record.displayTOC = g_cfg.displayTOC;
 
         m_book_record.enableCSS = g_cfg.enableCSS;
         m_book_record.enableGlobalCSS = g_cfg.enableGlobalCSS;
-        m_book_record.enableJS = g_cfg.enableJS;
+        m_book_record.enableCustomFont = g_cfg.enableCustomFont;
+        m_book_record.fontName = w2a(g_cfg.font_name);
  
 
         m_book_record.fontSize = g_cfg.font_size;
@@ -7750,6 +7915,16 @@ void ReadingRecorder::updateRecord()
             g_flushTimer = timeSetEvent(g_cfg.record_flush_interval_ms, 0, OnFlush, 0, TIME_ONESHOT);
         }
 
+
+        m_setting_record.displayFrameRate = g_cfg.displayFrameRate;
+        m_setting_record.displayScrollBar = g_cfg.displayScrollBar;
+        m_setting_record.displayStatusBar = g_cfg.displayStatusBar;
+        m_setting_record.displayTOC = g_cfg.displayTOC;
+        m_setting_record.enableClickPreview = g_cfg.enableClickPreview;
+        m_setting_record.enableFontRealtimePreview = g_cfg.enableFontRealtimePreview;
+        m_setting_record.enableHoverPreview = g_cfg.enableHoverPreview;
+        m_setting_record.enableLoadEPUBFonts = g_cfg.enableEPUBFonts;
+        m_setting_record.enableScrollAnimation = g_cfg.enableScrollAnimation;
     }
 }
 

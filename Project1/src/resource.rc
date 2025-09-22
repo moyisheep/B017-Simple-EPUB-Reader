@@ -50,15 +50,17 @@ BEGIN
     POPUP "&设置"
     BEGIN
 
-        MENUITEM "加载 EPUB CSS",                  IDM_TOGGLE_CSS, CHECKED
+
         MENUITEM "加载 EPUB 自带字体",                  IDM_TOGGLE_EPUB_FONTS, CHECKED
-        MENUITEM "加载 全局 CSS", IDM_TOGGLE_GLOBAL_CSS, CHECKED
-        MENUITEM SEPARATOR     // ← 分隔符
         MENUITEM "启用 悬停预览",                   IDM_TOGGLE_HOVER_PREVIEW, CHECKED
         MENUITEM "启用 点击预览", IDM_TOGGLE_CLICK_PREVIEW, CHECKED
         MENUITEM "启用 滚动动画", IDM_TOGGLE_SCROLL_ANIMATION, CHECKED
-        MENUITEM "启用 自定义字体", IDM_TOGGLE_CUSTOM_FONT, CHECKED
         MENUITEM SEPARATOR     // ← 分隔符
+        MENUITEM "加载 全局 CSS", IDM_TOGGLE_GLOBAL_CSS, CHECKED
+        MENUITEM "加载 EPUB CSS", IDM_TOGGLE_CSS, CHECKED
+
+        MENUITEM SEPARATOR     // ← 分隔符
+         MENUITEM "启用 自定义字体", IDM_TOGGLE_CUSTOM_FONT, CHECKED
         MENUITEM "选择字体", ID_CHOOSE_FONT
         POPUP "字体大小"           // ← 二级菜单
         BEGIN
@@ -84,6 +86,8 @@ BEGIN
             MENUITEM "- 减小", ID_ZOOM_SMALLER
             MENUITEM "o 恢复", ID_ZOOM_RESET
         END
+        MENUITEM SEPARATOR     // ← 分隔符
+        MENUITEM "恢复默认", ID_RESET_ALL
     END
     POPUP "&显示"
     BEGIN
@@ -104,7 +108,7 @@ BEGIN
         MENUITEM "复制", ID_EDIT_COPY
         MENUITEM "显示目录栏", IDM_TOGGLE_TOC_WINDOW
         MENUITEM "刷新", ID_EPUB_RELOAD
-
+        MENUITEM "选择字体", ID_CHOOSE_FONT
     END
 END
 
