@@ -1,0 +1,52 @@
+NOTICE
+
+This software includes the following third-party components:
+
+1. miniz
+   - License: MIT
+   - Source: https://github.com/richgel999/miniz
+
+2. tinyxml2
+   - License: MIT
+   - Source: https://github.com/leethomason/tinyxml2
+
+3. LunaSVG
+   - License: MIT
+   - Source: https://github.com/sammycage/lunasvg
+
+4. litehtml
+   - License: BSD 3-Clause
+   - Source: https://github.com/litehtml/litehtml
+
+5. FreeType
+   - License: FTL (FreeType License) or GPL
+   - Source: https://www.freetype.org/
+
+6. SQLite
+   - License: Public Domain
+   - Source: https://www.sqlite.org/
+
+7. BLAKE3
+   - License: CC0 1.0 or Apache 2.0
+   - Source: https://github.com/BLAKE3-team/BLAKE3
+
+8. Boost (algorithm/string)
+   - License: Boost Software License 1.0
+   - Source: https://www.boost.org/
+
+9. stb_image
+   - License: Public Domain or MIT
+   - Source: https://github.com/nothings/stb
+
+10. Gumbo
+    - License: Apache 2.0
+    - Source: https://github.com/google/gumbo-parser
+
+11. DirectX, Windows SDK, GDI+
+    - License: Microsoft Proprietary (allowed for runtime use)
+    - Source: https://developer.microsoft.com/
+
+---
+
+The MIT License (MIT) applies to the original code in this project.
+See the `LICENSE` file for full terms.

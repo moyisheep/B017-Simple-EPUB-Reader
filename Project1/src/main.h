@@ -1101,7 +1101,8 @@ private:
 class ScrollBarEx
 {
 public:
-
+    ScrollBarEx();
+    ~ScrollBarEx();
     void GetWindow(HWND hwnd);
     // API
     void SetSpineCount(int n);
@@ -1140,6 +1141,7 @@ private:
     };
     ThumbState m_thumb;
     HWND m_hwnd = nullptr;
+    HICON m_hIcon = nullptr;
 };
 
 

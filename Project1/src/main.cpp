@@ -1435,7 +1435,7 @@ void CALLBACK OnScrollTimer(UINT, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR)
     RECT rc;
     GetClientRect(g_hView, &rc);
     float h = float(rc.bottom - rc.top);
-    newY = std::clamp(newY, -1.0f, std::max(0.0f, g_vd->m_height - h));
+    newY = std::clamp(newY, -h/2.0f, std::max(0.0f, g_vd->m_height - h));
     //OutputDebugStringA(std::to_string(newY).c_str());
     //OutputDebugStringA("\n");
     g_offsetY.store(newY, std::memory_order_relaxed);
@@ -1673,7 +1673,7 @@ LRESULT CALLBACK ViewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else
         {
             float cur = g_offsetY.load(std::memory_order_relaxed);
-            cur = std::clamp(cur + pxDelta, -1.0f, std::max(g_vd->m_height - h / 2.0f, 0.0f));
+            cur = std::clamp(cur + pxDelta, -h/2.0f, std::max(g_vd->m_height - h / 2.0f, 0.0f));
             g_offsetY.store(cur, std::memory_order_relaxed);
         }
 
@@ -4299,13 +4299,35 @@ ComPtr<IDWriteTextLayout> SimpleContainer::getLayout(const std::wstring& txt,
     auto layout = m_layoutCache.get(k);    // 原来是 m_layoutCache.find(k)->second
     if (layout) return layout;
 
-   //for(auto& name: fp->descr.family)
-   //{
-   //    std::wstring wname = a2w(name);
-   //    auto* fcp = m_fontCache.get(wname, fp->descr, m_sysFontColl.Get());
-   //}
+    std::vector<std::wstring> faces;
+    if (!fp->descr.family.empty() && !g_cfg.enableCustomFont)
+    {
+        faces = split_font_list(fp->descr.family);
+    }
+    else
+    {
+        faces.push_back(g_cfg.font_name);
+    }
+
+    // 默认字体兜底
+
+    faces.push_back(g_cfg.default_font_name);
+    FontCachePair* fcp;
+   for(auto& name: faces)
+   {
+       fcp = m_fontCache.get(name, fp->descr, m_sysFontColl.Get());
+       if (!fcp->font || !fcp->fmt) { continue; }
+       BOOL exists = false;
+       for (auto& w: clean)
+       {
+           fcp->font->HasCharacter(w, &exists);
+           if (!exists) { continue; }
+       }
+       if (exists) { break; }
+   }
+   if (!fcp->fmt) { return nullptr; }
    m_dwrite->CreateTextLayout(clean.c_str(), (UINT32)clean.size(),
-        fp->format.Get(), maxW, 512.f, &layout);
+        fcp->fmt.Get(), maxW, 512.f, &layout);
  
     if (!layout) return nullptr;
 
@@ -7136,18 +7158,18 @@ bool VirtualDoc::load_by_id(int spine_id, bool isPushBack)
 {
     try
     {
-        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
+ 
         std::wstring href = get_href_by_id(spine_id);
         if (href.empty()) return false;
 
-        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
+  
         std::string html = m_book->load_html(href);
         if (html.empty()) return false;
 
-        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
+   
         PreprocessHTML(html);          // 可能抛异常
 
-        if (m_cancelFlag.load(std::memory_order_acquire)) return false;
+  
         auto block = get_html_block(html, spine_id);
 
         if (isPushBack)
@@ -7306,17 +7328,15 @@ void VirtualDoc::workerLoop()
 {
     while (true)
     {
-        if (m_cancelFlag.load(std::memory_order_acquire))
-            break;                       // 整线程退出
+
         Task task;
         {
             std::unique_lock<std::mutex> lk(m_taskMtx);
             m_taskCv.wait(lk, [this] {
                 /* 等待时也要能响应取消 */
-                return !m_taskQueue.empty() || m_cancelFlag.load(std::memory_order_acquire);
+                return !m_taskQueue.empty();
                 });
-            if (m_cancelFlag.load(std::memory_order_acquire))
-                break;                   // 被唤醒后发现取消
+
             if (m_taskQueue.empty())
                 continue;                // 虚假唤醒
             task = std::move(m_taskQueue.front());
@@ -7327,8 +7347,7 @@ void VirtualDoc::workerLoop()
         OutputDebugStringA("[VirtualDod thread] 开始更新\n");
         // 1. 耗时 IO
                 /* ---------- 2. 耗时 IO ---------- */
-        if (m_cancelFlag.load(std::memory_order_acquire))
-            continue;                    // 直接丢弃本次任务
+
 
 
         if (!load_by_id(task.chapterId, !task.insertAtFront))
@@ -7336,8 +7355,7 @@ void VirtualDoc::workerLoop()
             continue;
         }
 
-        if (m_cancelFlag.load(std::memory_order_acquire))
-            continue;
+
 
         // 2. 组装 HTML
         float height = 0.0f;
@@ -7353,18 +7371,16 @@ void VirtualDoc::workerLoop()
         }
      
         /* ---------- 4. render ---------- */
-        if (m_cancelFlag.load(std::memory_order_acquire))
-            continue;
+
         std::string css =  g_globalCSS;
         css += ":root,body,p,li,div,h1,h2,h3,h4,h5,h6,span, ul{line-height:" + std::to_string(g_cfg.line_height) + ";}\n";
 
         m_doc = litehtml::document::createFromString(
-            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css + css);
+            { html.c_str(), litehtml::encoding::utf_8 }, m_container.get(), litehtml::master_css, css);
         m_doc->render(g_cfg.document_width);
 
         /* ---------- 5. 计算高度 ---------- */
-        if (m_cancelFlag.load(std::memory_order_acquire))
-            continue;
+
 
         height = m_doc->height() - m_height;
  
@@ -7390,33 +7406,15 @@ bool VirtualDoc::exists(int spine_id)
 
 void VirtualDoc::clear()
 {
-    // 1. 请求后台线程尽快结束当前任务
-    m_cancelFlag.store(true, std::memory_order_release);
 
-    // 2. 清空尚未开始的任务
-    {
-        std::lock_guard<std::mutex> lk(m_taskMtx);
-        m_taskQueue = {};
-    }
 
-    // 3. 最多等 N 毫秒，避免永久阻塞
-    constexpr auto kMaxWait = std::chrono::milliseconds(500);
-    auto until = std::chrono::steady_clock::now() + kMaxWait;
-
-    std::unique_lock<std::mutex> lk(m_taskMtx);
-    m_cvFinish.wait_until(lk, until, [this] {
-        return !m_workerBusy.load(std::memory_order_acquire);
-        });
-    // 如果超时仍未结束，我们也不再等待，直接往下走
-    lk.unlock();
     m_blocks.clear();
     g_offsetY.store(0.0f, std::memory_order_relaxed);
     float v = g_offsetY.load(std::memory_order_relaxed);
 
     m_height = 0.0f;
 
-    // 5. 复位取消标志，供后续使用
-    m_cancelFlag.store(false, std::memory_order_relaxed);
+
 }
 
 
@@ -8761,6 +8759,15 @@ void ScrollBarEx::SetPosition(int spineId, float totalHeightPx, float offsetPx)
     }
 }
 
+ScrollBarEx::ScrollBarEx()
+{
+    m_hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_SCROLLBAR_DOT));
+}
+ScrollBarEx::~ScrollBarEx()
+{
+    // 销毁图标句柄
+    DestroyIcon(m_hIcon);
+}
 // ---------- 内部 ----------
 LRESULT CALLBACK ScrollBarEx::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -8847,14 +8854,38 @@ void ScrollBarEx::OnPaint()
             g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
         }
         /* 画当前章节的点 */
+
+        if (m_hIcon)
         {
+            // 将 HICON 转换为 GDI+ Image
+            Gdiplus::Bitmap bitmap(m_hIcon);
+
+            // 计算绘制位置（图标中心在 y 位置）
+             // 计算绘制位置（图标中心在 y 位置）
+            int y = (m_pos.spine_id + 0.5) * step;
+            int iconSize = 15; // 15x15 像素
+
+            // 绘制图标（缩放至 15x15）
+            g.DrawImage(
+                &bitmap,
+                CX - iconSize / 2,  // X 居中
+                y - iconSize / 2,   // Y 居中
+                iconSize,           // 目标宽度
+                iconSize            // 目标高度
+            );
+
+
+        }
+        else
+        {
+            // 如果加载图标失败，回退到原来的圆点绘制
             Gdiplus::Color c = g_cfg.scrollbar_dot_color_highlight;
-               
             int r = ACTIVE_R;
             int y = (m_pos.spine_id + 0.5) * step;
             Gdiplus::SolidBrush br(c);
             g.FillEllipse(&br, CX - r, y - r, 2 * r, 2 * r);
         }
+    
 
         /* 1. 计算竖线中心 Y 坐标（比例 0~1） */
         double ratio = 0.0;

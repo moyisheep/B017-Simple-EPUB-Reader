@@ -23,7 +23,7 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src\resource.rc">
-      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">res;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">./res;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
@@ -36,9 +36,17 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="res\app.ico" />
+    <Image Include="res\dot.ico" />
   </ItemGroup>
   <ItemGroup>
     <CopyFileToFolders Include="res\global.css" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="LICENSE" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="NOTICE" />
+    <None Include="README.md" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
