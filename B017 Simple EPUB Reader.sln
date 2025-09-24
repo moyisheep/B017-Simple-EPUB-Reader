@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36327.8 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Project1", "Project1\Project1.vcxproj", "{741782D1-25D4-42B6-968E-150804FAF41B}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "B017 Simple EPUB Reader", "B017 Simple EPUB Reader\B017 Simple EPUB Reader.vcxproj", "{741782D1-25D4-42B6-968E-150804FAF41B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

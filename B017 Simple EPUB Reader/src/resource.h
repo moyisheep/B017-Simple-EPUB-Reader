@@ -13,9 +13,10 @@
 #define IDR_POPUP						108
 #define IDD_FONTDLG						109
 #define IDC_LIST_FONT					110
-#define IDB_ICON                        4000
-#define IDI_SCROLLBAR_DOT							4001
 
+
+#define IDI_MY_APPLICATION				4000
+#define IDI_SCROLLBAR_DOT			    4001
 
 #define IDM_TOGGLE_CSS                  40001
 #define IDM_TOGGLE_JS                   40002

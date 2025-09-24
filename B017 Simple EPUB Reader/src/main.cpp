@@ -1373,7 +1373,7 @@ static ImageFrame decode_img(const MemFile& mf, const wchar_t* ext)
             reinterpret_cast<const char*>(mf.data.data()), mf.data.size());
         if (!doc) return {};
 
-        lunasvg::Bitmap svgBmp = doc->renderToBitmap();
+        lunasvg::Bitmap svgBmp = doc->renderToBitmap(g_cfg.document_width*2);
         if (svgBmp.isNull()) return {};
 
         frame.width = svgBmp.width();
@@ -2936,8 +2936,8 @@ void register_main_class()
 {
     WNDCLASSEX w{ sizeof(WNDCLASSEX) };
     w.style = CS_HREDRAW | CS_VREDRAW ;   // 关键
-    w.hIcon = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_APPLICATION));
-    w.hIconSm = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_APPLICATION)); // 小图标
+    w.hIcon = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_MY_APPLICATION));
+    w.hIconSm = LoadIcon(g_hInst, MAKEINTRESOURCE(IDI_MY_APPLICATION)); // 小图标
     w.lpfnWndProc = WndProc;
     w.hInstance = g_hInst;
     w.hCursor = LoadCursor(nullptr, IDC_ARROW);
@@ -3180,7 +3180,16 @@ void SimpleContainer::load_image(const char* src, const char* baseurl, bool redr
         }
 
 
-
+        if(fs::path(wpath).extension().generic_string() == ".svg")
+        {
+            auto frame = decode_img(mf, L"svg");
+            if(!frame.rgba.empty())
+            {
+                frame.raw_data = std::move(mf.data);
+                m_img_cache.emplace(src, std::move(frame));
+            }
+            return;
+        }
         ImageFrame frame{};
  
         int w, h, comp;
@@ -4614,7 +4623,7 @@ void SimpleContainer::draw_image(litehtml::uint_ptr hdc,
     /* ---------- 4. 绘制 ---------- */
 
     rt->DrawBitmap(bmp.Get(), drawRect, 1.0f,
-        D2D1_INTERPOLATION_MODE_LINEAR,
+        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
         D2D1::RectF(0, 0, imgW, imgH));
 
 }
@@ -7239,7 +7248,7 @@ void VirtualDoc::update_doc(int client_h)
 
     }
 
-    if (offsetY > static_cast<float>(m_height - client_h*2.0f))
+    if (offsetY > m_height - static_cast<float>(client_h)*3.0f)
     {
         insert_next_chapter();
 
